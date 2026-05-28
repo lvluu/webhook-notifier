@@ -1,0 +1,21 @@
+# Agent harness state (local)
+.omc/
+.agents/
+
+# Build artifacts
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Env
+.env
+.env.local
