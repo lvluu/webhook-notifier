@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/retry"
+	"github.com/lvluu/webhook-notifier/internal/signer"
 )
 
 // Delivery is the unit of work the Worker drives to terminal state.
@@ -22,15 +24,16 @@ type Delivery struct {
 	URL           string
 	Body          []byte
 	EventType     string
+	Secret        string
 	AttemptNumber int
 }
 
 // Worker performs HTTP delivery of a single Delivery.
 //
-// The walking skeleton intentionally has no Scheduler, RetryPolicy, Signer,
-// or per-host HostLimiter — those collaborators land in subsequent slices
-// (#5-#8). The struct exists so those slices can add fields without
-// changing this package's public surface.
+// The walking skeleton intentionally has no Scheduler or per-host
+// HostLimiter — those collaborators land in subsequent slices (#5-#8).
+// The struct exists so those slices can add fields without changing
+// this package's public surface.
 type Worker struct {
 	HTTP        *http.Client
 	RetryPolicy retry.RetryPolicy
@@ -45,7 +48,8 @@ func New() *Worker {
 }
 
 // Deliver POSTs the Delivery's Body to its URL and returns the response
-// status code. No retry, no signing, no fairness — the skeleton path.
+// status code. No retry, no fairness — the skeleton path. Signing is
+// applied when the Delivery carries a Secret.
 func (w *Worker) Deliver(ctx context.Context, d Delivery) (int, error) {
 	resp, err := w.Send(ctx, d)
 	if err != nil {
@@ -75,6 +79,11 @@ func (w *Worker) Send(ctx context.Context, d Delivery) (*http.Response, error) {
 	if d.AttemptNumber > 0 {
 		req.Header.Set("X-Attempt-Number", fmt.Sprintf("%d", d.AttemptNumber))
 	}
+	if d.Secret != "" {
+		ts := time.Now()
+		req.Header.Set("X-Signature-Timestamp", strconv.FormatInt(ts.Unix(), 10))
+		req.Header.Set("X-Signature-256", signer.Sign([]byte(d.Secret), d.Body, ts))
+	}
 
 	resp, err := w.HTTP.Do(req)
 	if err != nil {
@@ -99,6 +108,7 @@ func (w *Worker) Process(ctx context.Context, store *outbox.Store, d outbox.Deli
 		URL:           d.URL,
 		Body:          d.Payload,
 		EventType:     d.EventType,
+		Secret:        d.Secret,
 		AttemptNumber: d.AttemptNumber,
 	})
 	duration := time.Since(started)
