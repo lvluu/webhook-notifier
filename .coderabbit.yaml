@@ -1,0 +1,67 @@
+# https://docs.coderabbit.ai/reference/yaml-template
+language: en-US
+early_access: false
+tone_instructions: |
+  Be terse and technically precise. Focus on correctness, concurrency safety,
+  and Go idioms. Skip stylistic nits already covered by gofmt/golangci-lint.
+
+reviews:
+  profile: assertive            # surface higher-signal findings, not every nit
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches: ["main"]
+  path_filters:
+    - "!**/*.md"                # docs/ADRs/CONTEXT reviewed by humans
+    - "!docs/**"
+    - "!bench/results/**"       # committed scenario outputs, not source
+    - "!**/*.pdf"
+    - "!skills-lock.json"
+    - "!.agents/**"
+
+  path_instructions:
+    - path: "internal/scheduler/**"
+      instructions: |
+        This package owns the fairness contract (ADR-0001). Flag any change
+        that leaks round-robin assumptions into the Scheduler interface or
+        couples it to a specific queue source. The interface must stay
+        swappable with a DRR implementation.
+
+    - path: "internal/retry/**"
+      instructions: |
+        RetryPolicy is a pure function (ADR-0003). Flag any I/O, time.Now,
+        or shared state added here. Backoff is decorrelated jitter; flag
+        any change that turns it into full jitter or exponential without
+        jitter without a corresponding ADR update.
+
+    - path: "internal/outbox/**"
+      instructions: |
+        Claim uses SELECT ... FOR UPDATE SKIP LOCKED (ADR-0002). Flag any
+        claim path that omits the row lock, the SKIP LOCKED clause, or the
+        transaction boundary — duplicate delivery is a correctness bug.
+
+    - path: "internal/worker/**"
+      instructions: |
+        The worker is the integration point for Signer, RetryPolicy,
+        Scheduler, and the per-host limiter. Flag any path that bypasses
+        the per-host limiter, signs with a stale timestamp on retry, or
+        mutates Delivery state outside a transaction.
+
+    - path: "**/*_test.go"
+      instructions: |
+        Tests target external behavior, not implementation details. Flag
+        tests that assert on private fields, mock the standard library,
+        or depend on real network/time without injection.
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  opt_out: false
+  learnings:
+    scope: local
