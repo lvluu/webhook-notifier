@@ -112,9 +112,26 @@ git clone <repo>
 cd flodesk-home-assignment
 git config user.name "lvluu"
 git config user.email "luuvanloi@duck.com"
+
+# Optional: restore the agent skill set used in this project from skills-lock.json
+# (only needed if you want the same Matt Pocock skills available to your agent here)
+npx -y skills@latest experimental_install
+
 just up && just migrate && just test
 gh issue list --label ready-for-agent --state open   # see what's next
 ```
+
+### Agent skills
+
+This repo uses a pinned set of Matt Pocock engineering/productivity skills (`to-prd`, `to-issues`, `grill-with-docs`, `triage`, `tdd`, etc.) declared in `skills-lock.json`. The lockfile pins each skill's source repo, path, and content hash so the same set is reproducible across machines.
+
+```bash
+npx -y skills@latest experimental_install   # restore from skills-lock.json
+npx -y skills@latest list                   # see what's installed
+npx -y skills@latest update                 # bump to latest + refresh lock
+```
+
+Per-repo agent configuration (issue tracker, triage labels, domain doc layout) lives in [CLAUDE.md](CLAUDE.md) and [docs/agents/](docs/agents/). Re-run `/setup-matt-pocock-skills` only if you want to switch issue tracker or label vocabulary.
 
 ## CI
 
