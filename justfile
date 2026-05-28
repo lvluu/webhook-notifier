@@ -19,10 +19,22 @@ down:
 
 # apply migrations
 migrate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! compgen -G "./migrations/*.sql" >/dev/null; then
+        echo "No SQL migrations found; skipping."
+        exit 0
+    fi
     {{migrate}} -path ./migrations -database "{{database_url}}" up
 
 # roll back one migration step
 migrate-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! compgen -G "./migrations/*.sql" >/dev/null; then
+        echo "No SQL migrations found; skipping."
+        exit 0
+    fi
     {{migrate}} -path ./migrations -database "{{database_url}}" down 1
 
 # build all binaries
@@ -38,10 +50,10 @@ lint:
     #!/usr/bin/env bash
     set -euo pipefail
     GOBIN=$(go env GOPATH)/bin
-    if ! command -v golangci-lint >/dev/null && [[ ! -x "$GOBIN/golangci-lint" ]]; then
+    if [[ ! -x "$GOBIN/golangci-lint" ]] || ! "$GOBIN/golangci-lint" --version | grep -q 'version 1\.64\.5'; then
         go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.5
     fi
-    PATH="$GOBIN:$PATH" golangci-lint run
+    "$GOBIN/golangci-lint" run
 
 # tidy go.mod
 tidy:
