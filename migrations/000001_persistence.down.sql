@@ -1,0 +1,6 @@
+DROP TABLE IF EXISTS dead_letters;
+DROP TABLE IF EXISTS delivery_attempts;
+DROP TABLE IF EXISTS deliveries;
+DROP TABLE IF EXISTS webhooks;
+DROP TABLE IF EXISTS events;
+DROP EXTENSION IF EXISTS pgcrypto;
