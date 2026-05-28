@@ -35,8 +35,13 @@ test:
 
 # run golangci-lint (installs locally if missing)
 lint:
-    @command -v golangci-lint >/dev/null || go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.61.0
-    golangci-lint run
+    #!/usr/bin/env bash
+    set -euo pipefail
+    GOBIN=$(go env GOPATH)/bin
+    if ! command -v golangci-lint >/dev/null && [[ ! -x "$GOBIN/golangci-lint" ]]; then
+        go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.5
+    fi
+    PATH="$GOBIN:$PATH" golangci-lint run
 
 # tidy go.mod
 tidy:
