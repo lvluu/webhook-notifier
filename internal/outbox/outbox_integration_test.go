@@ -10,13 +10,16 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/lib/pq"
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
+	"github.com/lvluu/webhook-notifier/internal/retry"
 	"github.com/lvluu/webhook-notifier/internal/worker"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -243,6 +246,196 @@ func TestClaimNextRecoversStaleInFlightDelivery(t *testing.T) {
 	}
 }
 
+func TestProcessRetryableFailureSchedulesRetry(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	insertWebhook(t, ctx, db, "cus_retry", srv.URL, true, "subscriber.created")
+	submitted, err := ingest.New(db).Submit(ctx, ingest.Event{
+		CustomerID: "cus_retry",
+		Type:       "subscriber.created",
+		Payload:    []byte(`{"subscriber_id":"sub_retry"}`),
+	})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	store := outbox.New(db)
+	claimed, ok, err := store.ClaimNext(ctx, "cus_retry")
+	if err != nil {
+		t.Fatalf("ClaimNext: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext: got no delivery, want one")
+	}
+
+	w := worker.New()
+	w.RetryPolicy = retry.New(retry.Config{BaseDelay: time.Millisecond, CapDelay: time.Millisecond})
+	if err := w.Process(ctx, store, claimed); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+
+	assertDeliveryStatus(t, ctx, db, submitted.DeliveryIDs[0], string(outbox.StatusFailedRetry))
+	assertAttemptCount(t, ctx, db, submitted.DeliveryIDs[0], 1)
+	assertLastError(t, ctx, db, submitted.DeliveryIDs[0], retry.ReasonRetryable5xx)
+}
+
+func TestProcessRetryableFailureUsesPreviousRetryDelay(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	insertWebhook(t, ctx, db, "cus_backoff", srv.URL, true, "subscriber.created")
+	submitted, err := ingest.New(db).Submit(ctx, ingest.Event{
+		CustomerID: "cus_backoff",
+		Type:       "subscriber.created",
+		Payload:    []byte(`{"subscriber_id":"sub_backoff"}`),
+	})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	store := outbox.New(db)
+	w := worker.New()
+	w.RetryPolicy = retry.New(retry.Config{BaseDelay: 10 * time.Millisecond, CapDelay: 250 * time.Millisecond})
+
+	first, ok, err := store.ClaimNext(ctx, "cus_backoff")
+	if err != nil {
+		t.Fatalf("first ClaimNext: %v", err)
+	}
+	if !ok {
+		t.Fatal("first ClaimNext: got no delivery, want one")
+	}
+	if err := w.Process(ctx, store, first); err != nil {
+		t.Fatalf("first Process: %v", err)
+	}
+	firstDelay := scheduledRetryDelay(t, ctx, db, submitted.DeliveryIDs[0])
+	if firstDelay < 10*time.Millisecond {
+		t.Fatalf("first retry delay: got %s, want at least 10ms", firstDelay)
+	}
+
+	second := waitForClaim(t, ctx, store, "cus_backoff", 2*time.Second)
+	if second.PreviousDelay <= 0 {
+		t.Fatalf("second previous delay: got %s, want positive", second.PreviousDelay)
+	}
+	if err := w.Process(ctx, store, second); err != nil {
+		t.Fatalf("second Process: %v", err)
+	}
+
+	secondDelay := scheduledRetryDelay(t, ctx, db, submitted.DeliveryIDs[0])
+	if secondDelay <= firstDelay {
+		t.Fatalf("second retry delay: got %s, want greater than first delay %s", secondDelay, firstDelay)
+	}
+}
+
+func TestProcessTerminalFailureWritesDeadLetter(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	insertWebhook(t, ctx, db, "cus_dead", srv.URL, true, "subscriber.created")
+	submitted, err := ingest.New(db).Submit(ctx, ingest.Event{
+		CustomerID: "cus_dead",
+		Type:       "subscriber.created",
+		Payload:    []byte(`{"subscriber_id":"sub_dead"}`),
+	})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	store := outbox.New(db)
+	claimed, ok, err := store.ClaimNext(ctx, "cus_dead")
+	if err != nil {
+		t.Fatalf("ClaimNext: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext: got no delivery, want one")
+	}
+	if err := worker.New().Process(ctx, store, claimed); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+
+	deliveryID := submitted.DeliveryIDs[0]
+	assertDeliveryStatus(t, ctx, db, deliveryID, string(outbox.StatusDead))
+	assertAttemptCount(t, ctx, db, deliveryID, 1)
+	assertDeadLetter(t, ctx, db, deliveryID, retry.ReasonTerminal4xx, 1)
+}
+
+func TestProcessFlakyReceiverEventuallySucceedsAllDeliveries(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	var totalRequests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestNumber := totalRequests.Add(1)
+		attemptNumber, _ := strconv.Atoi(r.Header.Get("X-Attempt-Number"))
+		if attemptNumber == 1 && requestNumber%10 < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	const deliveryCount = 40
+	for i := 0; i < deliveryCount; i++ {
+		insertWebhook(t, ctx, db, "cus_flaky", srv.URL, true, "subscriber.created")
+	}
+	submitted, err := ingest.New(db).Submit(ctx, ingest.Event{
+		CustomerID: "cus_flaky",
+		Type:       "subscriber.created",
+		Payload:    []byte(`{"subscriber_id":"sub_flaky"}`),
+	})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if len(submitted.DeliveryIDs) != deliveryCount {
+		t.Fatalf("delivery count: got %d, want %d", len(submitted.DeliveryIDs), deliveryCount)
+	}
+
+	store := outbox.New(db)
+	w := worker.New()
+	w.RetryPolicy = retry.New(retry.Config{BaseDelay: time.Millisecond, CapDelay: time.Millisecond})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for succeededCount(t, ctx, db) < deliveryCount {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for all deliveries to succeed")
+		}
+
+		claimed, ok, err := store.ClaimNext(ctx, "cus_flaky")
+		if err != nil {
+			t.Fatalf("ClaimNext: %v", err)
+		}
+		if !ok {
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		if err := w.Process(ctx, store, claimed); err != nil {
+			t.Fatalf("Process delivery %s: %v", claimed.ID, err)
+		}
+	}
+
+	assertStatusCount(t, ctx, db, string(outbox.StatusSucceeded), deliveryCount)
+	assertStatusCount(t, ctx, db, string(outbox.StatusDead), 0)
+	if totalRequests.Load() <= deliveryCount {
+		t.Fatalf("receiver request count: got %d, want retries above %d", totalRequests.Load(), deliveryCount)
+	}
+}
+
 func TestStoreValidatesRequiredIDs(t *testing.T) {
 	t.Parallel()
 
@@ -262,6 +455,18 @@ func TestStoreValidatesRequiredIDs(t *testing.T) {
 			name: "mark succeeded requires delivery ID",
 			run: func(ctx context.Context) error {
 				return store.MarkSucceeded(ctx, "", http.StatusOK, time.Millisecond)
+			},
+		},
+		{
+			name: "mark retry requires delivery ID",
+			run: func(ctx context.Context) error {
+				return store.MarkRetry(ctx, "", http.StatusInternalServerError, retry.ReasonRetryable5xx, time.Millisecond, time.Millisecond)
+			},
+		},
+		{
+			name: "mark dead requires delivery ID",
+			run: func(ctx context.Context) error {
+				return store.MarkDead(ctx, "", http.StatusNotFound, retry.ReasonTerminal4xx, retry.ReasonTerminal4xx, time.Millisecond)
 			},
 		},
 	}
@@ -396,4 +601,90 @@ func assertStatusCount(t *testing.T, ctx context.Context, db *sql.DB, status str
 	if got != want {
 		t.Fatalf("status %s count: got %d, want %d", status, got, want)
 	}
+}
+
+func assertLastError(t *testing.T, ctx context.Context, db *sql.DB, deliveryID, want string) {
+	t.Helper()
+
+	var got sql.NullString
+	err := db.QueryRowContext(ctx, `SELECT last_error FROM deliveries WHERE id = $1`, deliveryID).Scan(&got)
+	if err != nil {
+		t.Fatalf("select last_error: %v", err)
+	}
+	if !got.Valid || got.String != want {
+		t.Fatalf("last_error: got %q valid=%v, want %q", got.String, got.Valid, want)
+	}
+}
+
+func assertDeadLetter(t *testing.T, ctx context.Context, db *sql.DB, deliveryID, wantReason string, wantAttempts int) {
+	t.Helper()
+
+	var gotReason string
+	var gotAttempts int
+	err := db.QueryRowContext(ctx, `
+		SELECT reason, attempts
+		FROM dead_letters
+		WHERE delivery_id = $1
+	`, deliveryID).Scan(&gotReason, &gotAttempts)
+	if err != nil {
+		t.Fatalf("select dead letter: %v", err)
+	}
+	if gotReason != wantReason {
+		t.Fatalf("dead letter reason: got %q, want %q", gotReason, wantReason)
+	}
+	if gotAttempts != wantAttempts {
+		t.Fatalf("dead letter attempts: got %d, want %d", gotAttempts, wantAttempts)
+	}
+}
+
+func scheduledRetryDelay(t *testing.T, ctx context.Context, db *sql.DB, deliveryID string) time.Duration {
+	t.Helper()
+
+	var delayMillis int64
+	err := db.QueryRowContext(ctx, `
+		SELECT COALESCE(
+		    GREATEST(EXTRACT(EPOCH FROM (deliveries.next_attempt_at - delivery_attempts.sent_at)) * 1000, 0)::bigint,
+		    0
+		)
+		FROM deliveries
+		JOIN delivery_attempts ON delivery_attempts.delivery_id = deliveries.id
+		WHERE deliveries.id = $1
+		ORDER BY delivery_attempts.attempt_number DESC
+		LIMIT 1
+	`, deliveryID).Scan(&delayMillis)
+	if err != nil {
+		t.Fatalf("select scheduled retry delay: %v", err)
+	}
+
+	return time.Duration(delayMillis) * time.Millisecond
+}
+
+func waitForClaim(t *testing.T, ctx context.Context, store *outbox.Store, customerID string, timeout time.Duration) outbox.Delivery {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		delivery, ok, err := store.ClaimNext(ctx, customerID)
+		if err != nil {
+			t.Fatalf("ClaimNext: %v", err)
+		}
+		if ok {
+			return delivery
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting to claim delivery for %s", customerID)
+	return outbox.Delivery{}
+}
+
+func succeededCount(t *testing.T, ctx context.Context, db *sql.DB) int {
+	t.Helper()
+
+	var got int
+	err := db.QueryRowContext(ctx, `SELECT count(*) FROM deliveries WHERE status = 'succeeded'`).Scan(&got)
+	if err != nil {
+		t.Fatalf("count succeeded: %v", err)
+	}
+	return got
 }

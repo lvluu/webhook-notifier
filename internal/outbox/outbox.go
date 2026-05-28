@@ -20,8 +20,12 @@ const (
 	StatusPending DeliveryStatus = "pending"
 	// StatusInFlight means a worker has claimed the Delivery.
 	StatusInFlight DeliveryStatus = "in_flight"
+	// StatusFailedRetry means the Delivery is waiting for a retry.
+	StatusFailedRetry DeliveryStatus = "failed_retry"
 	// StatusSucceeded means the partner accepted the Delivery with 2xx.
 	StatusSucceeded DeliveryStatus = "succeeded"
+	// StatusDead means the Delivery reached a terminal failure.
+	StatusDead DeliveryStatus = "dead"
 )
 
 // Delivery is a claimed outbox row with enough data for the worker to POST it.
@@ -36,6 +40,7 @@ type Delivery struct {
 	Secret        string
 	Status        DeliveryStatus
 	AttemptNumber int
+	PreviousDelay time.Duration
 	NextAttemptAt time.Time
 	ClaimedAt     time.Time
 	LastError     sql.NullString
@@ -156,6 +161,7 @@ func (s *Store) markInFlight(ctx context.Context, tx *sql.Tx, deliveryID string)
 
 func loadDelivery(ctx context.Context, tx *sql.Tx, deliveryID string) (Delivery, error) {
 	var delivery Delivery
+	var previousDelayMillis sql.NullInt64
 	err := tx.QueryRowContext(ctx, `
 		SELECT
 		    deliveries.id,
@@ -172,7 +178,14 @@ func loadDelivery(ctx context.Context, tx *sql.Tx, deliveryID string) (Delivery,
 		    deliveries.claimed_at,
 		    deliveries.last_error,
 		    deliveries.created_at,
-		    deliveries.updated_at
+		    deliveries.updated_at,
+		    (
+		        SELECT GREATEST(EXTRACT(EPOCH FROM (deliveries.next_attempt_at - delivery_attempts.sent_at)) * 1000, 0)::bigint
+		        FROM delivery_attempts
+		        WHERE delivery_attempts.delivery_id = deliveries.id
+		        ORDER BY delivery_attempts.attempt_number DESC
+		        LIMIT 1
+		    ) AS previous_delay_millis
 		FROM deliveries
 		JOIN events ON events.id = deliveries.event_id
 		JOIN webhooks ON webhooks.id = deliveries.webhook_id
@@ -193,9 +206,13 @@ func loadDelivery(ctx context.Context, tx *sql.Tx, deliveryID string) (Delivery,
 		&delivery.LastError,
 		&delivery.CreatedAt,
 		&delivery.UpdatedAt,
+		&previousDelayMillis,
 	)
 	if err != nil {
 		return Delivery{}, fmt.Errorf("load claimed delivery: %w", err)
+	}
+	if previousDelayMillis.Valid {
+		delivery.PreviousDelay = time.Duration(previousDelayMillis.Int64) * time.Millisecond
 	}
 
 	return delivery, nil
@@ -255,4 +272,134 @@ func (s *Store) MarkSucceeded(ctx context.Context, deliveryID string, statusCode
 	}
 
 	return nil
+}
+
+// MarkRetry records a failed Attempt and schedules the Delivery for retry.
+func (s *Store) MarkRetry(ctx context.Context, deliveryID string, statusCode int, errorClass string, delay time.Duration, duration time.Duration) error {
+	if deliveryID == "" {
+		return fmt.Errorf("delivery_id is required")
+	}
+	if delay < 0 {
+		return fmt.Errorf("delay must be non-negative")
+	}
+
+	return s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int) error {
+		if err := insertAttempt(ctx, tx, deliveryID, attemptNumber, statusCode, errorClass, duration); err != nil {
+			return err
+		}
+
+		_, err := tx.ExecContext(ctx, `
+			UPDATE deliveries
+			SET status = 'failed_retry',
+			    next_attempt_at = now() + ($2 * interval '1 millisecond'),
+			    claimed_at = NULL,
+			    last_error = $3,
+			    updated_at = now()
+			WHERE id = $1
+		`, deliveryID, delay.Milliseconds(), nullIfEmpty(errorClass))
+		if err != nil {
+			return fmt.Errorf("mark delivery failed retry: %w", err)
+		}
+
+		return nil
+	})
+}
+
+// MarkDead records the final failed Attempt, moves the Delivery to dead, and
+// inserts a DLQ row with the terminal reason.
+func (s *Store) MarkDead(ctx context.Context, deliveryID string, statusCode int, errorClass string, reason string, duration time.Duration) error {
+	if deliveryID == "" {
+		return fmt.Errorf("delivery_id is required")
+	}
+	if reason == "" {
+		return fmt.Errorf("reason is required")
+	}
+
+	return s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int) error {
+		if err := insertAttempt(ctx, tx, deliveryID, attemptNumber, statusCode, errorClass, duration); err != nil {
+			return err
+		}
+
+		_, err := tx.ExecContext(ctx, `
+			UPDATE deliveries
+			SET status = 'dead',
+			    claimed_at = NULL,
+			    last_error = $2,
+			    updated_at = now()
+			WHERE id = $1
+		`, deliveryID, nullIfEmpty(errorClass))
+		if err != nil {
+			return fmt.Errorf("mark delivery dead: %w", err)
+		}
+
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO dead_letters (delivery_id, last_error, attempts, reason, final_at)
+			VALUES ($1, $2, $3, $4, now())
+			ON CONFLICT (delivery_id) DO UPDATE
+			SET last_error = EXCLUDED.last_error,
+			    attempts = EXCLUDED.attempts,
+			    reason = EXCLUDED.reason,
+			    final_at = EXCLUDED.final_at
+		`, deliveryID, nullIfEmpty(errorClass), attemptNumber, reason)
+		if err != nil {
+			return fmt.Errorf("insert dead letter: %w", err)
+		}
+
+		return nil
+	})
+}
+
+func (s *Store) withInFlightDelivery(ctx context.Context, deliveryID string, mutate func(*sql.Tx, int) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	var attemptNumber int
+	err = tx.QueryRowContext(ctx, `
+		SELECT attempt_count
+		FROM deliveries
+		WHERE id = $1
+		  AND status = 'in_flight'
+		FOR UPDATE
+	`, deliveryID).Scan(&attemptNumber)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("delivery %s is not in flight", deliveryID)
+	}
+	if err != nil {
+		return fmt.Errorf("load in-flight delivery: %w", err)
+	}
+
+	if err := mutate(tx, attemptNumber); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delivery mutation: %w", err)
+	}
+
+	return nil
+}
+
+func insertAttempt(ctx context.Context, tx *sql.Tx, deliveryID string, attemptNumber int, statusCode int, errorClass string, duration time.Duration) error {
+	var nullableStatus sql.NullInt64
+	if statusCode > 0 {
+		nullableStatus = sql.NullInt64{Int64: int64(statusCode), Valid: true}
+	}
+
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO delivery_attempts (delivery_id, attempt_number, status_code, error_class, duration_ms, sent_at)
+		VALUES ($1, $2, $3, $4, $5, now())
+	`, deliveryID, attemptNumber, nullableStatus, nullIfEmpty(errorClass), duration.Milliseconds())
+	if err != nil {
+		return fmt.Errorf("insert delivery attempt: %w", err)
+	}
+
+	return nil
+}
+
+func nullIfEmpty(value string) sql.NullString {
+	return sql.NullString{String: value, Valid: value != ""}
 }
