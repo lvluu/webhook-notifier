@@ -83,45 +83,63 @@ func New(db *sql.DB, opts ...Option) *Store {
 // ClaimNext claims one ready Delivery for customerID using SELECT FOR UPDATE
 // SKIP LOCKED. It returns ok=false when no ready Delivery exists.
 func (s *Store) ClaimNext(ctx context.Context, customerID string) (delivery Delivery, ok bool, err error) {
+	deliveries, err := s.ClaimNextN(ctx, customerID, 1)
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	if len(deliveries) == 0 {
+		return Delivery{}, false, nil
+	}
+	return deliveries[0], true, nil
+}
+
+// ClaimNextN claims up to limit ready Deliveries for customerID using SELECT
+// FOR UPDATE SKIP LOCKED. Returns an empty slice when no ready Delivery exists.
+func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([]Delivery, error) {
 	if customerID == "" {
-		return Delivery{}, false, fmt.Errorf("customer_id is required")
+		return nil, fmt.Errorf("customer_id is required")
+	}
+	if limit < 1 {
+		return nil, fmt.Errorf("limit must be >= 1")
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return Delivery{}, false, fmt.Errorf("begin transaction: %w", err)
+		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
 	defer func() {
 		_ = tx.Rollback()
 	}()
 
-	deliveryID, ok, err := s.selectClaimableDeliveryID(ctx, tx, customerID)
+	deliveryIDs, err := s.selectClaimableDeliveryIDs(ctx, tx, customerID, limit)
 	if err != nil {
-		return Delivery{}, false, err
+		return nil, err
 	}
-	if !ok {
-		return Delivery{}, false, nil
+	if len(deliveryIDs) == 0 {
+		return nil, nil
 	}
 
-	if err := s.markInFlight(ctx, tx, deliveryID); err != nil {
-		return Delivery{}, false, err
-	}
-
-	delivery, err = loadDelivery(ctx, tx, deliveryID)
-	if err != nil {
-		return Delivery{}, false, err
+	var deliveries []Delivery
+	for _, id := range deliveryIDs {
+		if err := s.markInFlight(ctx, tx, id); err != nil {
+			return nil, err
+		}
+		delivery, err := loadDelivery(ctx, tx, id)
+		if err != nil {
+			return nil, err
+		}
+		deliveries = append(deliveries, delivery)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return Delivery{}, false, fmt.Errorf("commit claim: %w", err)
+		return nil, fmt.Errorf("commit claim: %w", err)
 	}
 
-	return delivery, true, nil
+	return deliveries, nil
 }
 
-func (s *Store) selectClaimableDeliveryID(ctx context.Context, tx *sql.Tx, customerID string) (string, bool, error) {
-	var deliveryID string
-	err := tx.QueryRowContext(ctx, `
+func (s *Store) selectClaimableDeliveryIDs(ctx context.Context, tx *sql.Tx, customerID string, limit int) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `
 		SELECT id
 		FROM deliveries
 		WHERE customer_id = $1
@@ -131,16 +149,26 @@ func (s *Store) selectClaimableDeliveryID(ctx context.Context, tx *sql.Tx, custo
 		  )
 		ORDER BY next_attempt_at, created_at, id
 		FOR UPDATE SKIP LOCKED
-		LIMIT 1
-	`, customerID, s.claimLease.Milliseconds()).Scan(&deliveryID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
+		LIMIT $3
+	`, customerID, s.claimLease.Milliseconds(), limit)
 	if err != nil {
-		return "", false, fmt.Errorf("select delivery for claim: %w", err)
+		return nil, fmt.Errorf("select deliveries for claim: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan delivery id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate delivery ids: %w", err)
 	}
 
-	return deliveryID, true, nil
+	return ids, nil
 }
 
 func (s *Store) markInFlight(ctx context.Context, tx *sql.Tx, deliveryID string) error {

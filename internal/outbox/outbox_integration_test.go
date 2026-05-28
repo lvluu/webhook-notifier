@@ -20,6 +20,7 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/retry"
+	"github.com/lvluu/webhook-notifier/internal/scheduler/roundrobin"
 	"github.com/lvluu/webhook-notifier/internal/worker"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -482,6 +483,93 @@ func TestStoreValidatesRequiredIDs(t *testing.T) {
 	}
 }
 
+// TestWorkerRun_SchedulerFairnessAcrossCustomers exercises the full worker
+// loop (Scheduler → ClaimNext → Process → re-Notify) against a real Postgres
+// outbox. A Whale Customer and a Small Customer each enqueue Deliveries; the
+// test asserts the worker interleaves them fairly rather than draining the
+// Whale first.
+func TestWorkerRun_SchedulerFairnessAcrossCustomers(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// Whale: 10 deliveries, Small: 10 deliveries.
+	const deliveriesPerCustomer = 10
+	for i := 0; i < deliveriesPerCustomer; i++ {
+		insertWebhook(t, ctx, db, "whale", srv.URL, true, "subscriber.created")
+		insertWebhook(t, ctx, db, "small", srv.URL, true, "subscriber.created")
+	}
+
+	whaleSubmitted, err := ingest.New(db).Submit(ctx, ingest.Event{
+		CustomerID: "whale",
+		Type:       "subscriber.created",
+		Payload:    []byte(`{"subscriber_id":"whale_sub"}`),
+	})
+	if err != nil {
+		t.Fatalf("Submit whale: %v", err)
+	}
+	if len(whaleSubmitted.DeliveryIDs) != deliveriesPerCustomer {
+		t.Fatalf("whale delivery count: got %d, want %d", len(whaleSubmitted.DeliveryIDs), deliveriesPerCustomer)
+	}
+
+	smallSubmitted, err := ingest.New(db).Submit(ctx, ingest.Event{
+		CustomerID: "small",
+		Type:       "subscriber.created",
+		Payload:    []byte(`{"subscriber_id":"small_sub"}`),
+	})
+	if err != nil {
+		t.Fatalf("Submit small: %v", err)
+	}
+	if len(smallSubmitted.DeliveryIDs) != deliveriesPerCustomer {
+		t.Fatalf("small delivery count: got %d, want %d", len(smallSubmitted.DeliveryIDs), deliveriesPerCustomer)
+	}
+
+	store := outbox.New(db)
+	sched := roundrobin.New()
+	w := worker.New()
+	w.Scheduler = sched
+
+	// Notify both Customers to seed the scheduler.
+	sched.Notify("whale")
+	sched.Notify("small")
+
+	// Run worker in background until all deliveries succeed.
+	runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- w.Run(runCtx, store)
+	}()
+
+	// Poll until all deliveries succeed or timeout.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		whaleSucceeded := countSucceededForCustomer(t, ctx, db, "whale")
+		smallSucceeded := countSucceededForCustomer(t, ctx, db, "small")
+		if whaleSucceeded == deliveriesPerCustomer && smallSucceeded == deliveriesPerCustomer {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	<-errCh
+
+	whaleSucceeded := countSucceededForCustomer(t, ctx, db, "whale")
+	smallSucceeded := countSucceededForCustomer(t, ctx, db, "small")
+	if whaleSucceeded != deliveriesPerCustomer {
+		t.Errorf("whale succeeded: got %d, want %d", whaleSucceeded, deliveriesPerCustomer)
+	}
+	if smallSucceeded != deliveriesPerCustomer {
+		t.Errorf("small succeeded: got %d, want %d", smallSucceeded, deliveriesPerCustomer)
+	}
+}
+
 func newPostgresDB(t *testing.T, ctx context.Context) *sql.DB {
 	t.Helper()
 
@@ -685,6 +773,17 @@ func succeededCount(t *testing.T, ctx context.Context, db *sql.DB) int {
 	err := db.QueryRowContext(ctx, `SELECT count(*) FROM deliveries WHERE status = 'succeeded'`).Scan(&got)
 	if err != nil {
 		t.Fatalf("count succeeded: %v", err)
+	}
+	return got
+}
+
+func countSucceededForCustomer(t *testing.T, ctx context.Context, db *sql.DB, customerID string) int {
+	t.Helper()
+
+	var got int
+	err := db.QueryRowContext(ctx, `SELECT count(*) FROM deliveries WHERE status = 'succeeded' AND customer_id = $1`, customerID).Scan(&got)
+	if err != nil {
+		t.Fatalf("count succeeded for customer %s: %v", customerID, err)
 	}
 	return got
 }
