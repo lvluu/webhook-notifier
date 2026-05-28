@@ -49,26 +49,39 @@ type Store struct {
 	claimLease time.Duration
 }
 
-// New returns an outbox store backed by db.
-func New(db *sql.DB) *Store {
-	return NewWithClaimLease(db, DefaultClaimLease)
+// Option configures a Store.
+type Option func(*Store)
+
+// WithClaimLease configures how long an in-flight Delivery can remain claimed
+// before another worker may recover it.
+func WithClaimLease(claimLease time.Duration) Option {
+	return func(s *Store) {
+		if claimLease > 0 {
+			s.claimLease = claimLease
+		}
+	}
 }
 
-// NewWithClaimLease returns an outbox store with an explicit stale-claim lease.
-func NewWithClaimLease(db *sql.DB, claimLease time.Duration) *Store {
-	if claimLease <= 0 {
-		claimLease = DefaultClaimLease
+// New returns an outbox store backed by db.
+func New(db *sql.DB, opts ...Option) *Store {
+	store := &Store{
+		db:         db,
+		claimLease: DefaultClaimLease,
+	}
+	for _, opt := range opts {
+		opt(store)
 	}
 
-	return &Store{
-		db:         db,
-		claimLease: claimLease,
-	}
+	return store
 }
 
 // ClaimNext claims one ready Delivery for customerID using SELECT FOR UPDATE
 // SKIP LOCKED. It returns ok=false when no ready Delivery exists.
 func (s *Store) ClaimNext(ctx context.Context, customerID string) (delivery Delivery, ok bool, err error) {
+	if customerID == "" {
+		return Delivery{}, false, fmt.Errorf("customer_id is required")
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Delivery{}, false, fmt.Errorf("begin transaction: %w", err)
@@ -77,8 +90,33 @@ func (s *Store) ClaimNext(ctx context.Context, customerID string) (delivery Deli
 		_ = tx.Rollback()
 	}()
 
+	deliveryID, ok, err := s.selectClaimableDeliveryID(ctx, tx, customerID)
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	if !ok {
+		return Delivery{}, false, nil
+	}
+
+	if err := s.markInFlight(ctx, tx, deliveryID); err != nil {
+		return Delivery{}, false, err
+	}
+
+	delivery, err = loadDelivery(ctx, tx, deliveryID)
+	if err != nil {
+		return Delivery{}, false, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Delivery{}, false, fmt.Errorf("commit claim: %w", err)
+	}
+
+	return delivery, true, nil
+}
+
+func (s *Store) selectClaimableDeliveryID(ctx context.Context, tx *sql.Tx, customerID string) (string, bool, error) {
 	var deliveryID string
-	err = tx.QueryRowContext(ctx, `
+	err := tx.QueryRowContext(ctx, `
 		SELECT id
 		FROM deliveries
 		WHERE customer_id = $1
@@ -91,13 +129,17 @@ func (s *Store) ClaimNext(ctx context.Context, customerID string) (delivery Deli
 		LIMIT 1
 	`, customerID, s.claimLease.Milliseconds()).Scan(&deliveryID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Delivery{}, false, nil
+		return "", false, nil
 	}
 	if err != nil {
-		return Delivery{}, false, fmt.Errorf("select delivery for claim: %w", err)
+		return "", false, fmt.Errorf("select delivery for claim: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx, `
+	return deliveryID, true, nil
+}
+
+func (s *Store) markInFlight(ctx context.Context, tx *sql.Tx, deliveryID string) error {
+	_, err := tx.ExecContext(ctx, `
 		UPDATE deliveries
 		SET status = 'in_flight',
 		    attempt_count = attempt_count + 1,
@@ -106,10 +148,15 @@ func (s *Store) ClaimNext(ctx context.Context, customerID string) (delivery Deli
 		WHERE id = $1
 	`, deliveryID)
 	if err != nil {
-		return Delivery{}, false, fmt.Errorf("mark delivery in flight: %w", err)
+		return fmt.Errorf("mark delivery in flight: %w", err)
 	}
 
-	err = tx.QueryRowContext(ctx, `
+	return nil
+}
+
+func loadDelivery(ctx context.Context, tx *sql.Tx, deliveryID string) (Delivery, error) {
+	var delivery Delivery
+	err := tx.QueryRowContext(ctx, `
 		SELECT
 		    deliveries.id,
 		    deliveries.event_id,
@@ -148,19 +195,19 @@ func (s *Store) ClaimNext(ctx context.Context, customerID string) (delivery Deli
 		&delivery.UpdatedAt,
 	)
 	if err != nil {
-		return Delivery{}, false, fmt.Errorf("load claimed delivery: %w", err)
+		return Delivery{}, fmt.Errorf("load claimed delivery: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return Delivery{}, false, fmt.Errorf("commit claim: %w", err)
-	}
-
-	return delivery, true, nil
+	return delivery, nil
 }
 
 // MarkSucceeded records the successful Attempt and moves the Delivery to
 // succeeded.
 func (s *Store) MarkSucceeded(ctx context.Context, deliveryID string, statusCode int, duration time.Duration) error {
+	if deliveryID == "" {
+		return fmt.Errorf("delivery_id is required")
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)

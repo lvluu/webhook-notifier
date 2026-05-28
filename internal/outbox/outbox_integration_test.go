@@ -202,7 +202,7 @@ func TestClaimNextRecoversStaleInFlightDelivery(t *testing.T) {
 		t.Fatalf("delivery count: got %d, want 1", len(submitted.DeliveryIDs))
 	}
 
-	store := outbox.NewWithClaimLease(db, time.Hour)
+	store := outbox.New(db, outbox.WithClaimLease(time.Hour))
 	first, ok, err := store.ClaimNext(ctx, "cus_recover")
 	if err != nil {
 		t.Fatalf("first ClaimNext: %v", err)
@@ -240,6 +240,40 @@ func TestClaimNextRecoversStaleInFlightDelivery(t *testing.T) {
 	}
 	if recovered.AttemptNumber != 2 {
 		t.Fatalf("recovered attempt number: got %d, want 2", recovered.AttemptNumber)
+	}
+}
+
+func TestStoreValidatesRequiredIDs(t *testing.T) {
+	t.Parallel()
+
+	store := outbox.New(nil)
+	tests := []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{
+			name: "claim requires customer ID",
+			run: func(ctx context.Context) error {
+				_, _, err := store.ClaimNext(ctx, "")
+				return err
+			},
+		},
+		{
+			name: "mark succeeded requires delivery ID",
+			run: func(ctx context.Context) error {
+				return store.MarkSucceeded(ctx, "", http.StatusOK, time.Millisecond)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if err := tt.run(context.Background()); err == nil {
+				t.Fatal("expected validation error, got nil")
+			}
+		})
 	}
 }
 
