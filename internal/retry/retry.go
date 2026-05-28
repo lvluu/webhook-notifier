@@ -1,0 +1,172 @@
+package retry
+
+import (
+	"context"
+	"errors"
+	"hash/fnv"
+	"math"
+	"net"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	DefaultMaxAttempts = 8
+	DefaultBaseDelay   = time.Second
+	DefaultCapDelay    = 5 * time.Minute
+
+	ReasonSucceeded    = "succeeded"
+	ReasonExhausted    = "exhausted"
+	ReasonRetryAfter   = "retry_after"
+	ReasonRetryable408 = "retryable_408"
+	ReasonRetryable429 = "retryable_429"
+	ReasonRetryable5xx = "retryable_5xx"
+	ReasonNetworkError = "network_error"
+	ReasonTimeout      = "timeout"
+	ReasonTerminal4xx  = "terminal_4xx"
+)
+
+// Config tunes RetryPolicy while preserving ADR-0003 defaults.
+type Config struct {
+	MaxAttempts int
+	BaseDelay   time.Duration
+	CapDelay    time.Duration
+}
+
+// RetryPolicy classifies delivery Attempts and computes retry delay.
+type RetryPolicy struct {
+	maxAttempts int
+	baseDelay   time.Duration
+	capDelay    time.Duration
+}
+
+// New returns a RetryPolicy using ADR-0003 defaults for zero-valued config.
+func New(config Config) RetryPolicy {
+	policy := RetryPolicy{
+		maxAttempts: config.MaxAttempts,
+		baseDelay:   config.BaseDelay,
+		capDelay:    config.CapDelay,
+	}
+	if policy.maxAttempts <= 0 {
+		policy.maxAttempts = DefaultMaxAttempts
+	}
+	if policy.baseDelay <= 0 {
+		policy.baseDelay = DefaultBaseDelay
+	}
+	if policy.capDelay <= 0 {
+		policy.capDelay = DefaultCapDelay
+	}
+	if policy.capDelay < policy.baseDelay {
+		policy.capDelay = policy.baseDelay
+	}
+
+	return policy
+}
+
+// Next returns the next retry delay, whether the outcome is terminal, and the
+// reason that should be recorded for audit/DLQ classification.
+func (p RetryPolicy) Next(attempt int, prevDelay time.Duration, resp *http.Response, err error) (time.Duration, bool, string) {
+	if p.maxAttempts <= 0 || p.baseDelay <= 0 || p.capDelay <= 0 {
+		p = New(Config{
+			MaxAttempts: p.maxAttempts,
+			BaseDelay:   p.baseDelay,
+			CapDelay:    p.capDelay,
+		})
+	}
+
+	if resp != nil && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		return 0, true, ReasonSucceeded
+	}
+
+	reason, retryable := p.classify(resp, err)
+	if !retryable {
+		return 0, true, reason
+	}
+	if attempt >= p.maxAttempts {
+		return 0, true, ReasonExhausted
+	}
+	if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+		if delay, ok := retryAfterDelay(resp.Header.Get("Retry-After")); ok {
+			return delay, false, ReasonRetryAfter
+		}
+	}
+
+	return p.decorrelatedJitter(attempt, prevDelay, reason), false, reason
+}
+
+func (p RetryPolicy) classify(resp *http.Response, err error) (string, bool) {
+	if err != nil {
+		if isTimeout(err) {
+			return ReasonTimeout, true
+		}
+		return ReasonNetworkError, true
+	}
+	if resp == nil {
+		return ReasonNetworkError, true
+	}
+
+	switch {
+	case resp.StatusCode == http.StatusRequestTimeout:
+		return ReasonRetryable408, true
+	case resp.StatusCode == http.StatusTooManyRequests:
+		return ReasonRetryable429, true
+	case resp.StatusCode >= http.StatusInternalServerError && resp.StatusCode <= 599:
+		return ReasonRetryable5xx, true
+	case resp.StatusCode >= http.StatusBadRequest && resp.StatusCode <= 499:
+		return ReasonTerminal4xx, false
+	default:
+		return ReasonTerminal4xx, false
+	}
+}
+
+func (p RetryPolicy) decorrelatedJitter(attempt int, prevDelay time.Duration, reason string) time.Duration {
+	high := p.baseDelay
+	if prevDelay > 0 {
+		high = prevDelay * 3
+	}
+	if high < p.baseDelay {
+		high = p.baseDelay
+	}
+	if high > p.capDelay {
+		high = p.capDelay
+	}
+	if high == p.baseDelay {
+		return p.baseDelay
+	}
+
+	span := high - p.baseDelay
+	fraction := deterministicFraction(attempt, prevDelay, reason)
+	return p.baseDelay + time.Duration(math.Round(float64(span)*fraction))
+}
+
+func deterministicFraction(attempt int, prevDelay time.Duration, reason string) float64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(strconv.Itoa(attempt)))
+	_, _ = h.Write([]byte("|"))
+	_, _ = h.Write([]byte(prevDelay.String()))
+	_, _ = h.Write([]byte("|"))
+	_, _ = h.Write([]byte(reason))
+	return float64(h.Sum64()) / float64(math.MaxUint64)
+}
+
+func retryAfterDelay(value string) (time.Duration, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds < 0 {
+		return 0, false
+	}
+	return time.Duration(seconds) * time.Second, true
+}
+
+func isTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
