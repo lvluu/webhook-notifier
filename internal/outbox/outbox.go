@@ -12,6 +12,10 @@ import (
 type DeliveryStatus string
 
 const (
+	// DefaultClaimLease is the period a worker has to finish a claimed Delivery
+	// before another worker may recover it.
+	DefaultClaimLease = 5 * time.Minute
+
 	// StatusPending means the Delivery has not been attempted yet.
 	StatusPending DeliveryStatus = "pending"
 	// StatusInFlight means a worker has claimed the Delivery.
@@ -41,12 +45,25 @@ type Delivery struct {
 
 // Store claims and mutates Delivery rows in Postgres.
 type Store struct {
-	db *sql.DB
+	db         *sql.DB
+	claimLease time.Duration
 }
 
 // New returns an outbox store backed by db.
 func New(db *sql.DB) *Store {
-	return &Store{db: db}
+	return NewWithClaimLease(db, DefaultClaimLease)
+}
+
+// NewWithClaimLease returns an outbox store with an explicit stale-claim lease.
+func NewWithClaimLease(db *sql.DB, claimLease time.Duration) *Store {
+	if claimLease <= 0 {
+		claimLease = DefaultClaimLease
+	}
+
+	return &Store{
+		db:         db,
+		claimLease: claimLease,
+	}
 }
 
 // ClaimNext claims one ready Delivery for customerID using SELECT FOR UPDATE
@@ -65,12 +82,14 @@ func (s *Store) ClaimNext(ctx context.Context, customerID string) (delivery Deli
 		SELECT id
 		FROM deliveries
 		WHERE customer_id = $1
-		  AND status IN ('pending', 'failed_retry')
-		  AND next_attempt_at <= now()
+		  AND (
+		      (status IN ('pending', 'failed_retry') AND next_attempt_at <= now())
+		      OR (status = 'in_flight' AND claimed_at < now() - ($2 * interval '1 millisecond'))
+		  )
 		ORDER BY next_attempt_at, created_at, id
 		FOR UPDATE SKIP LOCKED
 		LIMIT 1
-	`, customerID).Scan(&deliveryID)
+	`, customerID, s.claimLease.Milliseconds()).Scan(&deliveryID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Delivery{}, false, nil
 	}

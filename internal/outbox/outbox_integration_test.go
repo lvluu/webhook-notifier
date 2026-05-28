@@ -185,6 +185,64 @@ func TestClaimNextConcurrentWorkersDoNotDoubleClaim(t *testing.T) {
 	assertStatusCount(t, ctx, db, string(outbox.StatusPending), 0)
 }
 
+func TestClaimNextRecoversStaleInFlightDelivery(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	insertWebhook(t, ctx, db, "cus_recover", "https://partner.example/webhook", true, "subscriber.created")
+	submitted, err := ingest.New(db).Submit(ctx, ingest.Event{
+		CustomerID: "cus_recover",
+		Type:       "subscriber.created",
+		Payload:    []byte(`{"subscriber_id":"sub_recover"}`),
+	})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if len(submitted.DeliveryIDs) != 1 {
+		t.Fatalf("delivery count: got %d, want 1", len(submitted.DeliveryIDs))
+	}
+
+	store := outbox.NewWithClaimLease(db, time.Hour)
+	first, ok, err := store.ClaimNext(ctx, "cus_recover")
+	if err != nil {
+		t.Fatalf("first ClaimNext: %v", err)
+	}
+	if !ok {
+		t.Fatal("first ClaimNext: got no delivery, want one")
+	}
+
+	second, ok, err := store.ClaimNext(ctx, "cus_recover")
+	if err != nil {
+		t.Fatalf("second ClaimNext: %v", err)
+	}
+	if ok {
+		t.Fatalf("second ClaimNext claimed fresh in-flight delivery %s", second.ID)
+	}
+
+	_, err = db.ExecContext(ctx, `
+		UPDATE deliveries
+		SET claimed_at = now() - interval '2 hours'
+		WHERE id = $1
+	`, first.ID)
+	if err != nil {
+		t.Fatalf("age in-flight claim: %v", err)
+	}
+
+	recovered, ok, err := store.ClaimNext(ctx, "cus_recover")
+	if err != nil {
+		t.Fatalf("recovery ClaimNext: %v", err)
+	}
+	if !ok {
+		t.Fatal("recovery ClaimNext: got no delivery, want stale in-flight delivery")
+	}
+	if recovered.ID != first.ID {
+		t.Fatalf("recovered delivery: got %s, want %s", recovered.ID, first.ID)
+	}
+	if recovered.AttemptNumber != 2 {
+		t.Fatalf("recovered attempt number: got %d, want 2", recovered.AttemptNumber)
+	}
+}
+
 func newPostgresDB(t *testing.T, ctx context.Context) *sql.DB {
 	t.Helper()
 
