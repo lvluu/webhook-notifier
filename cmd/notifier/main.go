@@ -10,5 +10,5 @@ import (
 )
 
 func main() {
-	fmt.Fprintln(os.Stdout, "webhook-notifier: scaffold OK — service wiring not yet implemented (see issue #3)")
+	_, _ = fmt.Fprintln(os.Stdout, "webhook-notifier: scaffold OK — service wiring not yet implemented (see issue #3)")
 }

@@ -10,5 +10,5 @@ import (
 )
 
 func main() {
-	fmt.Fprintln(os.Stdout, "webhook-notifier bench: scaffold OK — scenarios not yet implemented")
+	_, _ = fmt.Fprintln(os.Stdout, "webhook-notifier bench: scaffold OK — scenarios not yet implemented")
 }
