@@ -5,11 +5,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
 
+	"github.com/lvluu/webhook-notifier/internal/observe"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/retry"
 	"github.com/lvluu/webhook-notifier/internal/scheduler"
@@ -59,6 +61,7 @@ type Worker struct {
 	RetryPolicy retry.RetryPolicy
 	Scheduler   scheduler.Scheduler
 	HostLimiter *HostLimiter
+	Logger      *slog.Logger
 }
 
 // Option configures a Worker.
@@ -79,12 +82,18 @@ func WithHostLimiter(hl *HostLimiter) Option {
 	return func(w *Worker) { w.HostLimiter = hl }
 }
 
+// WithLogger sets the base structured logger used by the Worker.
+func WithLogger(logger *slog.Logger) Option {
+	return func(w *Worker) { w.Logger = logger }
+}
+
 // New returns a Worker using scheduler s and optional overrides.
 func New(s scheduler.Scheduler, opts ...Option) *Worker {
 	w := &Worker{
 		HTTP:        http.DefaultClient,
 		RetryPolicy: retry.New(retry.Config{}),
 		Scheduler:   s,
+		Logger:      observe.NewLogger(nil),
 	}
 	for _, opt := range opts {
 		opt(w)
@@ -180,14 +189,42 @@ func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Deli
 	}
 
 	delay, terminal, reason := w.RetryPolicy.Next(d.AttemptNumber, d.PreviousDelay, resp, err)
+
+	customerClass := observe.CustomerClassFromWeight(d.CustomerWeight)
+	log := w.Logger.With(
+		slog.String("delivery_id", d.ID),
+		slog.String("event_id", d.EventID),
+		slog.String("customer_id", d.CustomerID),
+		slog.Int("attempt_number", d.AttemptNumber),
+	)
+
 	if reason == retry.ReasonSucceeded {
-		return ProcessResult{Err: store.MarkSucceeded(ctx, d.ID, statusCode, duration)}
+		resultErr := store.MarkSucceeded(ctx, d.ID, statusCode, duration)
+		if resultErr == nil {
+			observe.IncDelivery("succeeded")
+			observe.ObserveDeliveryLatency(customerClass, duration.Seconds())
+		}
+		log.Info("delivery succeeded", "status_code", statusCode, "duration_ms", duration.Milliseconds())
+		return ProcessResult{Err: resultErr}
 	}
 	if terminal {
-		return ProcessResult{Err: store.MarkDead(ctx, d.ID, statusCode, reason, reason, duration)}
+		resultErr := store.MarkDead(ctx, d.ID, statusCode, reason, reason, duration)
+		if resultErr == nil {
+			observe.IncDelivery("dead")
+			observe.ObserveDeliveryLatency(customerClass, duration.Seconds())
+			observe.IncDlq(reason)
+		}
+		log.Warn("delivery dead", "reason", reason, "status_code", statusCode, "duration_ms", duration.Milliseconds())
+		return ProcessResult{Err: resultErr}
 	}
 
-	return ProcessResult{Err: store.MarkRetry(ctx, d.ID, statusCode, reason, delay, duration)}
+	resultErr := store.MarkRetry(ctx, d.ID, statusCode, reason, delay, duration)
+	if resultErr == nil {
+		observe.IncDelivery("failed_retry")
+		observe.ObserveDeliveryLatency(customerClass, duration.Seconds())
+	}
+	log.Warn("delivery scheduled for retry", "reason", reason, "retry_delay_ms", delay.Milliseconds(), "status_code", statusCode, "duration_ms", duration.Milliseconds())
+	return ProcessResult{Err: resultErr}
 }
 
 const idleBackoff = 50 * time.Millisecond

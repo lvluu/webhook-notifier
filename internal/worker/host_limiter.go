@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lvluu/webhook-notifier/internal/observe"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -60,16 +61,21 @@ func (h *HostLimiter) semFor(host string) *semaphore.Weighted {
 // once. On timeout or ctx cancellation it returns an error without consuming a slot.
 func (h *HostLimiter) Acquire(ctx context.Context, host string) (release func(), err error) {
 	sem := h.semFor(host)
+	acquireStarted := time.Now()
 
 	acquireCtx, cancel := context.WithTimeout(ctx, h.cfg.AcquireTimeout)
 	defer cancel()
 
 	if err := sem.Acquire(acquireCtx, 1); err != nil {
+		// record wait even on timeout — useful SRE signal
+		observe.ObserveSemaphoreWait(host, time.Since(acquireStarted).Seconds())
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("host limiter acquire %s: %w", host, ctx.Err())
 		}
 		return nil, fmt.Errorf("host limiter acquire %s: capacity reached: %w", host, err)
 	}
+
+	observe.ObserveSemaphoreWait(host, time.Since(acquireStarted).Seconds())
 
 	released := false
 	return func() {

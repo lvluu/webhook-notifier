@@ -5,7 +5,9 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"time"
 
+	"github.com/lvluu/webhook-notifier/internal/observe"
 	"github.com/lvluu/webhook-notifier/internal/scheduler"
 )
 
@@ -66,6 +68,8 @@ func (s *swrr) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bool, er
 		return "", 0, false, err
 	}
 
+	pickStarted := time.Now()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -93,6 +97,8 @@ func (s *swrr) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bool, er
 
 	if len(candidates) == 0 {
 		s.activeSet = make(map[scheduler.CustomerID]struct{})
+		observe.ObserveSchedulerPick(time.Since(pickStarted).Seconds())
+		observe.SetActiveCustomers(0)
 		return "", 0, false, nil
 	}
 
@@ -118,6 +124,8 @@ func (s *swrr) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bool, er
 	}
 	s.activeList = newList
 
+	observe.ObserveSchedulerPick(time.Since(pickStarted).Seconds())
+	observe.SetActiveCustomers(float64(len(s.activeList)))
 	return winner.id, winner.weight, true, nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/lvluu/webhook-notifier/internal/observe"
 	"github.com/lvluu/webhook-notifier/internal/registry"
 )
 
@@ -112,6 +113,7 @@ func (s *Store) Submit(ctx context.Context, event Event) (SubmittedEvent, error)
 		s.notifier.Notify(event.CustomerID)
 	}
 
+	observe.ObserveIngestFanout(float64(len(submitted.DeliveryIDs)))
 	return submitted, nil
 }
 
