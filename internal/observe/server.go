@@ -46,6 +46,23 @@ func NewInfraServer(cfg InfraServerConfig) *InfraServer {
 				return cfg.DB.PingContext(ctx)
 			},
 		}
+		schemaCheck := health.Check{
+			Name: "schema",
+			Check: func(ctx context.Context) error {
+				var ok bool
+				err := cfg.DB.QueryRowContext(ctx,
+					"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'deliveries')",
+				).Scan(&ok)
+				if err != nil {
+					return err
+				}
+				if !ok {
+					return fmt.Errorf("deliveries table not found")
+				}
+				return nil
+			},
+			Timeout: 5 * time.Second,
+		}
 		mux.Handle("GET /health", health.NewHandler(
 			health.NewChecker(
 				health.WithCacheDuration(5*time.Second),
@@ -56,6 +73,7 @@ func NewInfraServer(cfg InfraServerConfig) *InfraServer {
 			health.NewChecker(
 				health.WithCacheDuration(5*time.Second),
 				health.WithCheck(dbCheck),
+				health.WithCheck(schemaCheck),
 			),
 		))
 	} else {
