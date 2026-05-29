@@ -11,6 +11,7 @@ import (
 
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/retry"
+	"github.com/lvluu/webhook-notifier/internal/scheduler"
 	"github.com/lvluu/webhook-notifier/internal/signer"
 )
 
@@ -30,13 +31,13 @@ type Delivery struct {
 
 // Worker performs HTTP delivery of a single Delivery.
 //
-// The walking skeleton intentionally has no Scheduler or per-host
-// HostLimiter — those collaborators land in subsequent slices (#5-#8).
-// The struct exists so those slices can add fields without changing
-// this package's public surface.
+// The walking skeleton intentionally has no per-host HostLimiter — that
+// collaborator lands in a subsequent slice (#8). The struct exists so those
+// slices can add fields without changing this package's public surface.
 type Worker struct {
 	HTTP        *http.Client
 	RetryPolicy retry.RetryPolicy
+	Scheduler   scheduler.Scheduler
 }
 
 // New returns a Worker using http.DefaultClient.
@@ -131,4 +132,62 @@ func (w *Worker) Process(ctx context.Context, store *outbox.Store, d outbox.Deli
 	}
 
 	return store.MarkRetry(ctx, d.ID, statusCode, reason, delay, duration)
+}
+
+// idleBackoff is the pause after a scheduler miss (no Customer ready) or a
+// failed claim. Keeps the loop from spinning CPU when the outbox is empty
+// while still reacting promptly to new work.
+const idleBackoff = 50 * time.Millisecond
+
+// Run drives the worker loop: ask the Scheduler for the next Customer, claim
+// one Delivery for that Customer, Process it, and re-Notify if the Customer
+// may have more work. Blocks until ctx is cancelled.
+//
+// Requires Scheduler to be set. Returns immediately with an error if
+// Scheduler or store is nil.
+func (w *Worker) Run(ctx context.Context, store *outbox.Store) error {
+	if store == nil {
+		return fmt.Errorf("outbox store is required")
+	}
+	if w.Scheduler == nil {
+		return fmt.Errorf("scheduler is required")
+	}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		customerID, batchHint, ok, err := w.Scheduler.Pick(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("scheduler pick: %w", err)
+		}
+		if !ok {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(idleBackoff):
+			}
+			continue
+		}
+
+		deliveries, err := store.ClaimNextN(ctx, customerID, int(batchHint))
+		if err != nil {
+			return fmt.Errorf("claim delivery for %s: %w", customerID, err)
+		}
+		if len(deliveries) == 0 {
+			continue
+		}
+
+		for _, delivery := range deliveries {
+			if err := w.Process(ctx, store, delivery); err != nil {
+				return fmt.Errorf("process delivery %s: %w", delivery.ID, err)
+			}
+		}
+
+		w.Scheduler.Notify(customerID)
+	}
 }

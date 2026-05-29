@@ -8,7 +8,7 @@ Vocabulary used here is defined in [CONTEXT.md](../CONTEXT.md). Architectural co
 
 - **Reliability**: no Event lost between business commit and final terminal state. Transient failures are retried with bounded backoff; persistent failures land in the DLQ for inspection.
 - **Scalability**: workers are stateless and horizontally scalable. Adding workers increases throughput without changing claim semantics.
-- **Fairness**: a Whale Customer cannot starve Small Customers. Scheduling latency for a Small Customer is bounded regardless of any other Customer's backlog.
+- **Fairness**: a Whale Customer cannot starve Small Customers. Scheduling latency for a Small Customer is bounded regardless of any other Customer's backlog. Fairness is **weighted per Customer**, with a default weight of `1` for every Customer — i.e. equal share today, with a forward-compatible path to differentiated shares (e.g. plan-tier or Whale throttling) without touching the WorkerPool or Outbox.
 
 ## Non-goals (PoC)
 
@@ -72,28 +72,41 @@ flowchart LR
 
 ### Deep modules (pure logic, isolated unit tests)
 
-- **Scheduler** — Given the set of Customers with pending Deliveries, returns the next Customer to serve. Round-robin (ADR-0001). The interface is the load-bearing contract; the implementation is the trade-off.
+- **Scheduler** — Given the set of Customers with pending Deliveries, returns the next Customer to serve. Smooth Weighted Round Robin (SWRR, Nginx-style) with `weight=1` default for every Customer (ADR-0001) — degenerates to plain RR until weights diverge. The interface is the load-bearing contract; the implementation (RR / SWRR / DRR) is the trade-off.
   ```go
   type Scheduler interface {
-      Pick(ctx context.Context) (CustomerID, bool, error) // (id, ok=false if no work, err)
+      // Pick returns the next Customer to serve and a batch hint equal to that
+      // Customer's weight: the worker MAY claim up to batchHint Deliveries
+      // before yielding back. batchHint == 0 means "no work".
+      Pick(ctx context.Context) (id CustomerID, batchHint uint32, ok bool, err error)
       Notify(CustomerID) // wake the scheduler when work arrives
   }
+
+  // WeightSource resolves a Customer's fairness weight. Default impl returns 1
+  // for every Customer; future impls read from `customers.weight` (DB) or a
+  // plan-tier lookup. The Scheduler depends on this interface, not on storage.
+  type WeightSource interface {
+      Weight(CustomerID) uint32 // 0 = paused; >=1 = share multiplier
+  }
   ```
+  SWRR interleaves picks so a `[3,1]` weight set yields `AABAAABA` rather than classic contiguous `AAAB AAAB` cycles — same share, with the low-weight Customer pulled forward as much as the 3:1 ratio permits. With all weights=1, behaviour is identical to plain RR. A Whale tier with `weight=3` gets 3× share *and* a `batchHint=3` so its worker amortizes one Pick over up to 3 PG claims, improving throughput on its index range without breaking the share invariant. A throttled Customer with `weight=0` is skipped entirely (useful for incident response).
 - **RetryPolicy** — `Next(attempt int, prevDelay time.Duration, resp *http.Response, err error) (delay time.Duration, terminal bool, reason string)`. Pure function. Encodes decorrelated jitter, 4xx fast-fail, 429 `Retry-After` honouring, and exhaustion (ADR-0003).
 - **Signer** — `Sign(secret, body []byte, ts time.Time) (sig string)`. HMAC-SHA256 over `timestamp.body`. Deterministic.
 
 ### Service modules
 
 - **EventIngest** — Accepts an Event and synchronously fans out one Delivery row per matching Webhook in a single transaction. Same transaction = no Delivery is ever orphaned from its Event.
-- **Outbox** (the `deliveries` table) — The durable work queue. Workers claim with `SELECT ... FROM deliveries WHERE customer_id = $1 AND status IN ('pending') AND next_attempt_at <= now() FOR UPDATE SKIP LOCKED LIMIT 1` once the Scheduler has named a Customer.
+- **Outbox** (the `deliveries` table) — The durable work queue. Workers claim with `SELECT ... FROM deliveries WHERE customer_id = $1 AND status IN ('pending') AND next_attempt_at <= now() FOR UPDATE SKIP LOCKED LIMIT $2` once the Scheduler has named a Customer; the `LIMIT` is the `batchHint` returned by `Pick` (1 by default; higher for weighted tiers).
 - **WorkerPool** — N goroutines per process. Each loop:
-  1. `Scheduler.Pick()` — get next Customer.
-  2. Claim one Delivery for that Customer.
-  3. Look up Webhook (cached).
-  4. Acquire per-host semaphore (skip and requeue if blocked > short timeout).
-  5. `Signer.Sign()`, build HTTP request with idempotency headers.
-  6. POST with timeout.
-  7. `RetryPolicy.Next()` decides outcome → mutate Delivery row + record an Attempt row.
+  1. `id, batchHint, ok := Scheduler.Pick()` — get next Customer and how many Deliveries the worker may serve before yielding.
+  2. Claim up to `batchHint` Deliveries for that Customer (single SQL statement, `LIMIT $batchHint`). With default `weight=1`, this is one Delivery.
+  3. For each claimed Delivery, in order:
+     - Look up Webhook (cached).
+     - Acquire per-host semaphore (skip and requeue with short backoff if blocked > short timeout; yield back to Scheduler so a saturated partner does not stall fairness).
+     - `Signer.Sign()`, build HTTP request with idempotency headers.
+     - POST with timeout.
+     - `RetryPolicy.Next()` decides outcome → mutate Delivery row + record an Attempt row.
+  4. Return to step 1.
 - **SubscriptionRegistry** — Read-only `customer_id → []Webhook`. In-memory LRU with short TTL; cache miss falls back to PG. Avoids hot lookup on every Delivery.
 - **DLQ** (`dead_letters` table) — Terminal Deliveries with reason (`exhausted`, `terminal_4xx`, `terminal_network`).
 - **Per-host semaphore** — `map[host]chan struct{}`. Concurrency cap per partner hostname, default 20. Protects partner endpoints from self-inflicted DoS when many Deliveries target the same host.
@@ -155,16 +168,30 @@ stateDiagram-v2
 ## Scalability mechanics
 
 - **Stateless workers**: all coordination is through Postgres. Workers can be added or removed without coordination.
-- **No leader**: the Scheduler is process-local. Each instance independently round-robins its own claimed Deliveries; global fairness emerges because all instances claim from the same `deliveries` table.
+- **No leader**: the Scheduler is process-local. Postgres claim locking prevents duplicate Delivery processing across instances, but globally balanced Customer fairness requires every instance to discover the active Customer set from shared storage. The current PoC has the process-local Scheduler and horizontally safe claims; DB-backed active-Customer discovery is tracked as follow-up work.
 - **Scale ceiling**: at very high throughput, contention on the `deliveries` claim query becomes the bottleneck. The natural next step is to partition by `customer_id` (or move per-Customer queues to Redis Streams). The `Scheduler` interface already hides the queue source so this swap is local.
 
 ## Fairness mechanics
 
 The single technical claim that drives most of the design: **the unit of fairness is the Customer, not the Delivery, not the worker, not the partner host**.
 
-- The Scheduler iterates over **the set of Customers with pending Deliveries**, not over the Deliveries themselves. This is the key insight. If we iterated over Deliveries, a Whale's 50k-Delivery burst would dominate. Iterating over Customers gives each one an equal slot per cycle regardless of backlog depth.
-- Per-host concurrency cap is **orthogonal** to per-Customer fairness. It protects partners. Without it, a Whale's per-cycle Delivery slot still gets through, but in close succession against the same hostname — partners 429.
-- Round-robin is sufficient because Deliveries have uniform cost (one HTTP POST each). DRR exists for variable-cost work units; if Deliveries ever become heterogeneous (e.g. payload-size-weighted), the Scheduler implementation swaps without touching the WorkerPool (ADR-0001).
+- The Scheduler iterates over **the set of Customers with pending Deliveries**, not over the Deliveries themselves. This is the key insight. If we iterated over Deliveries, a Whale's 50k-Delivery burst would dominate. Iterating over Customers gives each one a share per cycle proportional to its weight, regardless of backlog depth.
+- **Weighted by default, equal by default.** Every Customer carries a `weight` (default `1`). The Scheduler is Smooth Weighted Round Robin (SWRR): with uniform weights it is plain RR; with diverging weights it allocates proportional, interleaved slots (no contiguous bursts for high-weight Customers). This makes the equal-share PoC and a future tiered policy the same code path — no rewrite when product introduces plan tiers, Whale throttling, or paid priority.
+- **Weight doubles as a throughput knob.** `Pick` returns a `batchHint == weight` so a worker serving a high-weight Customer may claim multiple Deliveries per Pick, amortizing the scheduler hop and the per-Customer PG index lookup. With `weight=1` (the PoC default) batch is 1, maximally fair and maximally chatty; raising weight raises both share *and* per-Pick throughput without disturbing the share invariant.
+- Per-host concurrency cap is **orthogonal** to per-Customer fairness. It protects partners. Without it, a Whale's per-cycle Delivery slots still get through, but in close succession against the same hostname — partners 429. On cap timeout the worker requeues with a short `next_attempt_at` bump and returns to the Scheduler, so a saturated partner never blocks Pick.
+- SWRR is sufficient because Deliveries have uniform cost (one HTTP POST each) and weights are per-Customer, not per-Delivery. DRR exists for variable-cost work units; if Deliveries ever become heterogeneous (e.g. payload-size-weighted), the Scheduler implementation swaps without touching the WorkerPool (ADR-0001).
+
+### Weight source
+
+```
+customers
+──────────
+id (uuid)
+weight (int, default 1, check >= 0)  -- 0 = paused
+plan_tier (text, nullable)            -- optional; resolves to weight via policy
+```
+
+PoC reads weight from the `customers` table via `WeightSource`. Cache alongside the SubscriptionRegistry (short TTL). Live weight changes apply at the next Scheduler cycle — no worker restart.
 
 ## Per-host concurrency cap
 
@@ -201,7 +228,7 @@ Dashboards and alerting are pair-session discussion: which p99 thresholds warran
 
 ### Unit tests
 
-- **Scheduler**: table-driven coverage of empty schedule, single-Customer back-to-back, multi-Customer round-robin invariant. Property test: over any arrival/draw sequence, no Customer's share exceeds `1/active_count + ε`.
+- **Scheduler**: table-driven coverage of empty schedule, single-Customer back-to-back, multi-Customer round-robin invariant, and weighted invariant. Property test: over any arrival/draw sequence, each Customer's share equals `weight_i / Σ weight_j ± ε`. Uniform-weight case reduces to the equal-share invariant. `weight=0` Customers are never picked while pending.
 - **RetryPolicy**: truth table from ADR-0003.
 - **Signer**: vector tests with known fixtures.
 
@@ -223,7 +250,8 @@ Each scenario lives in `cmd/bench` and emits a markdown report under `bench/resu
 
 ## What is deliberately out
 
-- **DRR implementation** — interface ready, implementation deferred (ADR-0001).
+- **DRR implementation** — interface ready, implementation deferred (ADR-0001). PoC ships WRR with uniform weights.
+- **Plan-tier → weight policy** — the WRR + `WeightSource` plumbing is in place, but the actual tier table and admin UI to set non-uniform weights are out of PoC scope. Adding them is a config change, not a redesign.
 - **Redis Streams per-Customer queues** — same Scheduler interface (ADR-0002).
 - **Per-Customer concurrency cap** — round-robin already paces; documented as natural addition under DRR.
 - **Many-Whale contention bench** — scenario 1 already proves the mechanism.
@@ -234,7 +262,7 @@ Each scenario lives in `cmd/bench` and emits a markdown report under `bench/resu
 ## Risks and open trade-offs
 
 - **No strict per-Customer FIFO.** Documented; partners are expected to handle out-of-order Events on their side using `X-Event-Id` and `created_at`.
-- **In-process Scheduler means per-instance round-robin.** Fairness across instances emerges from claim semantics, not coordination. Under extreme imbalance (e.g. one instance serving only one Customer due to claim luck) fairness could degrade briefly. Bounded by claim batch size.
+- **In-process Scheduler means per-instance round-robin.** Cross-instance duplicate prevention comes from Postgres claim semantics; cross-instance fairness is only approximate until workers periodically discover ready Customers from shared storage. Under imbalance, one instance can have a stale or partial active-Customer view. Bounded by claim batch size once discovery is in place.
 - **Postgres as queue has a throughput ceiling.** Bench scenario 4 measures it; the scale-out path is in ADR-0002.
 
 ## Repo layout (planned)
