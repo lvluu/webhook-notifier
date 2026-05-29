@@ -349,30 +349,59 @@ func (s *Store) MarkDead(ctx context.Context, deliveryID string, statusCode int,
 		}
 
 		_, err := tx.ExecContext(ctx, `
-			UPDATE deliveries
-			SET status = 'dead',
-			    claimed_at = NULL,
-			    last_error = $2,
-			    updated_at = now()
-			WHERE id = $1
-		`, deliveryID, nullIfEmpty(errorClass))
+		UPDATE deliveries
+		SET status = 'dead',
+		    claimed_at = NULL,
+		    last_error = $2,
+		    updated_at = now()
+		WHERE id = $1
+	`, deliveryID, nullIfEmpty(errorClass))
 		if err != nil {
 			return fmt.Errorf("mark delivery dead: %w", err)
 		}
 
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO dead_letters (delivery_id, last_error, attempts, reason, final_at)
-			VALUES ($1, $2, $3, $4, now())
-			ON CONFLICT (delivery_id) DO UPDATE
-			SET last_error = EXCLUDED.last_error,
-			    attempts = EXCLUDED.attempts,
-			    reason = EXCLUDED.reason,
-			    final_at = EXCLUDED.final_at
-		`, deliveryID, nullIfEmpty(errorClass), attemptNumber, reason)
+		INSERT INTO dead_letters (delivery_id, last_error, attempts, reason, final_at)
+		VALUES ($1, $2, $3, $4, now())
+		ON CONFLICT (delivery_id) DO UPDATE
+		SET last_error = EXCLUDED.last_error,
+		    attempts = EXCLUDED.attempts,
+		    reason = EXCLUDED.reason,
+		    final_at = EXCLUDED.final_at
+	`, deliveryID, nullIfEmpty(errorClass), attemptNumber, reason)
 		if err != nil {
 			return fmt.Errorf("insert dead letter: %w", err)
 		}
 
+		return nil
+	})
+}
+
+// Requeue returns a claimed (in_flight) Delivery to the retry pool without
+// recording a delivery_attempt row. The attempt_count is decremented to cancel
+// the claim-time increment, preserving the invariant that attempt_count
+// reflects real HTTP POSTs against the partner endpoint (ADR-0004).
+func (s *Store) Requeue(ctx context.Context, deliveryID string, delay time.Duration) error {
+	if deliveryID == "" {
+		return fmt.Errorf("delivery_id is required")
+	}
+	if delay < 0 {
+		return fmt.Errorf("delay must be non-negative")
+	}
+
+	return s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, _ int) error {
+		_, err := tx.ExecContext(ctx, `
+			UPDATE deliveries
+			SET status = 'failed_retry',
+			    attempt_count = attempt_count - 1,
+			    next_attempt_at = now() + ($2 * interval '1 millisecond'),
+			    claimed_at = NULL,
+			    updated_at = now()
+			WHERE id = $1
+		`, deliveryID, delay.Milliseconds())
+		if err != nil {
+			return fmt.Errorf("requeue delivery: %w", err)
+		}
 		return nil
 	})
 }

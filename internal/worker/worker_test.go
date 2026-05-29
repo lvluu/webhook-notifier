@@ -18,6 +18,15 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/worker"
 )
 
+type stubScheduler struct{}
+
+func (stubScheduler) Pick(_ context.Context) (string, uint32, bool, error) { return "", 0, false, nil }
+func (stubScheduler) Notify(string)                                        {}
+
+func newTestWorker(opts ...worker.Option) *worker.Worker {
+	return worker.New(stubScheduler{}, opts...)
+}
+
 // TestDeliver_PostsEventToReceiver is the walking-skeleton end-to-end test:
 // hand one Delivery to the Worker, observe the resulting POST at an
 // httptest.Server, and assert the headers and body match what we sent.
@@ -58,7 +67,7 @@ func TestDeliver_PostsEventToReceiver(t *testing.T) {
 		EventType:  "subscriber.created",
 	}
 
-	w := worker.New()
+	w := newTestWorker()
 	status, err := w.Deliver(context.Background(), d)
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)
@@ -105,7 +114,7 @@ func TestDeliver_PropagatesContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancel
 
-	w := worker.New()
+	w := newTestWorker()
 	_, err := w.Deliver(ctx, worker.Delivery{
 		EventID:    "evt_cancel",
 		DeliveryID: "dlv_cancel",
@@ -132,7 +141,7 @@ func TestSend_SetsSignatureHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	w := worker.New()
+	w := newTestWorker()
 	resp, err := w.Send(context.Background(), worker.Delivery{
 		EventID:    "evt_sig",
 		DeliveryID: "dlv_sig",
@@ -183,7 +192,7 @@ func TestSend_SignatureTimestampIsRecent(t *testing.T) {
 
 	before := time.Now().Unix()
 
-	w := worker.New()
+	w := newTestWorker()
 	resp, err := w.Send(context.Background(), worker.Delivery{
 		EventID:    "evt_ts",
 		DeliveryID: "dlv_ts",
@@ -252,7 +261,7 @@ func TestIntegration_ReceiverVerifiesHMACAndStableDeliveryID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	w := worker.New()
+	w := newTestWorker()
 	deliveryID := "dlv_stable_1"
 
 	for i := 1; i <= 3; i++ {
@@ -276,7 +285,7 @@ func TestIntegration_ReceiverVerifiesHMACAndStableDeliveryID(t *testing.T) {
 		}
 	}
 
-	wrongSecretWorker := worker.New()
+	wrongSecretWorker := newTestWorker()
 	badResp, err := wrongSecretWorker.Send(context.Background(), worker.Delivery{
 		EventID:    "evt_bad",
 		DeliveryID: "dlv_bad",

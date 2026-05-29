@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -15,9 +16,6 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/signer"
 )
 
-// Delivery is the unit of work the Worker drives to terminal state.
-// Fields mirror what the planned `deliveries` table row (#4) will hold,
-// kept thin for the walking skeleton.
 type Delivery struct {
 	EventID       string
 	DeliveryID    string
@@ -29,28 +27,60 @@ type Delivery struct {
 	AttemptNumber int
 }
 
-// Worker performs HTTP delivery of a single Delivery.
-//
-// The walking skeleton intentionally has no per-host HostLimiter — that
-// collaborator lands in a subsequent slice (#8). The struct exists so those
-// slices can add fields without changing this package's public surface.
+type ProcessStatus int
+
+const (
+	StatusSucceeded ProcessStatus = iota
+	StatusRequeued
+)
+
+type ProcessResult struct {
+	Status ProcessStatus
+	Err    error
+}
+
+// DeliveryStore mutates and claims Delivery rows. Satisfied by *outbox.Store.
+type DeliveryStore interface {
+	ClaimNextN(ctx context.Context, customerID string, limit int) ([]outbox.Delivery, error)
+	MarkSucceeded(ctx context.Context, deliveryID string, statusCode int, duration time.Duration) error
+	MarkRetry(ctx context.Context, deliveryID string, statusCode int, errorClass string, delay time.Duration, duration time.Duration) error
+	MarkDead(ctx context.Context, deliveryID string, statusCode int, errorClass string, reason string, duration time.Duration) error
+	Requeue(ctx context.Context, deliveryID string, delay time.Duration) error
+}
+
 type Worker struct {
 	HTTP        *http.Client
 	RetryPolicy retry.RetryPolicy
 	Scheduler   scheduler.Scheduler
+	HostLimiter *HostLimiter
 }
 
-// New returns a Worker using http.DefaultClient.
-func New() *Worker {
-	return &Worker{
+type Option func(*Worker)
+
+func WithHTTPClient(c *http.Client) Option {
+	return func(w *Worker) { w.HTTP = c }
+}
+
+func WithRetryPolicy(rp retry.RetryPolicy) Option {
+	return func(w *Worker) { w.RetryPolicy = rp }
+}
+
+func WithHostLimiter(hl *HostLimiter) Option {
+	return func(w *Worker) { w.HostLimiter = hl }
+}
+
+func New(s scheduler.Scheduler, opts ...Option) *Worker {
+	w := &Worker{
 		HTTP:        http.DefaultClient,
 		RetryPolicy: retry.New(retry.Config{}),
+		Scheduler:   s,
 	}
+	for _, opt := range opts {
+		opt(w)
+	}
+	return w
 }
 
-// Deliver POSTs the Delivery's Body to its URL and returns the response
-// status code. No retry, no fairness — the skeleton path. Signing is
-// applied when the Delivery carries a Secret.
 func (w *Worker) Deliver(ctx context.Context, d Delivery) (int, error) {
 	resp, err := w.Send(ctx, d)
 	if err != nil {
@@ -62,8 +92,6 @@ func (w *Worker) Deliver(ctx context.Context, d Delivery) (int, error) {
 	return resp.StatusCode, nil
 }
 
-// Send POSTs one Attempt and returns the raw response so callers can classify
-// status code and Retry-After headers before the body is closed.
 func (w *Worker) Send(ctx context.Context, d Delivery) (*http.Response, error) {
 	if w.HTTP == nil {
 		w.HTTP = http.DefaultClient
@@ -94,11 +122,21 @@ func (w *Worker) Send(ctx context.Context, d Delivery) (*http.Response, error) {
 	return resp, nil
 }
 
-// Process sends a claimed Delivery and persists the resulting lifecycle
-// transition: succeeded, failed_retry, or dead.
-func (w *Worker) Process(ctx context.Context, store *outbox.Store, d outbox.Delivery) error {
-	if store == nil {
-		return fmt.Errorf("outbox store is required")
+func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Delivery) ProcessResult {
+	if w.HostLimiter != nil {
+		u, parseErr := url.Parse(d.URL)
+		if parseErr != nil {
+			return ProcessResult{Err: fmt.Errorf("parse delivery URL: %w", parseErr)}
+		}
+
+		release, acquireErr := w.HostLimiter.Acquire(ctx, u.Hostname())
+		if acquireErr != nil {
+			if ctx.Err() != nil {
+				return ProcessResult{Err: ctx.Err()}
+			}
+			return ProcessResult{Status: StatusRequeued}
+		}
+		defer release()
 	}
 
 	started := time.Now()
@@ -125,27 +163,18 @@ func (w *Worker) Process(ctx context.Context, store *outbox.Store, d outbox.Deli
 
 	delay, terminal, reason := w.RetryPolicy.Next(d.AttemptNumber, d.PreviousDelay, resp, err)
 	if reason == retry.ReasonSucceeded {
-		return store.MarkSucceeded(ctx, d.ID, statusCode, duration)
+		return ProcessResult{Err: store.MarkSucceeded(ctx, d.ID, statusCode, duration)}
 	}
 	if terminal {
-		return store.MarkDead(ctx, d.ID, statusCode, reason, reason, duration)
+		return ProcessResult{Err: store.MarkDead(ctx, d.ID, statusCode, reason, reason, duration)}
 	}
 
-	return store.MarkRetry(ctx, d.ID, statusCode, reason, delay, duration)
+	return ProcessResult{Err: store.MarkRetry(ctx, d.ID, statusCode, reason, delay, duration)}
 }
 
-// idleBackoff is the pause after a scheduler miss (no Customer ready) or a
-// failed claim. Keeps the loop from spinning CPU when the outbox is empty
-// while still reacting promptly to new work.
 const idleBackoff = 50 * time.Millisecond
 
-// Run drives the worker loop: ask the Scheduler for the next Customer, claim
-// one Delivery for that Customer, Process it, and re-Notify if the Customer
-// may have more work. Blocks until ctx is cancelled.
-//
-// Requires Scheduler to be set. Returns immediately with an error if
-// Scheduler or store is nil.
-func (w *Worker) Run(ctx context.Context, store *outbox.Store) error {
+func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 	if store == nil {
 		return fmt.Errorf("outbox store is required")
 	}
@@ -182,12 +211,32 @@ func (w *Worker) Run(ctx context.Context, store *outbox.Store) error {
 			continue
 		}
 
-		for _, delivery := range deliveries {
-			if err := w.Process(ctx, store, delivery); err != nil {
-				return fmt.Errorf("process delivery %s: %w", delivery.ID, err)
+		for i, delivery := range deliveries {
+			result := w.Process(ctx, store, delivery)
+			if result.Err != nil {
+				return fmt.Errorf("process delivery %s: %w", delivery.ID, result.Err)
+			}
+			if result.Status == StatusRequeued {
+				delay := w.requeueDelay()
+				if err := store.Requeue(ctx, delivery.ID, delay); err != nil {
+					return fmt.Errorf("requeue delivery %s: %w", delivery.ID, err)
+				}
+				for _, remaining := range deliveries[i+1:] {
+					if err := store.Requeue(ctx, remaining.ID, delay); err != nil {
+						return fmt.Errorf("requeue delivery %s: %w", remaining.ID, err)
+					}
+				}
+				w.Scheduler.Notify(customerID)
+				break
 			}
 		}
-
 		w.Scheduler.Notify(customerID)
 	}
+}
+
+func (w *Worker) requeueDelay() time.Duration {
+	if w.HostLimiter != nil {
+		return w.HostLimiter.RequeueDelay()
+	}
+	return 100 * time.Millisecond
 }
