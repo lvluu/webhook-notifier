@@ -237,6 +237,54 @@ func TestListActiveForEvent_DifferentEventTypes(t *testing.T) {
 	}
 }
 
+func TestListActiveForEvent_UnambiguousCacheKey(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	id1 := insertWebhook(t, ctx, db, "a:b", true, "c")
+	id2 := insertWebhook(t, ctx, db, "a", true, "b:c")
+
+	reg := registry.New(db, registry.WithTTL(5*time.Minute))
+
+	hooks1, err := reg.ListActiveForEvent(ctx, "a:b", "c")
+	if err != nil {
+		t.Fatalf("(a:b, c): %v", err)
+	}
+	if len(hooks1) != 1 || hooks1[0].ID != id1 {
+		t.Fatalf("(a:b, c): got %d webhooks (id=%s), want 1 with id %s", len(hooks1), hookID(hooks1), id1)
+	}
+
+	hooks2, err := reg.ListActiveForEvent(ctx, "a", "b:c")
+	if err != nil {
+		t.Fatalf("(a, b:c): %v", err)
+	}
+	if len(hooks2) != 1 || hooks2[0].ID != id2 {
+		t.Fatalf("(a, b:c): got %d webhooks (id=%s), want 1 with id %s", len(hooks2), hookID(hooks2), id2)
+	}
+}
+
+func TestListActiveForEvent_CancelledContextDoesNotCorruptCache(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	id := insertWebhook(t, ctx, db, "cus_ok", true, "subscriber.created")
+	reg := registry.New(db, registry.WithTTL(5*time.Minute))
+
+	cancelCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	_, err := reg.ListActiveForEvent(cancelCtx, "cus_ok", "subscriber.created")
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+
+	hooks, err := reg.ListActiveForEvent(ctx, "cus_ok", "subscriber.created")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(hooks) != 1 || hooks[0].ID != id {
+		t.Fatalf("got %d webhooks, want 1 with id %s", len(hooks), id)
+	}
+}
+
 func TestListActiveForEvent_Validation(t *testing.T) {
 	t.Parallel()
 
@@ -261,4 +309,11 @@ func TestListActiveForEvent_Validation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func hookID(hooks []registry.Webhook) string {
+	if len(hooks) == 0 {
+		return "<none>"
+	}
+	return hooks[0].ID
 }

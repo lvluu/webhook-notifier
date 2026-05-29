@@ -86,18 +86,29 @@ func (r *Registry) ListActiveForEvent(ctx context.Context, customerID string, ev
 		return hooks, nil
 	}
 
-	result, err, _ := r.sf.Do(key, func() (interface{}, error) {
-		hooks, err := r.queryDB(ctx, customerID, eventType)
+	// Use DoChan + isolated context so one caller's cancellation never
+	// propagates to other coalesced goroutines. Each caller selects on its
+	// own ctx.Done() independently.
+	ch := r.sf.DoChan(key, func() (interface{}, error) {
+		qCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		hooks, err := r.queryDB(qCtx, customerID, eventType)
 		if err != nil {
 			return nil, err
 		}
 		r.lru.Add(key, hooks)
 		return hooks, nil
 	})
-	if err != nil {
-		return nil, err
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.([]Webhook), nil
 	}
-	return result.([]Webhook), nil
 }
 
 func (r *Registry) queryDB(ctx context.Context, customerID string, eventType string) ([]Webhook, error) {
@@ -125,5 +136,6 @@ func (r *Registry) queryDB(ctx context.Context, customerID string, eventType str
 }
 
 func cacheKey(customerID, eventType string) string {
-	return customerID + ":" + eventType
+	// \x00 cannot appear in text identifiers — prevents ambiguous key collisions.
+	return customerID + "\x00" + eventType
 }
