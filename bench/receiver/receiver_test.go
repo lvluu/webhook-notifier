@@ -245,6 +245,7 @@ func TestRouteStatusOverridesServer(t *testing.T) {
 	t.Parallel()
 
 	srv := NewServer(
+		WithStatus(1.0, http.StatusInternalServerError),
 		WithRouteStatus("/bad", 1.0, http.StatusNotFound),
 	)
 	defer srv.Close()
@@ -257,7 +258,7 @@ func TestRouteStatusOverridesServer(t *testing.T) {
 		want int
 	}{
 		{"route with override", "/bad", http.StatusNotFound},
-		{"route without override", "/good", http.StatusOK},
+		{"route without override", "/good", http.StatusInternalServerError},
 	}
 
 	for _, tt := range tests {
@@ -311,6 +312,27 @@ func TestRouteLatency(t *testing.T) {
 	elapsed := time.Since(start)
 	if elapsed < 50*time.Millisecond {
 		t.Errorf("elapsed %v, want ≥50ms", elapsed)
+	}
+}
+
+func TestRouteLatencyZeroProbOverridesServer(t *testing.T) {
+	t.Parallel()
+
+	srv := NewServer(
+		WithLatency(1.0, 200*time.Millisecond),
+		WithRouteLatency("/fast", 0, 200*time.Millisecond),
+	)
+	defer srv.Close()
+
+	start := time.Now()
+	resp, err := http.Post(srv.URL()+"/fast", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	elapsed := time.Since(start)
+	if elapsed >= 150*time.Millisecond {
+		t.Errorf("elapsed %v, want route latency override to skip server latency", elapsed)
 	}
 }
 
