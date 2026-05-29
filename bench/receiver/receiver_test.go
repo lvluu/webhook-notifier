@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -270,6 +271,90 @@ func TestRouteStatusOverridesServer(t *testing.T) {
 				t.Errorf("got status %d, want %d", resp.StatusCode, tt.want)
 			}
 		})
+	}
+}
+
+func TestRouteStatusZeroProbOverridesServer(t *testing.T) {
+	t.Parallel()
+
+	srv := NewServer(
+		WithStatus(1.0, http.StatusInternalServerError),
+		WithRouteStatus("/opt-out", 0, http.StatusTeapot),
+	)
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL()+"/opt-out", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("got status %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestRouteLatency(t *testing.T) {
+	t.Parallel()
+
+	srv := NewServer(
+		WithRouteLatency("/slow", 1.0, 50*time.Millisecond),
+	)
+	defer srv.Close()
+
+	start := time.Now()
+	resp, err := http.Post(srv.URL()+"/slow", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	elapsed := time.Since(start)
+	if elapsed < 50*time.Millisecond {
+		t.Errorf("elapsed %v, want ≥50ms", elapsed)
+	}
+}
+
+func TestConcurrentInjection(t *testing.T) {
+	t.Parallel()
+
+	const requests = 64
+
+	srv := NewServer(
+		WithStatus(0.5, http.StatusInternalServerError),
+		WithLatency(0.5, time.Microsecond),
+		WithDowntime(requests+1, time.Second),
+		WithRandSource(rand.NewSource(42)),
+	)
+	defer srv.Close()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, requests)
+
+	for range requests {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			resp, err := http.Post(srv.URL()+"/concurrent", "application/json", strings.NewReader(`{}`))
+			if err != nil {
+				errs <- err
+				return
+			}
+			resp.Body.Close()
+		}()
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := len(srv.Recorded()); got != requests {
+		t.Errorf("got %d recordings, want %d", got, requests)
 	}
 }
 

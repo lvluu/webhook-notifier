@@ -78,10 +78,12 @@ type downtimeState struct {
 }
 
 type routeConfig struct {
-	latencyProb float64
-	latencyDur  time.Duration
-	statusProb  float64
-	statusCode  int
+	latencyProb       float64
+	latencyDur        time.Duration
+	latencyConfigured bool
+	statusProb        float64
+	statusCode        int
+	statusConfigured  bool
 }
 
 // Recording holds the request data recorded by the ReceiverServer.
@@ -117,17 +119,38 @@ func WithRouteStatus(route string, prob float64, statusCode int) Option {
 		panic("receiver: WithRouteStatus prob must be in [0, 1]")
 	}
 	return optionFunc(func(rs *ReceiverServer) {
-		if rs.routes == nil {
-			rs.routes = make(map[string]*routeConfig)
-		}
-		rc := rs.routes[route]
-		if rc == nil {
-			rc = &routeConfig{}
-			rs.routes[route] = rc
-		}
+		rc := rs.routeConfig(route)
 		rc.statusProb = prob
 		rc.statusCode = statusCode
+		rc.statusConfigured = true
 	})
+}
+
+// WithRouteLatency configures route-level latency injection.
+// Requests to route independently have prob chance of being delayed by d,
+// overriding any server-level WithLatency.
+func WithRouteLatency(route string, prob float64, d time.Duration) Option {
+	if prob < 0 || prob > 1 {
+		panic("receiver: WithRouteLatency prob must be in [0, 1]")
+	}
+	return optionFunc(func(rs *ReceiverServer) {
+		rc := rs.routeConfig(route)
+		rc.latencyProb = prob
+		rc.latencyDur = d
+		rc.latencyConfigured = true
+	})
+}
+
+func (rs *ReceiverServer) routeConfig(route string) *routeConfig {
+	if rs.routes == nil {
+		rs.routes = make(map[string]*routeConfig)
+	}
+	rc := rs.routes[route]
+	if rc == nil {
+		rc = &routeConfig{}
+		rs.routes[route] = rc
+	}
+	return rc
 }
 
 // NewServer starts and returns a ReceiverServer configured with opts.
@@ -207,31 +230,40 @@ func (rs *ReceiverServer) serveCode(r *http.Request) int {
 	statusProb := rs.statusProb
 	statusCode := rs.statusCode
 	if rc != nil {
-		if rc.statusProb > 0 {
+		if rc.statusConfigured {
 			statusProb = rc.statusProb
 			statusCode = rc.statusCode
 		}
-		if rc.latencyProb > 0 {
+		if rc.latencyConfigured {
 			latencyProb = rc.latencyProb
 			latencyDur = rc.latencyDur
 		}
 	}
 
-	if latencyProb > 0 && rs.rng.Float64() < latencyProb {
+	if latencyProb > 0 && rs.randFloat64() < latencyProb {
 		time.Sleep(latencyDur)
 	}
 
-	if statusProb > 0 && rs.rng.Float64() < statusProb {
+	if statusProb > 0 && rs.randFloat64() < statusProb {
 		return statusCode
 	}
 	return http.StatusOK
 }
 
+func (rs *ReceiverServer) randFloat64() float64 {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return rs.rng.Float64()
+}
+
 func (rs *ReceiverServer) inDowntime() bool {
 	now := rs.nowFunc()
 
-	rs.srvDowntime.reqCount++
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+
 	dt := &rs.srvDowntime
+	dt.reqCount++
 
 	if dt.hasTriggered {
 		return now.Before(dt.activeUntil)
