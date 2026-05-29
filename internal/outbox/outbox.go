@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/lvluu/webhook-notifier/internal/observe"
 )
 
 // DeliveryStatus is the lifecycle state stored on a Delivery row.
@@ -30,22 +32,23 @@ const (
 
 // Delivery is a claimed outbox row with enough data for the worker to POST it.
 type Delivery struct {
-	ID            string
-	EventID       string
-	WebhookID     string
-	CustomerID    string
-	EventType     string
-	Payload       []byte
-	URL           string
-	Secret        string
-	Status        DeliveryStatus
-	AttemptNumber int
-	PreviousDelay time.Duration
-	NextAttemptAt time.Time
-	ClaimedAt     time.Time
-	LastError     sql.NullString
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID             string
+	EventID        string
+	WebhookID      string
+	CustomerID     string
+	CustomerWeight uint32
+	EventType      string
+	Payload        []byte
+	URL            string
+	Secret         string
+	Status         DeliveryStatus
+	AttemptNumber  int
+	PreviousDelay  time.Duration
+	NextAttemptAt  time.Time
+	ClaimedAt      time.Time
+	LastError      sql.NullString
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // Store claims and mutates Delivery rows in Postgres.
@@ -103,6 +106,8 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 		return nil, fmt.Errorf("limit must be >= 1")
 	}
 
+	claimStarted := time.Now()
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
@@ -116,6 +121,9 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 		return nil, err
 	}
 	if len(deliveryIDs) == 0 {
+		observe.IncClaimEmpty()
+		observe.ObserveClaimDuration(time.Since(claimStarted).Seconds())
+		observe.ObserveClaimBatchSize(0)
 		return nil, nil
 	}
 
@@ -135,6 +143,8 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 		return nil, fmt.Errorf("commit claim: %w", err)
 	}
 
+	observe.ObserveClaimDuration(time.Since(claimStarted).Seconds())
+	observe.ObserveClaimBatchSize(float64(len(deliveries)))
 	return deliveries, nil
 }
 
@@ -196,6 +206,7 @@ func loadDelivery(ctx context.Context, tx *sql.Tx, deliveryID string) (Delivery,
 		    deliveries.event_id,
 		    deliveries.webhook_id,
 		    deliveries.customer_id,
+		    COALESCE(customers.weight, 1),
 		    events.type,
 		    events.payload,
 		    webhooks.url,
@@ -217,12 +228,14 @@ func loadDelivery(ctx context.Context, tx *sql.Tx, deliveryID string) (Delivery,
 		FROM deliveries
 		JOIN events ON events.id = deliveries.event_id
 		JOIN webhooks ON webhooks.id = deliveries.webhook_id
+		LEFT JOIN customers ON customers.id = deliveries.customer_id
 		WHERE deliveries.id = $1
 	`, deliveryID).Scan(
 		&delivery.ID,
 		&delivery.EventID,
 		&delivery.WebhookID,
 		&delivery.CustomerID,
+		&delivery.CustomerWeight,
 		&delivery.EventType,
 		&delivery.Payload,
 		&delivery.URL,
