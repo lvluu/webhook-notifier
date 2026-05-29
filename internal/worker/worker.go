@@ -218,6 +218,9 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 			}
 			if result.Status == StatusRequeued {
 				delay := w.requeueDelay()
+				if err := store.Requeue(ctx, delivery.ID, delay); err != nil {
+					return fmt.Errorf("requeue delivery %s: %w", delivery.ID, err)
+				}
 				for _, remaining := range deliveries[i+1:] {
 					if err := store.Requeue(ctx, remaining.ID, delay); err != nil {
 						return fmt.Errorf("requeue delivery %s: %w", remaining.ID, err)
