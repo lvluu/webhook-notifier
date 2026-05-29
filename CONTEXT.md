@@ -36,6 +36,14 @@ _Avoid_: job, dispatch, notification
 One HTTP POST against a Delivery's URL. A Delivery typically has 1 Attempt on the happy path and up to N Attempts when retries are needed. Attempts carry the timing, status code, and error class — they are the audit trail.
 _Avoid_: try, request, send
 
+**Host Concurrency Cap**:
+The maximum number of in-flight Attempts a single process may issue concurrently against one Integration Partner hostname. When the cap is reached, further Deliveries to that host are requeued with a short delay so the worker can serve other Customers. Orthogonal to per-Customer fairness — it protects partners, not Customers.
+_Avoid_: rate limit, throttle, backpressure
+
+**Requeue**:
+Returning a claimed (in-flight) Delivery to `failed_retry` with a bumped `next_attempt_at`, without recording an Attempt row or incrementing the attempt counter. Used when a Delivery cannot proceed for a non-partner reason (e.g. host concurrency cap hit). A Requeue is not an Attempt — the partner never saw the POST.
+_Avoid_: retry (implies an Attempt was made), release (ambiguous with claim release)
+
 **DLQ (Dead-Letter Queue)**:
 The terminal resting place for a Delivery whose Attempts exhausted the RetryPolicy. Not a real queue — a table that ops can inspect and manually replay.
 _Avoid_: failure store, error log

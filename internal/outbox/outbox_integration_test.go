@@ -20,12 +20,24 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/retry"
+	"github.com/lvluu/webhook-notifier/internal/scheduler"
 	"github.com/lvluu/webhook-notifier/internal/scheduler/roundrobin"
 	"github.com/lvluu/webhook-notifier/internal/worker"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+type integrationStubScheduler struct{}
+
+func (integrationStubScheduler) Pick(_ context.Context) (scheduler.CustomerID, uint32, bool, error) {
+	return "", 0, false, nil
+}
+func (integrationStubScheduler) Notify(scheduler.CustomerID) {}
+
+func newIntegrationWorker(opts ...worker.Option) *worker.Worker {
+	return worker.New(integrationStubScheduler{}, opts...)
+}
 
 func TestIngestClaimDeliverHappyPath(t *testing.T) {
 	ctx := context.Background()
@@ -79,7 +91,7 @@ func TestIngestClaimDeliverHappyPath(t *testing.T) {
 	}
 
 	started := time.Now()
-	statusCode, err := worker.New().Deliver(ctx, worker.Delivery{
+	statusCode, err := newIntegrationWorker().Deliver(ctx, worker.Delivery{
 		EventID:    claimed.EventID,
 		DeliveryID: claimed.ID,
 		CustomerID: claimed.CustomerID,
@@ -275,10 +287,10 @@ func TestProcessRetryableFailureSchedulesRetry(t *testing.T) {
 		t.Fatal("ClaimNext: got no delivery, want one")
 	}
 
-	w := worker.New()
+	w := newIntegrationWorker()
 	w.RetryPolicy = retry.New(retry.Config{BaseDelay: time.Millisecond, CapDelay: time.Millisecond})
-	if err := w.Process(ctx, store, claimed); err != nil {
-		t.Fatalf("Process: %v", err)
+	if result := w.Process(ctx, store, claimed); result.Err != nil {
+		t.Fatalf("Process: %v", result.Err)
 	}
 
 	assertDeliveryStatus(t, ctx, db, submitted.DeliveryIDs[0], string(outbox.StatusFailedRetry))
@@ -306,7 +318,7 @@ func TestProcessRetryableFailureUsesPreviousRetryDelay(t *testing.T) {
 	}
 
 	store := outbox.New(db)
-	w := worker.New()
+	w := newIntegrationWorker()
 	w.RetryPolicy = retry.New(retry.Config{BaseDelay: 10 * time.Millisecond, CapDelay: 250 * time.Millisecond})
 
 	first, ok, err := store.ClaimNext(ctx, "cus_backoff")
@@ -316,8 +328,8 @@ func TestProcessRetryableFailureUsesPreviousRetryDelay(t *testing.T) {
 	if !ok {
 		t.Fatal("first ClaimNext: got no delivery, want one")
 	}
-	if err := w.Process(ctx, store, first); err != nil {
-		t.Fatalf("first Process: %v", err)
+	if result := w.Process(ctx, store, first); result.Err != nil {
+		t.Fatalf("first Process: %v", result.Err)
 	}
 	firstDelay := scheduledRetryDelay(t, ctx, db, submitted.DeliveryIDs[0])
 	if firstDelay < 10*time.Millisecond {
@@ -328,8 +340,8 @@ func TestProcessRetryableFailureUsesPreviousRetryDelay(t *testing.T) {
 	if second.PreviousDelay <= 0 {
 		t.Fatalf("second previous delay: got %s, want positive", second.PreviousDelay)
 	}
-	if err := w.Process(ctx, store, second); err != nil {
-		t.Fatalf("second Process: %v", err)
+	if result := w.Process(ctx, store, second); result.Err != nil {
+		t.Fatalf("second Process: %v", result.Err)
 	}
 
 	secondDelay := scheduledRetryDelay(t, ctx, db, submitted.DeliveryIDs[0])
@@ -365,8 +377,8 @@ func TestProcessTerminalFailureWritesDeadLetter(t *testing.T) {
 	if !ok {
 		t.Fatal("ClaimNext: got no delivery, want one")
 	}
-	if err := worker.New().Process(ctx, store, claimed); err != nil {
-		t.Fatalf("Process: %v", err)
+	if result := newIntegrationWorker().Process(ctx, store, claimed); result.Err != nil {
+		t.Fatalf("Process: %v", result.Err)
 	}
 
 	deliveryID := submitted.DeliveryIDs[0]
@@ -408,7 +420,7 @@ func TestProcessFlakyReceiverEventuallySucceedsAllDeliveries(t *testing.T) {
 	}
 
 	store := outbox.New(db)
-	w := worker.New()
+	w := newIntegrationWorker()
 	w.RetryPolicy = retry.New(retry.Config{BaseDelay: time.Millisecond, CapDelay: time.Millisecond})
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -425,8 +437,8 @@ func TestProcessFlakyReceiverEventuallySucceedsAllDeliveries(t *testing.T) {
 			time.Sleep(time.Millisecond)
 			continue
 		}
-		if err := w.Process(ctx, store, claimed); err != nil {
-			t.Fatalf("Process delivery %s: %v", claimed.ID, err)
+		if result := w.Process(ctx, store, claimed); result.Err != nil {
+			t.Fatalf("Process delivery %s: %v", claimed.ID, result.Err)
 		}
 	}
 
@@ -530,7 +542,7 @@ func TestWorkerRun_SchedulerFairnessAcrossCustomers(t *testing.T) {
 
 	store := outbox.New(db)
 	sched := roundrobin.New()
-	w := worker.New()
+	w := newIntegrationWorker()
 	w.Scheduler = sched
 
 	// Notify both Customers to seed the scheduler.
@@ -568,6 +580,72 @@ func TestWorkerRun_SchedulerFairnessAcrossCustomers(t *testing.T) {
 	if smallSucceeded != deliveriesPerCustomer {
 		t.Errorf("small succeeded: got %d, want %d", smallSucceeded, deliveriesPerCustomer)
 	}
+}
+
+func TestRequeue_ReturnsInFlightToFailedRetryWithoutAttemptRow(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	store := outbox.New(db)
+
+	insertWebhook(t, ctx, db, "cus_1", "https://partner.example.com/hook", true, "subscriber.created")
+
+	_, err := ingest.New(db).Submit(ctx, ingest.Event{
+		CustomerID: "cus_1",
+		Type:       "subscriber.created",
+		Payload:    []byte(`{"subscriber_id":"sub_1"}`),
+	})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	claimed, ok, err := store.ClaimNext(ctx, "cus_1")
+	if err != nil {
+		t.Fatalf("ClaimNext: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext: no delivery")
+	}
+
+	assertDeliveryStatus(t, ctx, db, claimed.ID, "in_flight")
+	if claimed.AttemptNumber != 1 {
+		t.Fatalf("attempt_number after claim: got %d, want 1", claimed.AttemptNumber)
+	}
+
+	if err := store.Requeue(ctx, claimed.ID, 200*time.Millisecond); err != nil {
+		t.Fatalf("Requeue: %v", err)
+	}
+
+	assertDeliveryStatus(t, ctx, db, claimed.ID, "failed_retry")
+	assertAttemptCount(t, ctx, db, claimed.ID, 0)
+
+	var attemptCount int
+	err = db.QueryRowContext(ctx, `SELECT attempt_count FROM deliveries WHERE id = $1`, claimed.ID).Scan(&attemptCount)
+	if err != nil {
+		t.Fatalf("select attempt_count: %v", err)
+	}
+	if attemptCount != 0 {
+		t.Errorf("attempt_count after requeue: got %d, want 0 (claim-time increment cancelled)", attemptCount)
+	}
+
+	time.Sleep(250 * time.Millisecond)
+
+	reclaimed, ok, err := store.ClaimNext(ctx, "cus_1")
+	if err != nil {
+		t.Fatalf("ClaimNext after requeue: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext after requeue: no delivery")
+	}
+	if reclaimed.AttemptNumber != 1 {
+		t.Fatalf("attempt_number after re-claim: got %d, want 1 (decrement + re-increment)", reclaimed.AttemptNumber)
+	}
+
+	if err := store.MarkSucceeded(ctx, reclaimed.ID, 200, 10*time.Millisecond); err != nil {
+		t.Fatalf("MarkSucceeded: %v", err)
+	}
+
+	assertDeliveryStatus(t, ctx, db, reclaimed.ID, "succeeded")
+	assertAttemptCount(t, ctx, db, reclaimed.ID, 1)
 }
 
 func newPostgresDB(t *testing.T, ctx context.Context) *sql.DB {

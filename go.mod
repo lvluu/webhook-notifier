@@ -1,10 +1,12 @@
 module github.com/lvluu/webhook-notifier
 
-go 1.24
+go 1.25.0
 
 require (
 	github.com/lib/pq v1.12.3
+	github.com/testcontainers/testcontainers-go v0.30.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.30.0
+	golang.org/x/sync v0.3.0
 )
 
 require (
@@ -44,7 +46,6 @@ require (
 	github.com/shirou/gopsutil/v3 v3.23.12 // indirect
 	github.com/shoenig/go-m1cpu v0.1.6 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
-	github.com/testcontainers/testcontainers-go v0.30.0 // indirect
 	github.com/tklauser/go-sysconf v0.3.13 // indirect
 	github.com/tklauser/numcpus v0.7.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
