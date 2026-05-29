@@ -176,6 +176,7 @@ func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Deli
 		AttemptNumber: d.AttemptNumber,
 	})
 	duration := time.Since(started)
+	deliveryLifetime := time.Since(d.CreatedAt)
 	if resp != nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		if closeErr := resp.Body.Close(); closeErr != nil && err == nil {
@@ -202,7 +203,8 @@ func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Deli
 		resultErr := store.MarkSucceeded(ctx, d.ID, statusCode, duration)
 		if resultErr == nil {
 			observe.IncDelivery("succeeded")
-			observe.ObserveDeliveryLatency(customerClass, duration.Seconds())
+			observe.ObserveDeliveryLatency(customerClass, deliveryLifetime.Seconds())
+			observe.ObserveAttempts(float64(d.AttemptNumber))
 		}
 		log.Info("delivery succeeded", "status_code", statusCode, "duration_ms", duration.Milliseconds())
 		return ProcessResult{Err: resultErr}
@@ -211,7 +213,8 @@ func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Deli
 		resultErr := store.MarkDead(ctx, d.ID, statusCode, reason, reason, duration)
 		if resultErr == nil {
 			observe.IncDelivery("dead")
-			observe.ObserveDeliveryLatency(customerClass, duration.Seconds())
+			observe.ObserveDeliveryLatency(customerClass, deliveryLifetime.Seconds())
+			observe.ObserveAttempts(float64(d.AttemptNumber))
 			observe.IncDlq(reason)
 		}
 		log.Warn("delivery dead", "reason", reason, "status_code", statusCode, "duration_ms", duration.Milliseconds())
@@ -220,8 +223,7 @@ func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Deli
 
 	resultErr := store.MarkRetry(ctx, d.ID, statusCode, reason, delay, duration)
 	if resultErr == nil {
-		observe.IncDelivery("failed_retry")
-		observe.ObserveDeliveryLatency(customerClass, duration.Seconds())
+		observe.ObserveDeliveryLatency(customerClass, deliveryLifetime.Seconds())
 	}
 	log.Warn("delivery scheduled for retry", "reason", reason, "retry_delay_ms", delay.Milliseconds(), "status_code", statusCode, "duration_ms", duration.Milliseconds())
 	return ProcessResult{Err: resultErr}
