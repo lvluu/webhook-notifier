@@ -19,6 +19,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
+	"github.com/lvluu/webhook-notifier/internal/registry"
 	"github.com/lvluu/webhook-notifier/internal/retry"
 	"github.com/lvluu/webhook-notifier/internal/scheduler"
 	"github.com/lvluu/webhook-notifier/internal/scheduler/roundrobin"
@@ -27,6 +28,10 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+type noopNotifier struct{}
+
+func (noopNotifier) Notify(customerID string) {}
 
 type integrationStubScheduler struct{}
 
@@ -37,6 +42,10 @@ func (integrationStubScheduler) Notify(scheduler.CustomerID) {}
 
 func newIntegrationWorker(opts ...worker.Option) *worker.Worker {
 	return worker.New(integrationStubScheduler{}, opts...)
+}
+
+func newIngestStore(db *sql.DB) *ingest.Store {
+	return ingest.New(db, registry.New(db), noopNotifier{})
 }
 
 func TestIngestClaimDeliverHappyPath(t *testing.T) {
@@ -64,7 +73,7 @@ func TestIngestClaimDeliverHappyPath(t *testing.T) {
 	insertWebhook(t, ctx, db, "cus_1", srv.URL+"/inactive", false, "subscriber.created")
 	insertWebhook(t, ctx, db, "cus_1", srv.URL+"/wrong-type", true, "subscriber.deleted")
 
-	submitted, err := ingest.New(db).Submit(ctx, ingest.Event{
+	submitted, err := newIngestStore(db).Submit(ctx, ingest.Event{
 		CustomerID: "cus_1",
 		Type:       "subscriber.created",
 		Payload:    []byte(`{"subscriber_id":"sub_123"}`),
@@ -137,7 +146,7 @@ func TestClaimNextConcurrentWorkersDoNotDoubleClaim(t *testing.T) {
 	for i := 0; i < deliveryCount; i++ {
 		insertWebhook(t, ctx, db, "cus_race", "https://partner.example/webhook", true, "subscriber.created")
 	}
-	submitted, err := ingest.New(db).Submit(ctx, ingest.Event{
+	submitted, err := newIngestStore(db).Submit(ctx, ingest.Event{
 		CustomerID: "cus_race",
 		Type:       "subscriber.created",
 		Payload:    []byte(`{"subscriber_id":"sub_race"}`),
@@ -206,7 +215,7 @@ func TestClaimNextRecoversStaleInFlightDelivery(t *testing.T) {
 	db := newPostgresDB(t, ctx)
 
 	insertWebhook(t, ctx, db, "cus_recover", "https://partner.example/webhook", true, "subscriber.created")
-	submitted, err := ingest.New(db).Submit(ctx, ingest.Event{
+	submitted, err := newIngestStore(db).Submit(ctx, ingest.Event{
 		CustomerID: "cus_recover",
 		Type:       "subscriber.created",
 		Payload:    []byte(`{"subscriber_id":"sub_recover"}`),
@@ -269,7 +278,7 @@ func TestProcessRetryableFailureSchedulesRetry(t *testing.T) {
 	defer srv.Close()
 
 	insertWebhook(t, ctx, db, "cus_retry", srv.URL, true, "subscriber.created")
-	submitted, err := ingest.New(db).Submit(ctx, ingest.Event{
+	submitted, err := newIngestStore(db).Submit(ctx, ingest.Event{
 		CustomerID: "cus_retry",
 		Type:       "subscriber.created",
 		Payload:    []byte(`{"subscriber_id":"sub_retry"}`),
@@ -308,7 +317,7 @@ func TestProcessRetryableFailureUsesPreviousRetryDelay(t *testing.T) {
 	defer srv.Close()
 
 	insertWebhook(t, ctx, db, "cus_backoff", srv.URL, true, "subscriber.created")
-	submitted, err := ingest.New(db).Submit(ctx, ingest.Event{
+	submitted, err := newIngestStore(db).Submit(ctx, ingest.Event{
 		CustomerID: "cus_backoff",
 		Type:       "subscriber.created",
 		Payload:    []byte(`{"subscriber_id":"sub_backoff"}`),
@@ -360,7 +369,7 @@ func TestProcessTerminalFailureWritesDeadLetter(t *testing.T) {
 	defer srv.Close()
 
 	insertWebhook(t, ctx, db, "cus_dead", srv.URL, true, "subscriber.created")
-	submitted, err := ingest.New(db).Submit(ctx, ingest.Event{
+	submitted, err := newIngestStore(db).Submit(ctx, ingest.Event{
 		CustomerID: "cus_dead",
 		Type:       "subscriber.created",
 		Payload:    []byte(`{"subscriber_id":"sub_dead"}`),
@@ -407,7 +416,7 @@ func TestProcessFlakyReceiverEventuallySucceedsAllDeliveries(t *testing.T) {
 	for i := 0; i < deliveryCount; i++ {
 		insertWebhook(t, ctx, db, "cus_flaky", srv.URL, true, "subscriber.created")
 	}
-	submitted, err := ingest.New(db).Submit(ctx, ingest.Event{
+	submitted, err := newIngestStore(db).Submit(ctx, ingest.Event{
 		CustomerID: "cus_flaky",
 		Type:       "subscriber.created",
 		Payload:    []byte(`{"subscriber_id":"sub_flaky"}`),
@@ -516,7 +525,7 @@ func TestWorkerRun_SchedulerFairnessAcrossCustomers(t *testing.T) {
 		insertWebhook(t, ctx, db, "small", srv.URL, true, "subscriber.created")
 	}
 
-	whaleSubmitted, err := ingest.New(db).Submit(ctx, ingest.Event{
+	whaleSubmitted, err := newIngestStore(db).Submit(ctx, ingest.Event{
 		CustomerID: "whale",
 		Type:       "subscriber.created",
 		Payload:    []byte(`{"subscriber_id":"whale_sub"}`),
@@ -528,7 +537,7 @@ func TestWorkerRun_SchedulerFairnessAcrossCustomers(t *testing.T) {
 		t.Fatalf("whale delivery count: got %d, want %d", len(whaleSubmitted.DeliveryIDs), deliveriesPerCustomer)
 	}
 
-	smallSubmitted, err := ingest.New(db).Submit(ctx, ingest.Event{
+	smallSubmitted, err := newIngestStore(db).Submit(ctx, ingest.Event{
 		CustomerID: "small",
 		Type:       "subscriber.created",
 		Payload:    []byte(`{"subscriber_id":"small_sub"}`),
@@ -589,7 +598,7 @@ func TestRequeue_ReturnsInFlightToFailedRetryWithoutAttemptRow(t *testing.T) {
 
 	insertWebhook(t, ctx, db, "cus_1", "https://partner.example.com/hook", true, "subscriber.created")
 
-	_, err := ingest.New(db).Submit(ctx, ingest.Event{
+	_, err := newIngestStore(db).Submit(ctx, ingest.Event{
 		CustomerID: "cus_1",
 		Type:       "subscriber.created",
 		Payload:    []byte(`{"subscriber_id":"sub_1"}`),
