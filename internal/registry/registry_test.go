@@ -285,6 +285,71 @@ func TestListActiveForEvent_CancelledContextDoesNotCorruptCache(t *testing.T) {
 	}
 }
 
+func TestListActiveForEvent_CancelledCallerDoesNotCancelCoalescedWaiter(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	id := insertWebhook(t, ctx, db, "cus_waiter", true, "subscriber.created")
+	reg := registry.New(db, registry.WithTTL(5*time.Minute))
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = tx.Rollback()
+	})
+	if _, err := tx.ExecContext(ctx, "LOCK TABLE webhooks IN ACCESS EXCLUSIVE MODE"); err != nil {
+		t.Fatalf("lock webhooks: %v", err)
+	}
+
+	firstCtx, cancelFirst := context.WithCancel(ctx)
+	firstErr := make(chan error, 1)
+	go func() {
+		_, err := reg.ListActiveForEvent(firstCtx, "cus_waiter", "subscriber.created")
+		firstErr <- err
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	type lookupResult struct {
+		hooks []registry.Webhook
+		err   error
+	}
+	secondResult := make(chan lookupResult, 1)
+	go func() {
+		hooks, err := reg.ListActiveForEvent(ctx, "cus_waiter", "subscriber.created")
+		secondResult <- lookupResult{hooks: hooks, err: err}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancelFirst()
+
+	select {
+	case err := <-firstErr:
+		if err == nil {
+			t.Fatal("first caller: expected cancellation error, got nil")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first caller did not return after cancellation")
+	}
+
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("release webhooks lock: %v", err)
+	}
+
+	select {
+	case res := <-secondResult:
+		if res.err != nil {
+			t.Fatalf("second caller: unexpected error: %v", res.err)
+		}
+		if len(res.hooks) != 1 || res.hooks[0].ID != id {
+			t.Fatalf("second caller: got %d webhooks (id=%s), want 1 with id %s", len(res.hooks), hookID(res.hooks), id)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("second caller did not receive coalesced lookup result")
+	}
+}
+
 func TestListActiveForEvent_Validation(t *testing.T) {
 	t.Parallel()
 
