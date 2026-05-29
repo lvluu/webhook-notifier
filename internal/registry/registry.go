@@ -21,17 +21,8 @@ type Webhook struct {
 	Active          bool
 }
 
-// Registry resolves which Webhooks should receive a given Event type for a Customer.
-type Registry interface {
-	ListActiveForEvent(ctx context.Context, customerID string, eventType string) ([]Webhook, error)
-}
-
-const (
-	defaultCapacity = 10_000
-	defaultTTL      = 30 * time.Second
-)
-
-type cache struct {
+// Registry is a Postgres-backed webhook lookup with an LRU + TTL front cache.
+type Registry struct {
 	db       *sql.DB
 	lru      *expirable.LRU[string, []Webhook]
 	sf       singleflight.Group
@@ -40,43 +31,48 @@ type cache struct {
 	ttl      time.Duration
 }
 
-// Option configures a Registry cache.
-type Option func(*cache)
+const (
+	defaultCapacity = 10_000
+	defaultTTL      = 30 * time.Second
+)
+
+// Option configures a Registry.
+type Option func(*Registry)
 
 // WithCapacity sets the maximum number of cache entries.
 func WithCapacity(capacity int) Option {
-	return func(c *cache) {
+	return func(r *Registry) {
 		if capacity > 0 {
-			c.capacity = capacity
+			r.capacity = capacity
 		}
 	}
 }
 
 // WithTTL sets the time-to-live for each cache entry.
 func WithTTL(ttl time.Duration) Option {
-	return func(c *cache) {
+	return func(r *Registry) {
 		if ttl > 0 {
-			c.ttl = ttl
+			r.ttl = ttl
 		}
 	}
 }
 
-// New returns a Registry backed by Postgres with an LRU + TTL front cache.
-func New(db *sql.DB, opts ...Option) Registry {
-	c := &cache{
+// New returns a concrete *Registry backed by Postgres with an LRU + TTL front cache.
+func New(db *sql.DB, opts ...Option) *Registry {
+	r := &Registry{
 		db:       db,
 		capacity: defaultCapacity,
 		ttl:      defaultTTL,
 		query:    `SELECT id, customer_id, url, secret_encrypted, event_types, active FROM webhooks WHERE customer_id = $1 AND active = true AND $2 = ANY(event_types) ORDER BY id`,
 	}
 	for _, opt := range opts {
-		opt(c)
+		opt(r)
 	}
-	c.lru = expirable.NewLRU[string, []Webhook](c.capacity, nil, c.ttl)
-	return c
+	r.lru = expirable.NewLRU[string, []Webhook](r.capacity, nil, r.ttl)
+	return r
 }
 
-func (c *cache) ListActiveForEvent(ctx context.Context, customerID string, eventType string) ([]Webhook, error) {
+func (r *Registry) ListActiveForEvent(ctx context.Context, customerID string, eventType string) ([]Webhook, error) {
 	if customerID == "" {
 		return nil, fmt.Errorf("customer_id is required")
 	}
@@ -86,16 +82,16 @@ func (c *cache) ListActiveForEvent(ctx context.Context, customerID string, event
 
 	key := cacheKey(customerID, eventType)
 
-	if hooks, ok := c.lru.Get(key); ok {
+	if hooks, ok := r.lru.Get(key); ok {
 		return hooks, nil
 	}
 
-	result, err, _ := c.sf.Do(key, func() (interface{}, error) {
-		hooks, err := c.queryDB(ctx, customerID, eventType)
+	result, err, _ := r.sf.Do(key, func() (interface{}, error) {
+		hooks, err := r.queryDB(ctx, customerID, eventType)
 		if err != nil {
 			return nil, err
 		}
-		c.lru.Add(key, hooks)
+		r.lru.Add(key, hooks)
 		return hooks, nil
 	})
 	if err != nil {
@@ -104,8 +100,8 @@ func (c *cache) ListActiveForEvent(ctx context.Context, customerID string, event
 	return result.([]Webhook), nil
 }
 
-func (c *cache) queryDB(ctx context.Context, customerID string, eventType string) ([]Webhook, error) {
-	rows, err := c.db.QueryContext(ctx, c.query, customerID, eventType)
+func (r *Registry) queryDB(ctx context.Context, customerID string, eventType string) ([]Webhook, error) {
+	rows, err := r.db.QueryContext(ctx, r.query, customerID, eventType)
 	if err != nil {
 		return nil, fmt.Errorf("query webhooks: %w", err)
 	}

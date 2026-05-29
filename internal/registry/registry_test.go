@@ -244,9 +244,9 @@ func TestListActiveForEvent_Validation(t *testing.T) {
 	reg := registry.New(db, registry.WithTTL(5*time.Minute))
 
 	tests := []struct {
-		name        string
-		customerID  string
-		eventType   string
+		name       string
+		customerID string
+		eventType  string
 	}{
 		{name: "empty customer_id", customerID: "", eventType: "subscriber.created"},
 		{name: "empty event_type", customerID: "cus_val", eventType: ""},

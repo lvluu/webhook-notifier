@@ -80,9 +80,13 @@ The Registry returns webhooks from cache, which may be up to TTL seconds stale. 
 
 Acceptable because: (a) webhook changes are rare admin operations, not hot-path writes; (b) short TTL (30s) bounds the window; (c) partners handle out-of-order/delayed events via `X-Event-Id` dedup.
 
-### Terminology note
+### Interface location
 
-CONTEXT.md defines **Webhook** as the canonical term and explicitly says "Avoid: subscription (collides with Subscriber)." The package and component are called `SubscriptionRegistry` as a name for the *registry of webhooks*, but the data type returned is `Webhook`, not `Subscription`.
+The `Registry` interface is defined in `internal/ingest/` (the consumer package), not in `internal/registry/` — following the Go convention "define interfaces where they are used, not where they are implemented." The concrete `*registry.Registry` type satisfies the interface implicitly.
+
+### Spec deviation from Issue #9
+
+Issue #9 specified `Get(customerID) ([]Webhook, error)`. The actual interface is `ListActiveForEvent(ctx, customerID, eventType) ([]Webhook, error)`. Rationale: per-event-type cache keys (`customerID:eventType`) keep entries small and avoid post-filtering in Go — see "Considered options: `Get(customerID)`" below. The method name `ListActiveForEvent` better conveys the semantics (active-only webhooks for a specific event type) than `Get`. The `ctx` parameter follows the Go convention for cancellation and timeouts.
 
 ## Considered options
 

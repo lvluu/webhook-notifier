@@ -10,6 +10,14 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/registry"
 )
 
+// Registry resolves which Webhooks should receive a given Event type for a Customer.
+// Defined at the consumer boundary; implementations live in internal/registry.
+type Registry interface {
+	ListActiveForEvent(ctx context.Context, customerID string, eventType string) ([]Webhook, error)
+}
+
+type Webhook = registry.Webhook
+
 // Event is a business fact that should be fanned out to matching Webhooks.
 type Event struct {
 	CustomerID string
@@ -31,12 +39,12 @@ type Notifier interface {
 // Store persists Events and their derived Delivery rows in Postgres.
 type Store struct {
 	db       *sql.DB
-	registry registry.Registry
+	registry Registry
 	notifier Notifier
 }
 
 // New returns an Event ingest store backed by db.
-func New(db *sql.DB, reg registry.Registry, notifier Notifier, opts ...Option) *Store {
+func New(db *sql.DB, reg Registry, notifier Notifier, opts ...Option) *Store {
 	s := &Store{
 		db:       db,
 		registry: reg,
@@ -106,7 +114,7 @@ func (s *Store) Submit(ctx context.Context, event Event) (SubmittedEvent, error)
 	return submitted, nil
 }
 
-func insertDeliveries(ctx context.Context, tx *sql.Tx, eventID string, hooks []registry.Webhook) ([]string, error) {
+func insertDeliveries(ctx context.Context, tx *sql.Tx, eventID string, hooks []Webhook) ([]string, error) {
 	var sb strings.Builder
 	sb.WriteString(`INSERT INTO deliveries (event_id, webhook_id, customer_id, status, attempt_count, next_attempt_at) VALUES `)
 
