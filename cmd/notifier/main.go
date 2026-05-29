@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/lvluu/webhook-notifier/internal/observe"
@@ -40,6 +41,7 @@ func main() {
 
 	registry := prometheus.NewRegistry()
 	observe.RegisterMetrics(registry)
+	observe.RegisterPoolGauges(registry, db)
 
 	infra := observe.NewInfraServer(observe.InfraServerConfig{
 		Addr:      infraAddr,
