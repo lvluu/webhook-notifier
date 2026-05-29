@@ -86,8 +86,9 @@ func NewInfraServer(cfg InfraServerConfig) *InfraServer {
 
 	return &InfraServer{
 		srv: &http.Server{
-			Addr:    cfg.Addr,
-			Handler: mux,
+			Addr:              cfg.Addr,
+			Handler:           mux,
+			ReadHeaderTimeout: 5 * time.Second,
 		},
 	}
 }

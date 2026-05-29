@@ -1,3 +1,4 @@
+// Command notifier runs the Webhook Notifier service.
 package main
 
 import (
@@ -37,7 +38,11 @@ func main() {
 		logger.Error("failed to open database", "error", err)
 		os.Exit(1)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			logger.Error("database close error", "error", err)
+		}
+	}()
 
 	registry := prometheus.NewRegistry()
 	observe.RegisterMetrics(registry)
@@ -55,8 +60,9 @@ func main() {
 
 	// Stub business server that responds 200 for readiness checks.
 	business := &http.Server{
-		Addr:    addr,
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+		Addr:              addr,
+		Handler:           http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 	businessErrCh := make(chan error, 1)
 	go func() {
@@ -94,6 +100,7 @@ func main() {
 func openDB() (*sql.DB, error) {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
+		// #nosec G101 -- local Docker Compose default only; production supplies DATABASE_URL.
 		dsn = "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable"
 	}
 	db, err := sql.Open("postgres", dsn)
