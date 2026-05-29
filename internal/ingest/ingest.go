@@ -16,6 +16,7 @@ type Registry interface {
 	ListActiveForEvent(ctx context.Context, customerID string, eventType string) ([]Webhook, error)
 }
 
+// Webhook aliases the registry package's Webhook shape at the ingest boundary.
 type Webhook = registry.Webhook
 
 // Event is a business fact that should be fanned out to matching Webhooks.
@@ -133,8 +134,6 @@ func insertDeliveries(ctx context.Context, tx *sql.Tx, eventID string, hooks []W
 	if err != nil {
 		return nil, fmt.Errorf("insert deliveries: %w", err)
 	}
-	defer rows.Close()
-
 	var ids []string
 	for rows.Next() {
 		var id string
@@ -142,6 +141,9 @@ func insertDeliveries(ctx context.Context, tx *sql.Tx, eventID string, hooks []W
 			return nil, fmt.Errorf("scan delivery id: %w", err)
 		}
 		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close delivery rows: %w", err)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("scan delivery ids: %w", err)

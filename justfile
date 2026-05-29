@@ -50,8 +50,8 @@ lint:
     #!/usr/bin/env bash
     set -euo pipefail
     GOBIN=$(go env GOPATH)/bin
-    if [[ ! -x "$GOBIN/golangci-lint" ]] || ! "$GOBIN/golangci-lint" --version | grep -q 'version 1\.64\.5'; then
-        go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.5
+    if [[ ! -x "$GOBIN/golangci-lint" ]] || ! "$GOBIN/golangci-lint" --version | grep -q 'version 2\.12\.2'; then
+        go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
     fi
     "$GOBIN/golangci-lint" run
 

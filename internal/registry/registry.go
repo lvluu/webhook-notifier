@@ -72,6 +72,7 @@ func New(db *sql.DB, opts ...Option) *Registry {
 	return r
 }
 
+// ListActiveForEvent returns the active Webhooks for a Customer/Event pair.
 func (r *Registry) ListActiveForEvent(ctx context.Context, customerID string, eventType string) ([]Webhook, error) {
 	if customerID == "" {
 		return nil, fmt.Errorf("customer_id is required")
@@ -116,8 +117,6 @@ func (r *Registry) queryDB(ctx context.Context, customerID string, eventType str
 	if err != nil {
 		return nil, fmt.Errorf("query webhooks: %w", err)
 	}
-	defer rows.Close()
-
 	var hooks []Webhook
 	for rows.Next() {
 		var h Webhook
@@ -125,6 +124,9 @@ func (r *Registry) queryDB(ctx context.Context, customerID string, eventType str
 			return nil, fmt.Errorf("scan webhook: %w", err)
 		}
 		hooks = append(hooks, h)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close webhook rows: %w", err)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate webhooks: %w", err)

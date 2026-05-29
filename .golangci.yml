@@ -1,36 +1,39 @@
+version: "2"
+
 run:
   timeout: 5m
   tests: true
 
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
     - govet
     - ineffassign
     - staticcheck
     - unused
-    - gofmt
-    - goimports
     - misspell
     - revive
     - bodyclose
     - gocritic
     - gosec
     - nolintlint
-
-linters-settings:
-  revive:
+  settings:
+    revive:
+      rules:
+        - name: exported
+          arguments: ["disableStutteringCheck"]
+        - name: package-comments
+        - name: var-naming
+    gosec:
+      excludes:
+        - G404 # math/rand acceptable for jitter
+  exclusions:
     rules:
-      - name: exported
-        arguments: ["disableStutteringCheck"]
-      - name: package-comments
-      - name: var-naming
-  gosec:
-    excludes:
-      - G404 # math/rand acceptable for jitter
+      - path: _test\.go
+        linters: [gosec, errcheck]
 
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters: [gosec, errcheck]
+formatters:
+  enable:
+    - gofmt
+    - goimports

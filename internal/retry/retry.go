@@ -13,19 +13,31 @@ import (
 )
 
 const (
+	// DefaultMaxAttempts is the ADR-0003 retry budget for a Delivery.
 	DefaultMaxAttempts = 8
-	DefaultBaseDelay   = time.Second
-	DefaultCapDelay    = 5 * time.Minute
+	// DefaultBaseDelay is the first retry delay before exponential backoff.
+	DefaultBaseDelay = time.Second
+	// DefaultCapDelay is the maximum retry delay after backoff and jitter.
+	DefaultCapDelay = 5 * time.Minute
 
-	ReasonSucceeded    = "succeeded"
-	ReasonExhausted    = "exhausted"
-	ReasonRetryAfter   = "retry_after"
+	// ReasonSucceeded records a successful terminal delivery.
+	ReasonSucceeded = "succeeded"
+	// ReasonExhausted records a delivery that consumed its retry budget.
+	ReasonExhausted = "exhausted"
+	// ReasonRetryAfter records a retry scheduled from a Retry-After header.
+	ReasonRetryAfter = "retry_after"
+	// ReasonRetryable408 records an HTTP 408 retryable response.
 	ReasonRetryable408 = "retryable_408"
+	// ReasonRetryable429 records an HTTP 429 retryable response.
 	ReasonRetryable429 = "retryable_429"
+	// ReasonRetryable5xx records an HTTP 5xx retryable response.
 	ReasonRetryable5xx = "retryable_5xx"
+	// ReasonNetworkError records a retryable network error.
 	ReasonNetworkError = "network_error"
-	ReasonTimeout      = "timeout"
-	ReasonTerminal4xx  = "terminal_4xx"
+	// ReasonTimeout records a retryable timeout.
+	ReasonTimeout = "timeout"
+	// ReasonTerminal4xx records a non-retryable HTTP 4xx response.
+	ReasonTerminal4xx = "terminal_4xx"
 )
 
 // Config tunes RetryPolicy while preserving ADR-0003 defaults.

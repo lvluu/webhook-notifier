@@ -16,6 +16,7 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/signer"
 )
 
+// Delivery contains the outbound HTTP request data for one webhook delivery.
 type Delivery struct {
 	EventID       string
 	DeliveryID    string
@@ -27,13 +28,17 @@ type Delivery struct {
 	AttemptNumber int
 }
 
+// ProcessStatus describes the outcome of processing one claimed Delivery.
 type ProcessStatus int
 
 const (
+	// StatusSucceeded means the Delivery reached a terminal success/dead state.
 	StatusSucceeded ProcessStatus = iota
+	// StatusRequeued means host-level backpressure deferred this Delivery.
 	StatusRequeued
 )
 
+// ProcessResult is the outcome returned after processing a Delivery.
 type ProcessResult struct {
 	Status ProcessStatus
 	Err    error
@@ -48,6 +53,7 @@ type DeliveryStore interface {
 	Requeue(ctx context.Context, deliveryID string, delay time.Duration) error
 }
 
+// Worker sends webhook Deliveries and records retry outcomes.
 type Worker struct {
 	HTTP        *http.Client
 	RetryPolicy retry.RetryPolicy
@@ -55,20 +61,25 @@ type Worker struct {
 	HostLimiter *HostLimiter
 }
 
+// Option configures a Worker.
 type Option func(*Worker)
 
+// WithHTTPClient sets the HTTP client used for webhook requests.
 func WithHTTPClient(c *http.Client) Option {
 	return func(w *Worker) { w.HTTP = c }
 }
 
+// WithRetryPolicy sets the retry policy used to classify delivery attempts.
 func WithRetryPolicy(rp retry.RetryPolicy) Option {
 	return func(w *Worker) { w.RetryPolicy = rp }
 }
 
+// WithHostLimiter sets the optional per-host concurrency limiter.
 func WithHostLimiter(hl *HostLimiter) Option {
 	return func(w *Worker) { w.HostLimiter = hl }
 }
 
+// New returns a Worker using scheduler s and optional overrides.
 func New(s scheduler.Scheduler, opts ...Option) *Worker {
 	w := &Worker{
 		HTTP:        http.DefaultClient,
@@ -81,17 +92,21 @@ func New(s scheduler.Scheduler, opts ...Option) *Worker {
 	return w
 }
 
+// Deliver sends d and returns the HTTP status code.
 func (w *Worker) Deliver(ctx context.Context, d Delivery) (int, error) {
 	resp, err := w.Send(ctx, d)
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
+	if err := resp.Body.Close(); err != nil {
+		return 0, fmt.Errorf("close response body: %w", err)
+	}
 
 	return resp.StatusCode, nil
 }
 
+// Send builds and executes the signed webhook HTTP request for d.
 func (w *Worker) Send(ctx context.Context, d Delivery) (*http.Response, error) {
 	if w.HTTP == nil {
 		w.HTTP = http.DefaultClient
@@ -122,6 +137,7 @@ func (w *Worker) Send(ctx context.Context, d Delivery) (*http.Response, error) {
 	return resp, nil
 }
 
+// Process sends a claimed Delivery and records its success, retry, or death.
 func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Delivery) ProcessResult {
 	if w.HostLimiter != nil {
 		u, parseErr := url.Parse(d.URL)
@@ -152,8 +168,10 @@ func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Deli
 	})
 	duration := time.Since(started)
 	if resp != nil {
-		defer resp.Body.Close()
 		_, _ = io.Copy(io.Discard, resp.Body)
+		if closeErr := resp.Body.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close response body: %w", closeErr)
+		}
 	}
 
 	statusCode := 0
@@ -174,6 +192,7 @@ func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Deli
 
 const idleBackoff = 50 * time.Millisecond
 
+// Run continuously claims scheduled Deliveries and processes them.
 func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 	if store == nil {
 		return fmt.Errorf("outbox store is required")
