@@ -222,9 +222,6 @@ func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Deli
 	}
 
 	resultErr := store.MarkRetry(ctx, d.ID, statusCode, reason, delay, duration)
-	if resultErr == nil {
-		observe.ObserveDeliveryLatency(customerClass, deliveryLifetime.Seconds())
-	}
 	log.Warn("delivery scheduled for retry", "reason", reason, "retry_delay_ms", delay.Milliseconds(), "status_code", statusCode, "duration_ms", duration.Milliseconds())
 	return ProcessResult{Err: resultErr}
 }

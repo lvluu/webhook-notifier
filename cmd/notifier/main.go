@@ -42,6 +42,7 @@ func main() {
 	registry := prometheus.NewRegistry()
 	observe.RegisterMetrics(registry)
 	observe.RegisterPoolGauges(registry, db)
+	observe.RegisterPendingCountGauges(registry, db)
 
 	infra := observe.NewInfraServer(observe.InfraServerConfig{
 		Addr:      infraAddr,

@@ -63,12 +63,7 @@ func NewInfraServer(cfg InfraServerConfig) *InfraServer {
 			},
 			Timeout: 5 * time.Second,
 		}
-		mux.Handle("GET /health", health.NewHandler(
-			health.NewChecker(
-				health.WithCacheDuration(5*time.Second),
-				health.WithCheck(dbCheck),
-			),
-		))
+		mux.Handle("GET /health", health.NewHandler(health.NewChecker()))
 		mux.Handle("GET /ready", health.NewHandler(
 			health.NewChecker(
 				health.WithCacheDuration(5*time.Second),

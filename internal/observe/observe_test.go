@@ -2,6 +2,7 @@ package observe
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
@@ -24,10 +25,26 @@ type fakeDriver struct {
 type fakeConn struct {
 	driver.Conn
 }
+type fakeRows struct {
+	sent bool
+}
 
 func (fakeDriver) Open(_ string) (driver.Conn, error)  { return fakeConn{}, nil }
 func (fakeConn) Prepare(_ string) (driver.Stmt, error) { return nil, nil }
 func (fakeConn) Close() error                          { return nil }
+func (fakeConn) QueryContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+	return &fakeRows{}, nil
+}
+func (fakeRows) Columns() []string { return []string{"count"} }
+func (fakeRows) Close() error      { return nil }
+func (r *fakeRows) Next(dest []driver.Value) error {
+	if r.sent {
+		return io.EOF
+	}
+	r.sent = true
+	dest[0] = int64(7)
+	return nil
+}
 
 func init() { sql.Register("fake", fakeDriver{}) }
 
@@ -115,6 +132,36 @@ func TestRegisterPoolGauges_registers_six_families(t *testing.T) {
 	}
 	if poolCount < 6 {
 		t.Fatalf("expected at least 6 webhook_pg_pool_* families, got %d", poolCount)
+	}
+}
+
+func TestRegisterPendingCountGauges_registers_customer_class_families(t *testing.T) {
+	reg := prometheus.NewRegistry()
+
+	db, err := sql.Open("fake", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	RegisterPendingCountGauges(reg, db)
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, f := range families {
+		if f.GetName() != "webhook_pending_count" {
+			continue
+		}
+		found = true
+		if len(f.GetMetric()) != 3 {
+			t.Fatalf("expected 3 customer_class series, got %d", len(f.GetMetric()))
+		}
+	}
+	if !found {
+		t.Fatal("missing webhook_pending_count family")
 	}
 }
 

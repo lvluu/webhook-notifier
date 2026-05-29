@@ -2,6 +2,7 @@ package observe
 
 import (
 	"database/sql"
+	"math"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -73,6 +74,40 @@ func RegisterPoolGauges(reg prometheus.Registerer, db *sql.DB) {
 			Help: "Total time blocked waiting for a new connection, in seconds.",
 		}, func() float64 { return db.Stats().WaitDuration.Seconds() }),
 	)
+}
+
+// RegisterPendingCountGauges registers sampled queue-depth gauges by customer class.
+func RegisterPendingCountGauges(reg prometheus.Registerer, db *sql.DB) {
+	for _, customerClass := range []string{"whale", "small", "paused"} {
+		customerClass := customerClass
+		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name:        "webhook_pending_count",
+			Help:        "Current count of queued non-terminal deliveries, by customer class.",
+			ConstLabels: prometheus.Labels{"customer_class": customerClass},
+		}, func() float64 {
+			n, err := pendingCount(db, customerClass)
+			if err != nil {
+				return math.NaN()
+			}
+			return float64(n)
+		}))
+	}
+}
+
+func pendingCount(db *sql.DB, customerClass string) (int64, error) {
+	var n int64
+	err := db.QueryRow(`
+		SELECT count(*)
+		FROM deliveries
+		LEFT JOIN customers ON customers.id = deliveries.customer_id
+		WHERE deliveries.status IN ('pending', 'failed_retry')
+		  AND CASE
+		        WHEN COALESCE(customers.weight, 1) >= 3 THEN 'whale'
+		        WHEN COALESCE(customers.weight, 1) = 0 THEN 'paused'
+		        ELSE 'small'
+		      END = $1
+	`, customerClass).Scan(&n)
+	return n, err
 }
 
 // RegisterMetrics creates all observe package metrics and registers them with
