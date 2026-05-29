@@ -10,7 +10,7 @@ The design therefore needs to commit to fairness semantics that are equal *today
 
 Implement **Smooth Weighted Round Robin (SWRR) over the set of Customers with pending Deliveries**, with a default weight of `1` for every Customer. Source weights from a `WeightSource` interface (PoC impl: returns `1`; production impl: reads `customers.weight` with caching).
 
-"Smooth" refers to the Nginx-style algorithm (Wensong Zhang) that interleaves picks instead of emitting contiguous runs. Classic WRR with weights `[3,1]` yields `AAAB AAAB`; SWRR yields `ABAA ABAA`. Same share invariant, no head-of-line bursts for low-weight Customers — important once tiers ship, harmless when all weights are 1.
+"Smooth" refers to the Nginx-style algorithm (Wensong Zhang) that interleaves picks instead of emitting contiguous weighted cycles. Classic WRR with weights `[3,1]` yields `AAAB AAAB`; SWRR yields `AABAAABA`. Same share invariant, with the low-weight Customer pulled forward as much as the 3:1 ratio permits — important once tiers ship, harmless when all weights are 1.
 
 With uniform weights, SWRR is bit-for-bit equivalent to plain RR — same fairness, same ~30 lines of state, no behavioural regression vs the simpler design. When weights diverge, the same code path allocates proportional, interleaved slots.
 
@@ -47,5 +47,6 @@ type WeightSource interface {
 - The `WeightSource` interface is new but trivial. PoC ships a `ConstantWeights{value: 1}` impl. Production swaps in a DB-backed impl without scheduler changes.
 - `weight = 0` is a first-class state meaning "paused" — useful for incident response (throttle a misbehaving tenant without deleting their Webhooks) and for soft-deletes. Schedulers must treat 0-weight Customers as non-pending.
 - Live weight changes apply at the next Scheduler cycle. No worker restart.
+- Scheduler state is process-local. Postgres `SKIP LOCKED` claims prevent duplicate Delivery processing across horizontally scaled workers, but cluster-wide fairness needs a shared active-Customer discovery loop so every instance can Notify its local Scheduler from the same source of truth.
 - DRR upgrade remains a one-file change with no consumer changes — the goal of the abstraction.
 - Bench harness demonstrates fairness empirically (per-Customer-class p50/p95/p99 delivery latency) under (a) uniform weights, mixed Whale/Small load (the assignment's fairness scenario) and (b) non-uniform weights, to prove the share invariant. If the bench shows WRR is insufficient under realistic Delivery cost variance, that is the trigger to flip to DRR — recorded here rather than left as an unspoken assumption.

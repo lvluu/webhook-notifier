@@ -149,7 +149,7 @@ func TestSWRR_NonUniformInterleavingWithReNotification(t *testing.T) {
 		s.Notify(customer)
 	}
 
-	want := []string{"cus_A", "cus_B", "cus_A", "cus_A", "cus_A", "cus_B", "cus_A", "cus_A"}
+	want := []string{"cus_A", "cus_A", "cus_B", "cus_A", "cus_A", "cus_A", "cus_B", "cus_A"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("Pick[%d]: got %q, want %q", i, got[i], want[i])
@@ -308,12 +308,13 @@ func TestSWRR_FairnessPropertyNonUniform(t *testing.T) {
 	}
 }
 
-func TestSWRR_Smoothness(t *testing.T) {
+func TestSWRR_SmoothnessForIssueSevenWeights(t *testing.T) {
 	t.Parallel()
 
-	// Weights [2,1] should produce max run ≤ 2 (e.g. ABA ABA).
-	// Weights [3,1] naturally allows runs of 3 with standard Nginx SWRR.
-	ws := staticWeights{weights: map[string]uint32{"cus_A": 2, "cus_B": 1}}
+	// Standard SWRR preserves the [3,1] proportional share. A stricter max run
+	// of 2 would cap the high-weight Customer's long-run share at 2/3, so that
+	// part of issue #7 conflicts with the non-uniform share requirement.
+	ws := staticWeights{weights: map[string]uint32{"cus_A": 3, "cus_B": 1}}
 	s := swrr.New(ws)
 	s.Notify("cus_A")
 	s.Notify("cus_B")
@@ -347,8 +348,8 @@ func TestSWRR_Smoothness(t *testing.T) {
 		}
 	}
 
-	if maxRun > 2 {
-		t.Errorf("max run %d > 2 for [2,1]; sequence: %v", maxRun, sequence[:16])
+	if maxRun > 3 {
+		t.Errorf("max run %d > 3 for [3,1]; sequence: %v", maxRun, sequence[:16])
 	}
 }
 

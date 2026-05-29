@@ -3,6 +3,7 @@ package swrr
 
 import (
 	"context"
+	"sort"
 	"sync"
 
 	"github.com/lvluu/webhook-notifier/internal/scheduler"
@@ -22,15 +23,25 @@ import (
 // Customers with pending Deliveries" contract by re-calling Notify after each
 // successful claim.
 type swrr struct {
-	mu         sync.Mutex
-	weights    scheduler.WeightSource
-	entries    map[scheduler.CustomerID]*entry
-	activeSet  map[scheduler.CustomerID]struct{}
+	mu        sync.Mutex
+	weights   scheduler.WeightSource
+	entries   map[scheduler.CustomerID]*entry
+	activeSet map[scheduler.CustomerID]struct{}
+
 	activeList []scheduler.CustomerID
+	nextOrder  uint64
 }
 
 type entry struct {
 	currentWeight int64
+	order         uint64
+}
+
+type candidate struct {
+	id            scheduler.CustomerID
+	weight        uint32
+	currentWeight int64
+	order         uint64
 }
 
 // New returns a smooth weighted round-robin Scheduler backed by weights.
@@ -58,11 +69,6 @@ func (s *swrr) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bool, er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	type candidate struct {
-		id     scheduler.CustomerID
-		weight uint32
-	}
-
 	var candidates []candidate
 	var totalWeight int64
 	for _, id := range s.activeList {
@@ -71,9 +77,14 @@ func (s *swrr) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bool, er
 			delete(s.activeSet, id)
 			continue
 		}
-		candidates = append(candidates, candidate{id: id, weight: w})
+		e := s.entryFor(id)
+		candidates = append(candidates, candidate{id: id, weight: w, order: e.order})
 		totalWeight += int64(w)
 	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].order < candidates[j].order
+	})
 
 	s.activeList = make([]scheduler.CustomerID, 0, len(candidates))
 	for _, c := range candidates {
@@ -86,16 +97,11 @@ func (s *swrr) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bool, er
 	}
 
 	var maxIdx int
-	var maxWeight int64
 	for i, c := range candidates {
-		e, ok := s.entries[c.id]
-		if !ok {
-			e = &entry{}
-			s.entries[c.id] = e
-		}
+		e := s.entryFor(c.id)
 		e.currentWeight += int64(c.weight)
-		if e.currentWeight > maxWeight {
-			maxWeight = e.currentWeight
+		candidates[i].currentWeight = e.currentWeight
+		if i == 0 || e.currentWeight > candidates[maxIdx].currentWeight {
 			maxIdx = i
 		}
 	}
@@ -133,10 +139,20 @@ func (s *swrr) Notify(customerID scheduler.CustomerID) {
 		return
 	}
 
-	if _, ok := s.entries[customerID]; !ok {
-		s.entries[customerID] = &entry{}
-	}
+	s.entryFor(customerID)
 
 	s.activeSet[customerID] = struct{}{}
 	s.activeList = append(s.activeList, customerID)
+}
+
+func (s *swrr) entryFor(customerID scheduler.CustomerID) *entry {
+	e, ok := s.entries[customerID]
+	if ok {
+		return e
+	}
+
+	e = &entry{order: s.nextOrder}
+	s.nextOrder++
+	s.entries[customerID] = e
+	return e
 }

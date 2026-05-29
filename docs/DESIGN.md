@@ -89,7 +89,7 @@ flowchart LR
       Weight(CustomerID) uint32 // 0 = paused; >=1 = share multiplier
   }
   ```
-  SWRR interleaves picks so a `[3,1]` weight set yields `ABAA ABAA` rather than `AAAB AAAB` — same share, no contiguous bursts that would starve the low-weight Customer for several slots. With all weights=1, behaviour is identical to plain RR. A Whale tier with `weight=3` gets 3× share *and* a `batchHint=3` so its worker amortizes one Pick over up to 3 PG claims, improving throughput on its index range without breaking the share invariant. A throttled Customer with `weight=0` is skipped entirely (useful for incident response).
+  SWRR interleaves picks so a `[3,1]` weight set yields `AABAAABA` rather than classic contiguous `AAAB AAAB` cycles — same share, with the low-weight Customer pulled forward as much as the 3:1 ratio permits. With all weights=1, behaviour is identical to plain RR. A Whale tier with `weight=3` gets 3× share *and* a `batchHint=3` so its worker amortizes one Pick over up to 3 PG claims, improving throughput on its index range without breaking the share invariant. A throttled Customer with `weight=0` is skipped entirely (useful for incident response).
 - **RetryPolicy** — `Next(attempt int, prevDelay time.Duration, resp *http.Response, err error) (delay time.Duration, terminal bool, reason string)`. Pure function. Encodes decorrelated jitter, 4xx fast-fail, 429 `Retry-After` honouring, and exhaustion (ADR-0003).
 - **Signer** — `Sign(secret, body []byte, ts time.Time) (sig string)`. HMAC-SHA256 over `timestamp.body`. Deterministic.
 
@@ -168,7 +168,7 @@ stateDiagram-v2
 ## Scalability mechanics
 
 - **Stateless workers**: all coordination is through Postgres. Workers can be added or removed without coordination.
-- **No leader**: the Scheduler is process-local. Each instance independently round-robins its own claimed Deliveries; global fairness emerges because all instances claim from the same `deliveries` table.
+- **No leader**: the Scheduler is process-local. Postgres claim locking prevents duplicate Delivery processing across instances, but globally balanced Customer fairness requires every instance to discover the active Customer set from shared storage. The current PoC has the process-local Scheduler and horizontally safe claims; DB-backed active-Customer discovery is tracked as follow-up work.
 - **Scale ceiling**: at very high throughput, contention on the `deliveries` claim query becomes the bottleneck. The natural next step is to partition by `customer_id` (or move per-Customer queues to Redis Streams). The `Scheduler` interface already hides the queue source so this swap is local.
 
 ## Fairness mechanics
@@ -262,7 +262,7 @@ Each scenario lives in `cmd/bench` and emits a markdown report under `bench/resu
 ## Risks and open trade-offs
 
 - **No strict per-Customer FIFO.** Documented; partners are expected to handle out-of-order Events on their side using `X-Event-Id` and `created_at`.
-- **In-process Scheduler means per-instance round-robin.** Fairness across instances emerges from claim semantics, not coordination. Under extreme imbalance (e.g. one instance serving only one Customer due to claim luck) fairness could degrade briefly. Bounded by claim batch size.
+- **In-process Scheduler means per-instance round-robin.** Cross-instance duplicate prevention comes from Postgres claim semantics; cross-instance fairness is only approximate until workers periodically discover ready Customers from shared storage. Under imbalance, one instance can have a stale or partial active-Customer view. Bounded by claim batch size once discovery is in place.
 - **Postgres as queue has a throughput ceiling.** Bench scenario 4 measures it; the scale-out path is in ADR-0002.
 
 ## Repo layout (planned)
