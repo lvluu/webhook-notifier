@@ -209,7 +209,7 @@ func (w *Worker) classifyDelivery(ctx context.Context, d outbox.Delivery) delive
 		statusCode = resp.StatusCode
 	}
 
-	delay, terminal, reason := w.RetryPolicy.Next(d.AttemptNumber, d.PreviousDelay, resp, err)
+	delay, terminal, reason := w.RetryPolicy.NextWithKey(d.AttemptNumber, d.PreviousDelay, resp, err, d.ID)
 
 	if reason == retry.ReasonSucceeded {
 		return deliveryOutcome{

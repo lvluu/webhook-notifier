@@ -93,6 +93,7 @@ type routeConfig struct {
 	statusProb        float64
 	statusCode        int
 	statusConfigured  bool
+	statusFunc        func(*http.Request, time.Time) int
 }
 
 // Recording holds the request data recorded by the ReceiverServer.
@@ -133,6 +134,18 @@ func WithRouteStatus(route string, prob float64, statusCode int) Option {
 		rc.statusProb = prob
 		rc.statusCode = statusCode
 		rc.statusConfigured = true
+	})
+}
+
+// WithRouteStatusFunc configures route-level status-code behavior from the
+// current request and server clock. Return 0 to continue normal status handling.
+func WithRouteStatusFunc(route string, fn func(*http.Request, time.Time) int) Option {
+	if fn == nil {
+		panic("receiver: WithRouteStatusFunc fn must not be nil")
+	}
+	return optionFunc(func(rs *ReceiverServer) {
+		rc := rs.routeConfig(route)
+		rc.statusFunc = fn
 	})
 }
 
@@ -247,6 +260,12 @@ func (rs *ReceiverServer) serveCode(r *http.Request) int {
 		if rc.latencyConfigured {
 			latencyProb = rc.latencyProb
 			latencyDur = rc.latencyDur
+		}
+	}
+
+	if rc != nil && rc.statusFunc != nil {
+		if code := rc.statusFunc(r, rs.nowFunc()); code != 0 {
+			return code
 		}
 	}
 
