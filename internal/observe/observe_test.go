@@ -57,13 +57,15 @@ func TestRegisterMetrics_registers_metric_families(t *testing.T) {
 	WebhookDeliveryLatencySeconds.WithLabelValues("small").Observe(0)
 	WebhookDlqTotal.WithLabelValues("exhausted").Add(0)
 	WebhookHostSemaphoreWaitSeconds.WithLabelValues("example.com").Observe(0)
+	WebhookBreakerState.WithLabelValues("webhook_1", "closed").Set(1)
+	WebhookBreakerTripsTotal.WithLabelValues("retryable_5xx").Add(0)
 
 	families, err := reg.Gather()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(families) < 11 {
-		t.Fatalf("expected at least 11 metric families, got %d", len(families))
+	if len(families) < 13 {
+		t.Fatalf("expected at least 13 metric families, got %d", len(families))
 	}
 }
 
@@ -181,6 +183,8 @@ func TestMetricsEndpoint_returns_nonzero_after_seed(t *testing.T) {
 	WebhookClaimEmptyTotal.Add(2)
 	WebhookActiveCustomers.Set(4)
 	WebhookIngestFanoutPerEvent.Observe(3)
+	SetBreakerState("webhook_1", "open")
+	IncBreakerTrip("retryable_5xx")
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
@@ -216,6 +220,8 @@ func TestMetricsEndpoint_returns_nonzero_after_seed(t *testing.T) {
 	requireContains(`webhook_claim_empty_total 2`)
 	requireContains(`webhook_active_customers 4`)
 	requireContains(`webhook_ingest_fanout_per_event_bucket`)
+	requireContains(`webhook_breaker_state{state="open",webhook_id="webhook_1"} 1`)
+	requireContains(`webhook_breaker_trips_total{reason="retryable_5xx"} 1`)
 }
 
 func TestCustomerClassFromWeight(t *testing.T) {

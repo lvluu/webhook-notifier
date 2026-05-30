@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -386,6 +387,194 @@ func TestProcessRetryableFailureSchedulesRetry(t *testing.T) {
 	assertDeliveryStatus(t, ctx, db, submitted.DeliveryIDs[0], string(outbox.StatusFailedRetry))
 	assertAttemptCount(t, ctx, db, submitted.DeliveryIDs[0], 1)
 	assertLastError(t, ctx, db, submitted.DeliveryIDs[0], retry.ReasonRetryable5xx)
+}
+
+func TestProcessRetryableFailuresOpenWebhookBreaker(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	insertWebhook(t, ctx, db, "cus_breaker", srv.URL, true, "subscriber.created")
+	submitted, err := newIngestStore(db).Submit(ctx, ingest.Event{
+		CustomerID: "cus_breaker",
+		Type:       "subscriber.created",
+		Payload:    []byte(`{"subscriber_id":"sub_breaker"}`),
+	})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	store := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
+		FailureThreshold: 2,
+		InitialCooldown:  time.Hour,
+		MaxCooldown:      time.Hour,
+	}))
+	w := newIntegrationWorker()
+	w.RetryPolicy = retry.New(retry.Config{BaseDelay: time.Millisecond, CapDelay: time.Millisecond})
+	for i := 0; i < 2; i++ {
+		claimed := waitForClaim(t, ctx, store, "cus_breaker", time.Second)
+		if result := w.Process(ctx, store, claimed); result.Err != nil {
+			t.Fatalf("Process %d: %v", i+1, result.Err)
+		}
+	}
+
+	assertWebhookBreaker(t, ctx, db, submitted.DeliveryIDs[0], "open", 2)
+}
+
+func TestClaimNextSkipsOpenWebhookUntilHalfOpenProbe(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	first := submitOneDelivery(t, ctx, db, "cus_open_breaker")
+	second, err := appendDeliveryForExistingWebhook(t, ctx, db, first)
+	if err != nil {
+		t.Fatalf("append delivery: %v", err)
+	}
+	store := outbox.New(db)
+
+	_, err = db.ExecContext(ctx, `
+		UPDATE webhooks
+		SET breaker_state = 'open',
+		    breaker_opened_at = now(),
+		    breaker_next_probe_at = now() + interval '1 hour',
+		    breaker_failure_count = 5
+		WHERE id = (SELECT webhook_id FROM deliveries WHERE id = $1)
+	`, first)
+	if err != nil {
+		t.Fatalf("open breaker: %v", err)
+	}
+
+	if got, err := store.DiscoverClaimableCustomers(ctx, "", 10); err != nil {
+		t.Fatalf("DiscoverClaimableCustomers: %v", err)
+	} else if len(got) != 0 {
+		t.Fatalf("claimable customers with open breaker: got %v, want none", got)
+	}
+	if claimed, ok, err := store.ClaimNext(ctx, "cus_open_breaker"); err != nil {
+		t.Fatalf("ClaimNext while open: %v", err)
+	} else if ok {
+		t.Fatalf("ClaimNext while open claimed %s", claimed.ID)
+	}
+
+	_, err = db.ExecContext(ctx, `
+		UPDATE webhooks
+		SET breaker_next_probe_at = now() - interval '1 second'
+		WHERE id = (SELECT webhook_id FROM deliveries WHERE id = $1)
+	`, first)
+	if err != nil {
+		t.Fatalf("expire breaker cooldown: %v", err)
+	}
+
+	claimed, ok, err := store.ClaimNext(ctx, "cus_open_breaker")
+	if err != nil {
+		t.Fatalf("ClaimNext half-open: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext half-open: got no delivery, want probe")
+	}
+	if claimed.ID != first {
+		t.Fatalf("half-open probe delivery: got %s, want %s", claimed.ID, first)
+	}
+	assertWebhookProbe(t, ctx, db, first, "half_open", first)
+
+	if claimed, ok, err := store.ClaimNext(ctx, "cus_open_breaker"); err != nil {
+		t.Fatalf("ClaimNext with probe in flight: %v", err)
+	} else if ok {
+		t.Fatalf("ClaimNext with probe in flight claimed %s, want no second probe; other pending delivery is %s", claimed.ID, second)
+	}
+}
+
+func TestHalfOpenProbeSuccessClosesWebhookBreaker(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	deliveryID := submitOneDeliveryToURL(t, ctx, db, "cus_probe_success", srv.URL)
+	store := outbox.New(db)
+	makeWebhookHalfOpen(t, ctx, db, deliveryID)
+
+	claimed, ok, err := store.ClaimNext(ctx, "cus_probe_success")
+	if err != nil {
+		t.Fatalf("ClaimNext: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext: got no delivery, want probe")
+	}
+	if result := newIntegrationWorker().Process(ctx, store, claimed); result.Err != nil {
+		t.Fatalf("Process: %v", result.Err)
+	}
+
+	assertWebhookBreaker(t, ctx, db, deliveryID, "closed", 0)
+}
+
+func TestHalfOpenNonProbeSuccessDoesNotCloseWebhookBreaker(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	probeDeliveryID := submitOneDelivery(t, ctx, db, "cus_probe_identity")
+	otherDeliveryID, err := appendDeliveryForExistingWebhook(t, ctx, db, probeDeliveryID)
+	if err != nil {
+		t.Fatalf("append delivery: %v", err)
+	}
+	makeWebhookHalfOpen(t, ctx, db, probeDeliveryID)
+	_, err = db.ExecContext(ctx, `
+		UPDATE deliveries
+		SET status = 'in_flight',
+		    attempt_count = 1,
+		    claimed_at = now()
+		WHERE id = $1
+	`, otherDeliveryID)
+	if err != nil {
+		t.Fatalf("force non-probe in-flight: %v", err)
+	}
+
+	if err := outbox.New(db).MarkSucceeded(ctx, otherDeliveryID, http.StatusOK, time.Millisecond); err != nil {
+		t.Fatalf("MarkSucceeded: %v", err)
+	}
+
+	assertDeliveryStatus(t, ctx, db, otherDeliveryID, string(outbox.StatusSucceeded))
+	assertWebhookProbe(t, ctx, db, probeDeliveryID, "half_open", probeDeliveryID)
+}
+
+func TestHalfOpenProbeFailureReopensWebhookBreaker(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	deliveryID := submitOneDeliveryToURL(t, ctx, db, "cus_probe_failure", srv.URL)
+	store := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
+		FailureThreshold: 2,
+		InitialCooldown:  time.Hour,
+		MaxCooldown:      2 * time.Hour,
+	}))
+	makeWebhookHalfOpen(t, ctx, db, deliveryID)
+
+	claimed, ok, err := store.ClaimNext(ctx, "cus_probe_failure")
+	if err != nil {
+		t.Fatalf("ClaimNext: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext: got no delivery, want probe")
+	}
+	w := newIntegrationWorker()
+	w.RetryPolicy = retry.New(retry.Config{BaseDelay: time.Millisecond, CapDelay: time.Millisecond})
+	if result := w.Process(ctx, store, claimed); result.Err != nil {
+		t.Fatalf("Process: %v", result.Err)
+	}
+
+	assertWebhookBreaker(t, ctx, db, deliveryID, "open", 4)
+	assertWebhookNextProbeAfter(t, ctx, db, deliveryID, time.Now().Add(90*time.Minute))
 }
 
 func TestProcessRetryableFailureUsesPreviousRetryDelay(t *testing.T) {
@@ -996,7 +1185,13 @@ func insertWebhook(t *testing.T, ctx context.Context, db *sql.DB, customerID, ur
 func submitOneDelivery(t *testing.T, ctx context.Context, db *sql.DB, customerID string) string {
 	t.Helper()
 
-	insertWebhook(t, ctx, db, customerID, "https://partner.example/webhook", true, "subscriber.created")
+	return submitOneDeliveryToURL(t, ctx, db, customerID, "https://partner.example/webhook")
+}
+
+func submitOneDeliveryToURL(t *testing.T, ctx context.Context, db *sql.DB, customerID, url string) string {
+	t.Helper()
+
+	insertWebhook(t, ctx, db, customerID, url, true, "subscriber.created")
 	submitted, err := newIngestStore(db).Submit(ctx, ingest.Event{
 		CustomerID: customerID,
 		Type:       "subscriber.created",
@@ -1009,6 +1204,116 @@ func submitOneDelivery(t *testing.T, ctx context.Context, db *sql.DB, customerID
 		t.Fatalf("delivery count for %s: got %d, want 1", customerID, len(submitted.DeliveryIDs))
 	}
 	return submitted.DeliveryIDs[0]
+}
+
+func makeWebhookHalfOpen(t *testing.T, ctx context.Context, db *sql.DB, deliveryID string) {
+	t.Helper()
+
+	_, err := db.ExecContext(ctx, `
+		UPDATE webhooks
+		SET breaker_state = 'half_open',
+		    breaker_failure_count = 3,
+		    breaker_opened_at = now() - interval '1 hour',
+		    breaker_next_probe_at = now() - interval '1 second',
+		    breaker_cooldown_ms = 3600000,
+		    breaker_probe_delivery_id = $1
+		WHERE id = (SELECT webhook_id FROM deliveries WHERE id = $1)
+	`, deliveryID)
+	if err != nil {
+		t.Fatalf("make webhook half-open: %v", err)
+	}
+}
+
+func appendDeliveryForExistingWebhook(t *testing.T, ctx context.Context, db *sql.DB, existingDeliveryID string) (string, error) {
+	t.Helper()
+
+	var customerID, webhookID string
+	err := db.QueryRowContext(ctx, `
+		SELECT customer_id, webhook_id
+		FROM deliveries
+		WHERE id = $1
+	`, existingDeliveryID).Scan(&customerID, &webhookID)
+	if err != nil {
+		return "", fmt.Errorf("load existing delivery: %w", err)
+	}
+
+	var eventID string
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO events (customer_id, type, payload)
+		VALUES ($1, 'subscriber.created', '{"subscriber_id":"sub_extra"}'::jsonb)
+		RETURNING id
+	`, customerID).Scan(&eventID)
+	if err != nil {
+		return "", fmt.Errorf("insert event: %w", err)
+	}
+
+	var deliveryID string
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO deliveries (event_id, webhook_id, customer_id, status)
+		VALUES ($1, $2, $3, 'pending')
+		RETURNING id
+	`, eventID, webhookID, customerID).Scan(&deliveryID)
+	if err != nil {
+		return "", fmt.Errorf("insert delivery: %w", err)
+	}
+
+	return deliveryID, nil
+}
+
+func assertWebhookBreaker(t *testing.T, ctx context.Context, db *sql.DB, deliveryID, wantState string, wantFailures int) {
+	t.Helper()
+
+	var gotState string
+	var gotFailures int
+	err := db.QueryRowContext(ctx, `
+		SELECT w.breaker_state, w.breaker_failure_count
+		FROM webhooks w
+		JOIN deliveries d ON d.webhook_id = w.id
+		WHERE d.id = $1
+	`, deliveryID).Scan(&gotState, &gotFailures)
+	if err != nil {
+		t.Fatalf("select webhook breaker: %v", err)
+	}
+	if gotState != wantState || gotFailures != wantFailures {
+		t.Fatalf("webhook breaker: got state=%q failures=%d, want state=%q failures=%d", gotState, gotFailures, wantState, wantFailures)
+	}
+}
+
+func assertWebhookProbe(t *testing.T, ctx context.Context, db *sql.DB, deliveryID, wantState, wantProbeDeliveryID string) {
+	t.Helper()
+
+	var gotState string
+	var gotProbeDeliveryID sql.NullString
+	err := db.QueryRowContext(ctx, `
+		SELECT w.breaker_state, w.breaker_probe_delivery_id::text
+		FROM webhooks w
+		JOIN deliveries d ON d.webhook_id = w.id
+		WHERE d.id = $1
+	`, deliveryID).Scan(&gotState, &gotProbeDeliveryID)
+	if err != nil {
+		t.Fatalf("select webhook probe: %v", err)
+	}
+	if gotState != wantState || !gotProbeDeliveryID.Valid || gotProbeDeliveryID.String != wantProbeDeliveryID {
+		t.Fatalf("webhook probe: got state=%q probe=%q valid=%v, want state=%q probe=%q", gotState, gotProbeDeliveryID.String, gotProbeDeliveryID.Valid, wantState, wantProbeDeliveryID)
+	}
+}
+
+func assertWebhookNextProbeAfter(t *testing.T, ctx context.Context, db *sql.DB, deliveryID string, threshold time.Time) {
+	t.Helper()
+
+	var got time.Time
+	err := db.QueryRowContext(ctx, `
+		SELECT w.breaker_next_probe_at
+		FROM webhooks w
+		JOIN deliveries d ON d.webhook_id = w.id
+		WHERE d.id = $1
+	`, deliveryID).Scan(&got)
+	if err != nil {
+		t.Fatalf("select next probe: %v", err)
+	}
+	if !got.After(threshold) {
+		t.Fatalf("next probe: got %s, want after %s", got, threshold)
+	}
 }
 
 func assertDeliveryStatus(t *testing.T, ctx context.Context, db *sql.DB, deliveryID, want string) {

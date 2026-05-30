@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_delivery_attempts_delivery_id_sent_at;
