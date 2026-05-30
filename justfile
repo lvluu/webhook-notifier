@@ -77,4 +77,4 @@ bench-3:
 
 # horizontal scale + atomicity + idempotency (issue #15)
 bench-4:
-    @echo "bench-4 stub — implemented in issue #15"
+    go run ./cmd/bench scenario4
