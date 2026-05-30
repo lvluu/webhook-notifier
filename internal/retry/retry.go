@@ -80,6 +80,16 @@ func New(config Config) RetryPolicy {
 // Next returns the next retry delay, whether the outcome is terminal, and the
 // reason that should be recorded for audit/DLQ classification.
 func (p RetryPolicy) Next(attempt int, prevDelay time.Duration, resp *http.Response, err error) (time.Duration, bool, string) {
+	return p.next(attempt, prevDelay, resp, err, "")
+}
+
+// NextWithKey classifies an Attempt like Next, using key as deterministic
+// entropy for jitter so simultaneous failures do not retry in lockstep.
+func (p RetryPolicy) NextWithKey(attempt int, prevDelay time.Duration, resp *http.Response, err error, key string) (time.Duration, bool, string) {
+	return p.next(attempt, prevDelay, resp, err, key)
+}
+
+func (p RetryPolicy) next(attempt int, prevDelay time.Duration, resp *http.Response, err error, key string) (time.Duration, bool, string) {
 	if p.maxAttempts <= 0 || p.baseDelay <= 0 || p.capDelay <= 0 {
 		p = New(Config{
 			MaxAttempts: p.maxAttempts,
@@ -105,7 +115,7 @@ func (p RetryPolicy) Next(attempt int, prevDelay time.Duration, resp *http.Respo
 		}
 	}
 
-	return p.decorrelatedJitter(attempt, prevDelay, reason), false, reason
+	return p.decorrelatedJitter(attempt, prevDelay, reason, key), false, reason
 }
 
 func (p RetryPolicy) classify(resp *http.Response, err error) (string, bool) {
@@ -133,7 +143,7 @@ func (p RetryPolicy) classify(resp *http.Response, err error) (string, bool) {
 	}
 }
 
-func (p RetryPolicy) decorrelatedJitter(attempt int, prevDelay time.Duration, reason string) time.Duration {
+func (p RetryPolicy) decorrelatedJitter(attempt int, prevDelay time.Duration, reason string, key string) time.Duration {
 	high := p.baseDelay
 	if prevDelay > 0 {
 		high = prevDelay * 3
@@ -149,17 +159,19 @@ func (p RetryPolicy) decorrelatedJitter(attempt int, prevDelay time.Duration, re
 	}
 
 	span := high - p.baseDelay
-	fraction := deterministicFraction(attempt, prevDelay, reason)
+	fraction := deterministicFraction(attempt, prevDelay, reason, key)
 	return p.baseDelay + time.Duration(math.Round(float64(span)*fraction))
 }
 
-func deterministicFraction(attempt int, prevDelay time.Duration, reason string) float64 {
+func deterministicFraction(attempt int, prevDelay time.Duration, reason string, key string) float64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(strconv.Itoa(attempt)))
 	_, _ = h.Write([]byte("|"))
 	_, _ = h.Write([]byte(prevDelay.String()))
 	_, _ = h.Write([]byte("|"))
 	_, _ = h.Write([]byte(reason))
+	_, _ = h.Write([]byte("|"))
+	_, _ = h.Write([]byte(key))
 	return float64(h.Sum64()) / float64(math.MaxUint64)
 }
 

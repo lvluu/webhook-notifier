@@ -1,6 +1,7 @@
 # Agent harness state (local)
 .omc/
 .agents/
+.omo/
 
 # Build artifacts
 /bin/
@@ -9,6 +10,7 @@
 *.test
 *.out
 coverage.*
+*.bin
 
 # Editor
 .vscode/

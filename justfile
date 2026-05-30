@@ -69,7 +69,7 @@ bench-1:
 
 # transient + recovering partners (issue #13)
 bench-2:
-    @echo "bench-2 stub — implemented in issue #13"
+    go run ./cmd/bench scenario2
 
 # terminal classification fast-fail (issue #14)
 bench-3:

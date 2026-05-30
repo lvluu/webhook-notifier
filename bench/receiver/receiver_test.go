@@ -295,6 +295,49 @@ func TestRouteStatusZeroProbOverridesServer(t *testing.T) {
 	}
 }
 
+func TestRouteStatusFunc(t *testing.T) {
+	t.Parallel()
+
+	start := time.Now()
+	fakeNow := start
+	srv := NewServer(
+		WithRouteStatus("/recovering", 1.0, http.StatusInternalServerError),
+		WithRouteStatusFunc("/recovering", func(_ *http.Request, now time.Time) int {
+			if now.Before(start.Add(time.Second)) {
+				return http.StatusServiceUnavailable
+			}
+			return 0
+		}),
+		WithNowFunc(func() time.Time { return fakeNow }),
+	)
+	defer srv.Close()
+
+	tests := []struct {
+		name string
+		now  time.Time
+		want int
+	}{
+		{name: "status func returns outage status", now: start, want: http.StatusServiceUnavailable},
+		{name: "falls back to configured status", now: start.Add(2 * time.Second), want: http.StatusInternalServerError},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeNow = tt.now
+
+			resp, err := http.Post(srv.URL()+"/recovering", "application/json", strings.NewReader(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+
+			if resp.StatusCode != tt.want {
+				t.Fatalf("got status %d, want %d", resp.StatusCode, tt.want)
+			}
+		})
+	}
+}
+
 func TestRouteLatency(t *testing.T) {
 	t.Parallel()
 
