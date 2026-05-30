@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -57,7 +58,7 @@ func RunScenario3(ctx context.Context) error {
 
 	rs := receiver.NewServer(
 		receiver.WithStableDecisions("scenario-3"),
-		receiver.WithRouteStatus("/hooks/misconfigured-404", 1.0, 404),
+		receiver.WithRouteStatus("/hooks/misconfigured-404", 1.0, http.StatusNotFound),
 	)
 	defer rs.Close()
 
