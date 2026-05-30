@@ -8,6 +8,10 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/scheduler"
 )
 
+// ClaimBatchSize is the number of deliveries a worker can claim per scheduler
+// pick. Higher values amortize DB transaction overhead across multiple deliveries.
+const ClaimBatchSize uint32 = 32
+
 // roundRobin is a plain round-robin Scheduler over the set of Customers with
 // pending Deliveries (ADR-0001).
 //
@@ -29,9 +33,9 @@ func New() scheduler.Scheduler {
 }
 
 // Pick returns the next Customer in rotation and removes it from the active
-// set, or ok=false when empty. batchHint is always 1 for plain round-robin.
-// The caller must re-Notify if the Customer still has pending work after this
-// pick.
+// set, or ok=false when empty. batchHint is set to ClaimBatchSize so workers
+// can claim multiple deliveries per round-trip, amortizing DB overhead.
+// The caller must re-Notify if the Customer still has pending work.
 func (r *roundRobin) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return "", 0, false, err
@@ -59,7 +63,7 @@ func (r *roundRobin) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bo
 		r.cursor = 0
 	}
 
-	return customer, 1, true, nil
+	return customer, ClaimBatchSize, true, nil
 }
 
 // Notify registers the Customer for round-robin rotation if not already

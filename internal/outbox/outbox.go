@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/lvluu/webhook-notifier/internal/observe"
 )
 
@@ -96,8 +97,9 @@ func (s *Store) ClaimNext(ctx context.Context, customerID string) (delivery Deli
 	return deliveries[0], true, nil
 }
 
-// ClaimNextN claims up to limit ready Deliveries for customerID using SELECT
-// FOR UPDATE SKIP LOCKED. Returns an empty slice when no ready Delivery exists.
+// ClaimNextN claims up to limit ready Deliveries for customerID using a single
+// CTE that atomically marks rows in_flight and returns them with their joined
+// data. Eliminates the N+1 loop overhead of the original per-row update+select.
 func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([]Delivery, error) {
 	if customerID == "" {
 		return nil, fmt.Errorf("customer_id is required")
@@ -108,41 +110,76 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 
 	claimStarted := time.Now()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	rows, err := s.db.QueryContext(ctx, `
+		WITH claimed AS (
+			UPDATE deliveries
+			SET status = 'in_flight',
+			    attempt_count = attempt_count + 1,
+			    claimed_at = now(),
+			    updated_at = now()
+			WHERE id IN (
+				SELECT id FROM deliveries
+				WHERE customer_id = $1
+				  AND (
+				      (status IN ('pending', 'failed_retry') AND next_attempt_at <= now())
+				      OR (status = 'in_flight' AND claimed_at < now() - ($2 * interval '1 millisecond'))
+				  )
+				ORDER BY next_attempt_at, created_at, id
+				LIMIT $3
+				FOR UPDATE SKIP LOCKED
+			)
+			RETURNING *
+		)
+		SELECT
+		    c.id, c.event_id, c.webhook_id, c.customer_id,
+		    COALESCE(cust.weight, 1),
+		    e.type, e.payload, w.url, w.secret_encrypted,
+		    c.status, c.attempt_count, c.next_attempt_at, c.claimed_at,
+		    c.last_error, c.created_at, c.updated_at,
+		    (
+		        SELECT GREATEST(EXTRACT(EPOCH FROM (c.next_attempt_at - da.sent_at)) * 1000, 0)::bigint
+		        FROM delivery_attempts da
+		        WHERE da.delivery_id = c.id
+		        ORDER BY da.attempt_number DESC
+		        LIMIT 1
+		    ) AS previous_delay_millis
+		FROM claimed c
+		JOIN events e ON e.id = c.event_id
+		JOIN webhooks w ON w.id = c.webhook_id
+		LEFT JOIN customers cust ON cust.id = c.customer_id
+		ORDER BY c.next_attempt_at, c.created_at, c.id
+	`, customerID, s.claimLease.Milliseconds(), limit)
 	if err != nil {
-		return nil, fmt.Errorf("begin transaction: %w", err)
+		return nil, fmt.Errorf("cte claim: %w", err)
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	deliveryIDs, err := s.selectClaimableDeliveryIDs(ctx, tx, customerID, limit)
-	if err != nil {
-		return nil, err
-	}
-	if len(deliveryIDs) == 0 {
-		observe.IncClaimEmpty()
-		observe.ObserveClaimDuration(time.Since(claimStarted).Seconds())
-		observe.ObserveClaimBatchSize(0)
-		return nil, nil
-	}
+	defer rows.Close()
 
 	var deliveries []Delivery
-	for _, id := range deliveryIDs {
-		if err := s.markInFlight(ctx, tx, id); err != nil {
-			return nil, err
+	for rows.Next() {
+		var d Delivery
+		var previousDelayMillis sql.NullInt64
+		if err := rows.Scan(
+			&d.ID, &d.EventID, &d.WebhookID, &d.CustomerID,
+			&d.CustomerWeight,
+			&d.EventType, &d.Payload, &d.URL, &d.Secret,
+			&d.Status, &d.AttemptNumber, &d.NextAttemptAt, &d.ClaimedAt,
+			&d.LastError, &d.CreatedAt, &d.UpdatedAt,
+			&previousDelayMillis,
+		); err != nil {
+			return nil, fmt.Errorf("scan claimed delivery: %w", err)
 		}
-		delivery, err := loadDelivery(ctx, tx, id)
-		if err != nil {
-			return nil, err
+		if previousDelayMillis.Valid {
+			d.PreviousDelay = time.Duration(previousDelayMillis.Int64) * time.Millisecond
 		}
-		deliveries = append(deliveries, delivery)
+		deliveries = append(deliveries, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate claimed deliveries: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit claim: %w", err)
+	if len(deliveries) == 0 {
+		observe.IncClaimEmpty()
 	}
-
 	observe.ObserveClaimDuration(time.Since(claimStarted).Seconds())
 	observe.ObserveClaimBatchSize(float64(len(deliveries)))
 	return deliveries, nil
@@ -186,116 +223,7 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 	return customerIDs, nil
 }
 
-func (s *Store) selectClaimableDeliveryIDs(ctx context.Context, tx *sql.Tx, customerID string, limit int) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `
-		SELECT id
-		FROM deliveries
-		WHERE customer_id = $1
-		  AND (
-		      (status IN ('pending', 'failed_retry') AND next_attempt_at <= now())
-		      OR (status = 'in_flight' AND claimed_at < now() - ($2 * interval '1 millisecond'))
-		  )
-		ORDER BY next_attempt_at, created_at, id
-		FOR UPDATE SKIP LOCKED
-		LIMIT $3
-	`, customerID, s.claimLease.Milliseconds(), limit)
-	if err != nil {
-		return nil, fmt.Errorf("select deliveries for claim: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
 
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan delivery id: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate delivery ids: %w", err)
-	}
-
-	return ids, nil
-}
-
-func (s *Store) markInFlight(ctx context.Context, tx *sql.Tx, deliveryID string) error {
-	_, err := tx.ExecContext(ctx, `
-		UPDATE deliveries
-		SET status = 'in_flight',
-		    attempt_count = attempt_count + 1,
-		    claimed_at = now(),
-		    updated_at = now()
-		WHERE id = $1
-	`, deliveryID)
-	if err != nil {
-		return fmt.Errorf("mark delivery in flight: %w", err)
-	}
-
-	return nil
-}
-
-func loadDelivery(ctx context.Context, tx *sql.Tx, deliveryID string) (Delivery, error) {
-	var delivery Delivery
-	var previousDelayMillis sql.NullInt64
-	err := tx.QueryRowContext(ctx, `
-		SELECT
-		    deliveries.id,
-		    deliveries.event_id,
-		    deliveries.webhook_id,
-		    deliveries.customer_id,
-		    COALESCE(customers.weight, 1),
-		    events.type,
-		    events.payload,
-		    webhooks.url,
-		    webhooks.secret_encrypted,
-		    deliveries.status,
-		    deliveries.attempt_count,
-		    deliveries.next_attempt_at,
-		    deliveries.claimed_at,
-		    deliveries.last_error,
-		    deliveries.created_at,
-		    deliveries.updated_at,
-		    (
-		        SELECT GREATEST(EXTRACT(EPOCH FROM (deliveries.next_attempt_at - delivery_attempts.sent_at)) * 1000, 0)::bigint
-		        FROM delivery_attempts
-		        WHERE delivery_attempts.delivery_id = deliveries.id
-		        ORDER BY delivery_attempts.attempt_number DESC
-		        LIMIT 1
-		    ) AS previous_delay_millis
-		FROM deliveries
-		JOIN events ON events.id = deliveries.event_id
-		JOIN webhooks ON webhooks.id = deliveries.webhook_id
-		LEFT JOIN customers ON customers.id = deliveries.customer_id
-		WHERE deliveries.id = $1
-	`, deliveryID).Scan(
-		&delivery.ID,
-		&delivery.EventID,
-		&delivery.WebhookID,
-		&delivery.CustomerID,
-		&delivery.CustomerWeight,
-		&delivery.EventType,
-		&delivery.Payload,
-		&delivery.URL,
-		&delivery.Secret,
-		&delivery.Status,
-		&delivery.AttemptNumber,
-		&delivery.NextAttemptAt,
-		&delivery.ClaimedAt,
-		&delivery.LastError,
-		&delivery.CreatedAt,
-		&delivery.UpdatedAt,
-		&previousDelayMillis,
-	)
-	if err != nil {
-		return Delivery{}, fmt.Errorf("load claimed delivery: %w", err)
-	}
-	if previousDelayMillis.Valid {
-		delivery.PreviousDelay = time.Duration(previousDelayMillis.Int64) * time.Millisecond
-	}
-
-	return delivery, nil
-}
 
 // MarkSucceeded records the successful Attempt and moves the Delivery to
 // succeeded.
@@ -426,6 +354,185 @@ func (s *Store) MarkDead(ctx context.Context, deliveryID string, statusCode int,
 
 		return nil
 	})
+}
+
+// BatchMarkItem is one delivery outcome to be applied in a batched mark operation.
+type BatchMarkItem struct {
+	DeliveryID string
+	StatusCode int
+	Duration   time.Duration
+	ErrorClass string
+	Delay      time.Duration
+	Reason     string
+
+	// Observation-only fields (not used in batch SQL).
+	Lifetime      time.Duration
+	AttemptNumber int
+}
+
+// MarkSucceededBatch marks multiple deliveries as succeeded in one round trip.
+// Updates delivery status and inserts attempt records via a single CTE.
+func (s *Store) MarkSucceededBatch(ctx context.Context, items []BatchMarkItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	ids := make([]string, len(items))
+	statusCodes := make([]int, len(items))
+	durationsMs := make([]int64, len(items))
+	for i, item := range items {
+		if item.DeliveryID == "" {
+			return fmt.Errorf("delivery_id is required at index %d", i)
+		}
+		ids[i] = item.DeliveryID
+		statusCodes[i] = item.StatusCode
+		durationsMs[i] = item.Duration.Milliseconds()
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		WITH batch AS (
+			SELECT * FROM unnest(
+				$1::text[], $2::int[], $3::bigint[]
+			) AS t(id, status_code, duration_ms)
+		),
+		updated AS (
+			UPDATE deliveries d
+			SET status = 'succeeded',
+			    updated_at = now(),
+			    last_error = NULL
+			FROM batch b
+			WHERE d.id = b.id::uuid
+			  AND d.status = 'in_flight'
+			RETURNING d.id, d.attempt_count, b.status_code, b.duration_ms
+		)
+		INSERT INTO delivery_attempts (delivery_id, attempt_number, status_code, duration_ms, sent_at)
+		SELECT id, attempt_count, status_code, duration_ms, now() FROM updated
+	`, pq.Array(ids), pq.Array(statusCodes), pq.Array(durationsMs))
+	if err != nil {
+		return fmt.Errorf("batch mark succeeded: %w", err)
+	}
+	return nil
+}
+
+// MarkRetryBatch schedules multiple deliveries for retry in one round trip.
+func (s *Store) MarkRetryBatch(ctx context.Context, items []BatchMarkItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	ids := make([]string, len(items))
+	statusCodes := make([]int, len(items))
+	durationsMs := make([]int64, len(items))
+	errorClasses := make([]string, len(items))
+	delaysMs := make([]int64, len(items))
+	for i, item := range items {
+		if item.DeliveryID == "" {
+			return fmt.Errorf("delivery_id is required at index %d", i)
+		}
+		ids[i] = item.DeliveryID
+		statusCodes[i] = item.StatusCode
+		durationsMs[i] = item.Duration.Milliseconds()
+		errorClasses[i] = item.ErrorClass
+		delaysMs[i] = item.Delay.Milliseconds()
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		WITH batch AS (
+			SELECT * FROM unnest(
+				$1::text[], $2::int[], $3::bigint[], $4::text[], $5::bigint[]
+			) AS t(id, status_code, duration_ms, error_class, delay_ms)
+		),
+		updated AS (
+			UPDATE deliveries d
+			SET status = 'failed_retry',
+			    next_attempt_at = now() + (b.delay_ms * interval '1 millisecond'),
+			    claimed_at = NULL,
+			    last_error = NULLIF(b.error_class, ''),
+			    updated_at = now()
+			FROM batch b
+			WHERE d.id = b.id::uuid
+			  AND d.status = 'in_flight'
+			RETURNING d.id, d.attempt_count, b.status_code, b.duration_ms, b.error_class
+		)
+		INSERT INTO delivery_attempts (delivery_id, attempt_number, status_code, error_class, duration_ms, sent_at)
+		SELECT id, attempt_count, status_code, NULLIF(error_class, ''), duration_ms, now() FROM updated
+	`, pq.Array(ids), pq.Array(statusCodes), pq.Array(durationsMs), pq.Array(errorClasses), pq.Array(delaysMs))
+	if err != nil {
+		return fmt.Errorf("batch mark retry: %w", err)
+	}
+	return nil
+}
+
+// MarkDeadBatch marks multiple deliveries as dead in one round trip, recording
+// dead_letter rows for each.
+func (s *Store) MarkDeadBatch(ctx context.Context, items []BatchMarkItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	ids := make([]string, len(items))
+	statusCodes := make([]int, len(items))
+	durationsMs := make([]int64, len(items))
+	errorClasses := make([]string, len(items))
+	reasons := make([]string, len(items))
+	for i, item := range items {
+		if item.DeliveryID == "" {
+			return fmt.Errorf("delivery_id is required at index %d", i)
+		}
+		if item.Reason == "" {
+			return fmt.Errorf("reason is required at index %d", i)
+		}
+		ids[i] = item.DeliveryID
+		statusCodes[i] = item.StatusCode
+		durationsMs[i] = item.Duration.Milliseconds()
+		errorClasses[i] = item.ErrorClass
+		reasons[i] = item.Reason
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		WITH batch AS (
+			SELECT * FROM unnest(
+				$1::text[], $2::int[], $3::bigint[], $4::text[], $5::text[]
+			) AS t(id, status_code, duration_ms, error_class, reason)
+		),
+		updated AS (
+			UPDATE deliveries d
+			SET status = 'dead',
+			    claimed_at = NULL,
+			    last_error = NULLIF(b.error_class, ''),
+			    updated_at = now()
+			FROM batch b
+			WHERE d.id = b.id::uuid
+			  AND d.status = 'in_flight'
+			RETURNING d.id, d.attempt_count, b.status_code, b.duration_ms, b.error_class, b.reason
+		),
+		attempts_inserted AS (
+			INSERT INTO delivery_attempts (delivery_id, attempt_number, status_code, error_class, duration_ms, sent_at)
+			SELECT id, attempt_count, status_code, NULLIF(error_class, ''), duration_ms, now() FROM updated
+		)
+		INSERT INTO dead_letters (delivery_id, last_error, attempts, reason, final_at)
+		SELECT id, NULLIF(error_class, ''), attempt_count, reason, now() FROM updated
+	`, pq.Array(ids), pq.Array(statusCodes), pq.Array(durationsMs), pq.Array(errorClasses), pq.Array(reasons))
+	if err != nil {
+		return fmt.Errorf("batch mark dead: %w", err)
+	}
+	return nil
+}
+
+// HasPendingWork reports whether the customer has any deliveries in a
+// non-terminal state (pending, in_flight, or failed_retry). Used by workers to
+// decide whether to keep a customer in scheduler rotation after a claim batch
+// returns empty — e.g. when all remaining deliveries are in retry backoff.
+func (s *Store) HasPendingWork(ctx context.Context, customerID string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM deliveries
+			WHERE customer_id = $1
+			  AND status NOT IN ('succeeded', 'dead')
+		)
+	`, customerID).Scan(&exists)
+	return exists, err
 }
 
 // Requeue returns a claimed (in_flight) Delivery to the retry pool without

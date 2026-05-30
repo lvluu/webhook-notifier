@@ -80,8 +80,8 @@ func TestRoundRobin_TableDriven(t *testing.T) {
 				if got != tt.want[i] {
 					t.Errorf("Pick[%d]: got %q, want %q", i, got, tt.want[i])
 				}
-				if ok && batchHint != 1 {
-					t.Errorf("Pick[%d] batchHint: got %d, want 1", i, batchHint)
+				if ok && batchHint != roundrobin.ClaimBatchSize {
+					t.Errorf("Pick[%d] batchHint: got %d, want %d", i, batchHint, roundrobin.ClaimBatchSize)
 				}
 			}
 		})
