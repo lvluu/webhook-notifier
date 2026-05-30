@@ -925,39 +925,6 @@ func (s *Store) recordBreakerFailure(ctx context.Context, tx *sql.Tx, webhookID 
 	return false, nil
 }
 
-// recordBreakerSuccessForDeliveryTx returns (stateChanged, webhookID, err).
-func (s *Store) recordBreakerSuccessForDeliveryTx(ctx context.Context, tx *sql.Tx, deliveryID string) (bool, string, error) {
-	webhookID, err := deliveryWebhookID(ctx, tx, deliveryID)
-	if err != nil {
-		return false, "", err
-	}
-	closed, err := s.recordBreakerSuccess(ctx, tx, webhookID, deliveryID)
-	return closed, webhookID, err
-}
-
-// recordBreakerFailureForDeliveryTx returns (stateChanged, webhookID, err).
-func (s *Store) recordBreakerFailureForDeliveryTx(ctx context.Context, tx *sql.Tx, deliveryID string, reason string) (bool, string, error) {
-	webhookID, err := deliveryWebhookID(ctx, tx, deliveryID)
-	if err != nil {
-		return false, "", err
-	}
-	tripped, err := s.recordBreakerFailure(ctx, tx, webhookID, reason)
-	return tripped, webhookID, err
-}
-
-func deliveryWebhookID(ctx context.Context, tx *sql.Tx, deliveryID string) (string, error) {
-	var webhookID string
-	err := tx.QueryRowContext(ctx, `
-		SELECT webhook_id::text
-		FROM deliveries
-		WHERE id = $1
-	`, deliveryID).Scan(&webhookID)
-	if err != nil {
-		return "", fmt.Errorf("load delivery webhook: %w", err)
-	}
-	return webhookID, nil
-}
-
 // batchDeliveryWebhookIDs returns a map of deliveryID → webhookID for all
 // given IDs in a single round trip, avoiding N+1 in batch mark paths.
 func batchDeliveryWebhookIDs(ctx context.Context, tx *sql.Tx, deliveryIDs []string) (map[string]string, error) {
@@ -969,7 +936,7 @@ func batchDeliveryWebhookIDs(ctx context.Context, tx *sql.Tx, deliveryIDs []stri
 	if err != nil {
 		return nil, fmt.Errorf("load delivery webhook ids: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	ids := make(map[string]string, len(deliveryIDs))
 	for rows.Next() {
