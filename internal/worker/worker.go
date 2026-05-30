@@ -260,6 +260,9 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 
 		deliveries, err := store.ClaimNextN(ctx, customerID, int(batchHint))
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return fmt.Errorf("claim delivery for %s: %w", customerID, err)
 		}
 		if len(deliveries) == 0 {

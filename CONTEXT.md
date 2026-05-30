@@ -52,4 +52,4 @@ _Avoid_: failure store, error log
 
 > Dev: "What if a Customer with 500k Subscribers does a bulk import?"
 >
-> Domain expert: "That's exactly the Whale Customer scenario the fair scheduler exists for. The 500k `subscriber.created` Events go through the same per-Customer queue as a Small Customer's three Events, and the scheduler gives each active Customer an equal share per cycle. The Whale's burst gets drained over time without starving anyone else's Integration Partners."
+> Domain expert: "That's exactly the Whale Customer scenario the fair scheduler exists for. The 500k `subscriber.created` Events go through the same per-Customer queue as a Small Customer's three Events, and the scheduler gives each Customer with waiting Deliveries an equal share per cycle. The Whale's burst gets drained over time without starving anyone else's Integration Partners."
