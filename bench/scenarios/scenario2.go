@@ -17,6 +17,7 @@ import (
 
 	"github.com/lvluu/webhook-notifier/bench/receiver"
 	"github.com/lvluu/webhook-notifier/internal/ingest"
+	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/registry"
 	"github.com/lvluu/webhook-notifier/internal/retry"
 	"github.com/lvluu/webhook-notifier/internal/scheduler/roundrobin"
@@ -105,7 +106,7 @@ func RunScenario2(ctx context.Context) error {
 	plainSched := roundrobin.New()
 	reg := registry.New(db)
 	ingestStore := ingest.New(db, reg, plainSched)
-	outboxStore := baselineOutboxStore(db)
+	outboxStore := outbox.New(db)
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()

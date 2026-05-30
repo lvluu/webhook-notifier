@@ -312,7 +312,10 @@ func (s *Store) MarkSucceeded(ctx context.Context, deliveryID string, statusCode
 		return fmt.Errorf("delivery_id is required")
 	}
 
-	return s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int, webhookID string) error {
+	var webhookID string
+	var breakerClosed bool
+	err := s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int, wid string) error {
+		webhookID = wid
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO delivery_attempts (delivery_id, attempt_number, status_code, duration_ms, sent_at)
 			VALUES ($1, $2, $3, $4, now())
@@ -332,8 +335,19 @@ func (s *Store) MarkSucceeded(ctx context.Context, deliveryID string, statusCode
 			return fmt.Errorf("mark delivery succeeded: %w", err)
 		}
 
-		return s.recordBreakerSuccess(ctx, tx, webhookID, deliveryID)
+		closed, err := s.recordBreakerSuccess(ctx, tx, wid, deliveryID)
+		if closed {
+			breakerClosed = true
+		}
+		return err
 	})
+	if err != nil {
+		return err
+	}
+	if breakerClosed {
+		observe.SetBreakerState(webhookID, BreakerStateClosed)
+	}
+	return nil
 }
 
 // MarkRetry records a failed Attempt and schedules the Delivery for retry.
@@ -345,7 +359,12 @@ func (s *Store) MarkRetry(ctx context.Context, deliveryID string, statusCode int
 		return fmt.Errorf("delay must be non-negative")
 	}
 
-	return s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int, webhookID string) error {
+	var webhookID string
+	var breakerTripped bool
+	var tripReason string
+	err := s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int, wid string) error {
+		webhookID = wid
+		tripReason = errorClass
 		if err := insertAttempt(ctx, tx, deliveryID, attemptNumber, statusCode, errorClass, duration); err != nil {
 			return err
 		}
@@ -363,8 +382,21 @@ func (s *Store) MarkRetry(ctx context.Context, deliveryID string, statusCode int
 			return fmt.Errorf("mark delivery failed retry: %w", err)
 		}
 
-		return s.recordBreakerFailure(ctx, tx, webhookID, errorClass)
+		tripped, err := s.recordBreakerFailure(ctx, tx, wid, errorClass)
+		if tripped {
+			breakerTripped = true
+		}
+		return err
 	})
+	if err != nil {
+		return err
+	}
+	if breakerTripped {
+		slog.Default().Warn("webhook circuit breaker opened", "webhook_id", webhookID, "reason", tripReason)
+		observe.SetBreakerState(webhookID, BreakerStateOpen)
+		observe.IncBreakerTrip(tripReason)
+	}
+	return nil
 }
 
 // MarkDead records the final failed Attempt, moves the Delivery to dead, and
@@ -377,7 +409,12 @@ func (s *Store) MarkDead(ctx context.Context, deliveryID string, statusCode int,
 		return fmt.Errorf("reason is required")
 	}
 
-	return s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int, webhookID string) error {
+	var webhookID string
+	var breakerTripped bool
+	var tripReason string
+	err := s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int, wid string) error {
+		webhookID = wid
+		tripReason = reason
 		if err := insertAttempt(ctx, tx, deliveryID, attemptNumber, statusCode, errorClass, duration); err != nil {
 			return err
 		}
@@ -407,8 +444,21 @@ func (s *Store) MarkDead(ctx context.Context, deliveryID string, statusCode int,
 			return fmt.Errorf("insert dead letter: %w", err)
 		}
 
-		return s.recordBreakerFailure(ctx, tx, webhookID, reason)
+		tripped, err := s.recordBreakerFailure(ctx, tx, wid, reason)
+		if tripped {
+			breakerTripped = true
+		}
+		return err
 	})
+	if err != nil {
+		return err
+	}
+	if breakerTripped {
+		slog.Default().Warn("webhook circuit breaker opened", "webhook_id", webhookID, "reason", tripReason)
+		observe.SetBreakerState(webhookID, BreakerStateOpen)
+		observe.IncBreakerTrip(tripReason)
+	}
+	return nil
 }
 
 // BatchMarkItem is one delivery outcome to be applied in a batched mark operation.
@@ -480,13 +530,21 @@ func (s *Store) MarkSucceededBatch(ctx context.Context, items []BatchMarkItem) e
 	if marked != len(items) {
 		return fmt.Errorf("batch mark succeeded: marked %d of %d deliveries", marked, len(items))
 	}
+	var closedBreakers []string
 	for _, item := range items {
-		if err := s.recordBreakerSuccessForDeliveryTx(ctx, tx, item.DeliveryID); err != nil {
+		closed, webhookID, err := s.recordBreakerSuccessForDeliveryTx(ctx, tx, item.DeliveryID)
+		if err != nil {
 			return err
+		}
+		if closed {
+			closedBreakers = append(closedBreakers, webhookID)
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit batch success transaction: %w", err)
+	}
+	for _, wid := range closedBreakers {
+		observe.SetBreakerState(wid, BreakerStateClosed)
 	}
 	return nil
 }
@@ -551,13 +609,29 @@ func (s *Store) MarkRetryBatch(ctx context.Context, items []BatchMarkItem) error
 	if marked != len(items) {
 		return fmt.Errorf("batch mark retry: marked %d of %d deliveries", marked, len(items))
 	}
+	var trippedBreakers []struct {
+		webhookID string
+		reason    string
+	}
 	for _, item := range items {
-		if err := s.recordBreakerFailureForDeliveryTx(ctx, tx, item.DeliveryID, item.ErrorClass); err != nil {
+		tripped, webhookID, err := s.recordBreakerFailureForDeliveryTx(ctx, tx, item.DeliveryID, item.ErrorClass)
+		if err != nil {
 			return err
+		}
+		if tripped {
+			trippedBreakers = append(trippedBreakers, struct {
+				webhookID string
+				reason    string
+			}{webhookID, item.ErrorClass})
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit batch retry transaction: %w", err)
+	}
+	for _, ev := range trippedBreakers {
+		slog.Default().Warn("webhook circuit breaker opened", "webhook_id", ev.webhookID, "reason", ev.reason)
+		observe.SetBreakerState(ev.webhookID, BreakerStateOpen)
+		observe.IncBreakerTrip(ev.reason)
 	}
 	return nil
 }
@@ -632,13 +706,29 @@ func (s *Store) MarkDeadBatch(ctx context.Context, items []BatchMarkItem) error 
 	if attemptsMarked != len(items) || deadLettersMarked != len(items) {
 		return fmt.Errorf("batch mark dead: marked %d attempts and %d dead letters of %d deliveries", attemptsMarked, deadLettersMarked, len(items))
 	}
+	var trippedBreakers []struct {
+		webhookID string
+		reason    string
+	}
 	for _, item := range items {
-		if err := s.recordBreakerFailureForDeliveryTx(ctx, tx, item.DeliveryID, item.Reason); err != nil {
+		tripped, webhookID, err := s.recordBreakerFailureForDeliveryTx(ctx, tx, item.DeliveryID, item.Reason)
+		if err != nil {
 			return err
+		}
+		if tripped {
+			trippedBreakers = append(trippedBreakers, struct {
+				webhookID string
+				reason    string
+			}{webhookID, item.Reason})
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit batch dead transaction: %w", err)
+	}
+	for _, ev := range trippedBreakers {
+		slog.Default().Warn("webhook circuit breaker opened", "webhook_id", ev.webhookID, "reason", ev.reason)
+		observe.SetBreakerState(ev.webhookID, BreakerStateOpen)
+		observe.IncBreakerTrip(ev.reason)
 	}
 	return nil
 }
@@ -746,7 +836,9 @@ func insertAttempt(ctx context.Context, tx *sql.Tx, deliveryID string, attemptNu
 	return nil
 }
 
-func (s *Store) recordBreakerSuccess(ctx context.Context, tx *sql.Tx, webhookID string, deliveryID string) error {
+// recordBreakerSuccess updates the breaker to closed. Returns true if the
+// breaker state actually changed (the UPDATE matched a row).
+func (s *Store) recordBreakerSuccess(ctx context.Context, tx *sql.Tx, webhookID string, deliveryID string) (bool, error) {
 	var previousState string
 	err := tx.QueryRowContext(ctx, `
 		WITH previous AS (
@@ -780,19 +872,21 @@ func (s *Store) recordBreakerSuccess(ctx context.Context, tx *sql.Tx, webhookID 
 		SELECT breaker_state FROM updated
 	`, webhookID, s.breakerConfig.InitialCooldown.Milliseconds(), deliveryID).Scan(&previousState)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return fmt.Errorf("record breaker success: %w", err)
+		return false, fmt.Errorf("record breaker success: %w", err)
 	}
 	if previousState != BreakerStateClosed {
 		slog.Default().Info("webhook circuit breaker closed", "webhook_id", webhookID)
 	}
-	observe.SetBreakerState(webhookID, BreakerStateClosed)
-	return nil
+	return true, nil
 }
 
-func (s *Store) recordBreakerFailure(ctx context.Context, tx *sql.Tx, webhookID string, reason string) error {
+// recordBreakerFailure assesses the failure against the breaker state and
+// opens the breaker if the consecutive-failure threshold is met. Returns true
+// if the breaker was opened as a result of this call.
+func (s *Store) recordBreakerFailure(ctx context.Context, tx *sql.Tx, webhookID string, reason string) (bool, error) {
 	var state string
 	var failureCount int
 	var cooldownMillis int64
@@ -802,43 +896,43 @@ func (s *Store) recordBreakerFailure(ctx context.Context, tx *sql.Tx, webhookID 
 		WHERE id = $1::uuid
 	`, webhookID).Scan(&state, &failureCount, &cooldownMillis)
 	if err != nil {
-		return fmt.Errorf("load webhook breaker: %w", err)
+		return false, fmt.Errorf("load webhook breaker: %w", err)
 	}
 
 	switch state {
 	case BreakerStateHalfOpen:
 		cooldown := nextBreakerCooldown(time.Duration(cooldownMillis)*time.Millisecond, s.breakerConfig)
-		if err := s.openBreaker(ctx, tx, webhookID, failureCount+1, cooldown, reason); err != nil {
-			return err
-		}
+		return s.openBreaker(ctx, tx, webhookID, failureCount+1, cooldown, reason)
 	case BreakerStateClosed:
 		failureCount, err = consecutiveWebhookFailures(ctx, tx, webhookID)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if failureCount >= s.breakerConfig.FailureThreshold {
-			if err := s.openBreaker(ctx, tx, webhookID, failureCount, s.breakerConfig.InitialCooldown, reason); err != nil {
-				return err
-			}
+			return s.openBreaker(ctx, tx, webhookID, failureCount, s.breakerConfig.InitialCooldown, reason)
 		}
 	}
-	return nil
+	return false, nil
 }
 
-func (s *Store) recordBreakerSuccessForDeliveryTx(ctx context.Context, tx *sql.Tx, deliveryID string) error {
+// recordBreakerSuccessForDeliveryTx returns (stateChanged, webhookID, err).
+func (s *Store) recordBreakerSuccessForDeliveryTx(ctx context.Context, tx *sql.Tx, deliveryID string) (bool, string, error) {
 	webhookID, err := deliveryWebhookID(ctx, tx, deliveryID)
 	if err != nil {
-		return err
+		return false, "", err
 	}
-	return s.recordBreakerSuccess(ctx, tx, webhookID, deliveryID)
+	closed, err := s.recordBreakerSuccess(ctx, tx, webhookID, deliveryID)
+	return closed, webhookID, err
 }
 
-func (s *Store) recordBreakerFailureForDeliveryTx(ctx context.Context, tx *sql.Tx, deliveryID string, reason string) error {
+// recordBreakerFailureForDeliveryTx returns (stateChanged, webhookID, err).
+func (s *Store) recordBreakerFailureForDeliveryTx(ctx context.Context, tx *sql.Tx, deliveryID string, reason string) (bool, string, error) {
 	webhookID, err := deliveryWebhookID(ctx, tx, deliveryID)
 	if err != nil {
-		return err
+		return false, "", err
 	}
-	return s.recordBreakerFailure(ctx, tx, webhookID, reason)
+	tripped, err := s.recordBreakerFailure(ctx, tx, webhookID, reason)
+	return tripped, webhookID, err
 }
 
 func deliveryWebhookID(ctx context.Context, tx *sql.Tx, deliveryID string) (string, error) {
@@ -884,7 +978,10 @@ func consecutiveWebhookFailures(ctx context.Context, tx *sql.Tx, webhookID strin
 	return failures, nil
 }
 
-func (s *Store) openBreaker(ctx context.Context, tx *sql.Tx, webhookID string, failureCount int, cooldown time.Duration, reason string) error {
+// openBreaker transitions a webhook breaker from non-open to open. Returns
+// true if the state actually changed (the row was updated). Callers are
+// responsible for emitting log/metrics after the enclosing transaction commits.
+func (s *Store) openBreaker(ctx context.Context, tx *sql.Tx, webhookID string, failureCount int, cooldown time.Duration, reason string) (bool, error) {
 	result, err := tx.ExecContext(ctx, `
 		UPDATE webhooks
 		SET breaker_state = 'open',
@@ -897,14 +994,10 @@ func (s *Store) openBreaker(ctx context.Context, tx *sql.Tx, webhookID string, f
 		  AND breaker_state <> 'open'
 	`, webhookID, failureCount, cooldown.Milliseconds())
 	if err != nil {
-		return fmt.Errorf("open breaker: %w", err)
+		return false, fmt.Errorf("open breaker: %w", err)
 	}
-	if rows, _ := result.RowsAffected(); rows > 0 {
-		slog.Default().Warn("webhook circuit breaker opened", "webhook_id", webhookID, "reason", reason, "cooldown_ms", cooldown.Milliseconds())
-		observe.SetBreakerState(webhookID, BreakerStateOpen)
-		observe.IncBreakerTrip(reason)
-	}
-	return nil
+	rows, _ := result.RowsAffected()
+	return rows > 0, nil
 }
 
 func nextBreakerCooldown(current time.Duration, config BreakerConfig) time.Duration {
