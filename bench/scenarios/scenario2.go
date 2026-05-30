@@ -25,8 +25,10 @@ import (
 )
 
 const (
-	scenario2CustomerCount            = 10
+	defaultScenario2CustomerCount     = 10
 	defaultScenario2EventsPerCustomer = 100
+	defaultScenario2SubmitInterval    = 20 * time.Millisecond
+	scenario2OutageDelay              = 5 * time.Second
 	scenario2OutageDuration           = 30 * time.Second
 	partnerAP99Limit                  = 2 * time.Second
 )
@@ -43,6 +45,15 @@ var scenario2Partners = []struct {
 
 func scenario2CustomerID(i int) string {
 	return fmt.Sprintf("scenario-2-customer-%02d", i)
+}
+
+type scenario2Profile struct {
+	Name              string
+	CustomerCount     int
+	EventsPerCustomer int
+	SubmitInterval    time.Duration
+	WorkerCount       int
+	ReportPath        string
 }
 
 // RunScenario2 executes Scenario 2: transient and recovering Integration
@@ -66,7 +77,7 @@ func RunScenario2(ctx context.Context) error {
 	}
 
 	scenarioStart := time.Now()
-	outageStart := scenarioStart
+	outageStart := scenarioStart.Add(scenario2OutageDelay)
 	outageEnd := outageStart.Add(scenario2OutageDuration)
 
 	rs := receiver.NewServer(
@@ -81,14 +92,14 @@ func RunScenario2(ctx context.Context) error {
 	)
 	defer rs.Close()
 
-	eventsPerCustomer := scenario2EventsPerCustomer()
-	totalEvents := scenario2CustomerCount * eventsPerCustomer
+	profile := scenario2ProfileFromEnv()
+	totalEvents := profile.CustomerCount * profile.EventsPerCustomer
 	expectedDeliveries := totalEvents * len(scenario2Partners)
 
-	if err := seedScenario2Customers(ctx, db); err != nil {
+	if err := seedScenario2Customers(ctx, db, profile.CustomerCount); err != nil {
 		return fmt.Errorf("seed customers: %w", err)
 	}
-	if err := seedScenario2Webhooks(ctx, db); err != nil {
+	if err := seedScenario2Webhooks(ctx, db, profile.CustomerCount); err != nil {
 		return fmt.Errorf("seed webhooks: %w", err)
 	}
 
@@ -96,11 +107,6 @@ func RunScenario2(ctx context.Context) error {
 	reg := registry.New(db)
 	ingestStore := ingest.New(db, reg, plainSched)
 	outboxStore := outbox.New(db)
-
-	if err := submitScenario2Events(ctx, ingestStore, eventsPerCustomer); err != nil {
-		return fmt.Errorf("submit events: %w", err)
-	}
-	slog.Info("submitted scenario 2 events", "events", totalEvents, "expected_deliveries", expectedDeliveries)
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()
@@ -117,7 +123,7 @@ func RunScenario2(ctx context.Context) error {
 	workerLog := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	var workerWg sync.WaitGroup
-	workers := scenarioWorkerCount()
+	workers := profile.WorkerCount
 	for i := range workers {
 		workerWg.Add(1)
 		go func(id int) {
@@ -126,7 +132,7 @@ func RunScenario2(ctx context.Context) error {
 				plainSched,
 				worker.WithHTTPClient(client),
 				worker.WithHostLimiter(hostLimiter),
-				worker.WithRetryPolicy(retry.New(retry.Config{})),
+				worker.WithRetryPolicy(scenario2RetryPolicy()),
 				worker.WithLogger(workerLog),
 			)
 			if err := w.Run(workerCtx, outboxStore); err != nil && workerCtx.Err() == nil {
@@ -134,7 +140,12 @@ func RunScenario2(ctx context.Context) error {
 			}
 		}(i)
 	}
-	slog.Info("started workers", "count", workers)
+	slog.Info("started workers", "profile", profile.Name, "count", workers)
+
+	if err := submitScenario2Events(ctx, ingestStore, profile.CustomerCount, profile.EventsPerCustomer, profile.SubmitInterval); err != nil {
+		return fmt.Errorf("submit events: %w", err)
+	}
+	slog.Info("submitted scenario 2 events", "events", totalEvents, "expected_deliveries", expectedDeliveries)
 
 	pollCtx, cancelPoll := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancelPoll()
@@ -157,12 +168,14 @@ func RunScenario2(ctx context.Context) error {
 	workerWg.Wait()
 
 	totalDuration := time.Since(scenarioStart)
-	reportPath := "bench/results/scenario-2.md"
-	if err := writeScenario2Report(ctx, db, reportPath, scenario2ReportParams{
+	if err := writeScenario2Report(ctx, db, profile.ReportPath, scenario2ReportParams{
+		profileName:         profile.Name,
 		totalDuration:       totalDuration,
 		totalEvents:         totalEvents,
 		expectedDeliveries:  expectedDeliveries,
-		eventsPerCustomer:   eventsPerCustomer,
+		customerCount:       profile.CustomerCount,
+		eventsPerCustomer:   profile.EventsPerCustomer,
+		submitInterval:      profile.SubmitInterval,
 		workerCount:         workers,
 		outageStart:         outageStart,
 		outageEnd:           outageEnd,
@@ -171,8 +184,39 @@ func RunScenario2(ctx context.Context) error {
 		return fmt.Errorf("write report: %w", err)
 	}
 
-	slog.Info("scenario 2 complete", "report", reportPath)
+	slog.Info("scenario 2 complete", "profile", profile.Name, "report", profile.ReportPath)
 	return nil
+}
+
+func scenario2ProfileFromEnv() scenario2Profile {
+	name := os.Getenv("BENCH_PROFILE")
+	if name == "" {
+		name = "baseline"
+	}
+	reportPath := os.Getenv("BENCH_REPORT_PATH")
+	if reportPath == "" {
+		reportPath = "bench/results/scenario-2.md"
+	}
+	return scenario2Profile{
+		Name:              name,
+		CustomerCount:     scenario2CustomerCount(),
+		EventsPerCustomer: scenario2EventsPerCustomer(),
+		SubmitInterval:    scenario2SubmitInterval(),
+		WorkerCount:       scenarioWorkerCount(),
+		ReportPath:        reportPath,
+	}
+}
+
+func scenario2CustomerCount() int {
+	raw := os.Getenv("BENCH_SCENARIO2_CUSTOMERS")
+	if raw == "" {
+		return defaultScenario2CustomerCount
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return defaultScenario2CustomerCount
+	}
+	return n
 }
 
 func scenario2EventsPerCustomer() int {
@@ -185,6 +229,18 @@ func scenario2EventsPerCustomer() int {
 		return defaultScenario2EventsPerCustomer
 	}
 	return n
+}
+
+func scenario2SubmitInterval() time.Duration {
+	raw := os.Getenv("BENCH_SUBMIT_INTERVAL")
+	if raw == "" {
+		return defaultScenario2SubmitInterval
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		return defaultScenario2SubmitInterval
+	}
+	return d
 }
 
 func scenario2HTTPClient(receiverURL string) (*http.Client, error) {
@@ -211,11 +267,19 @@ func scenario2HTTPClient(receiverURL string) (*http.Client, error) {
 	return &http.Client{Transport: transport, Timeout: 15 * time.Second}, nil
 }
 
-func seedScenario2Customers(ctx context.Context, db *sql.DB) error {
+func scenario2RetryPolicy() retry.RetryPolicy {
+	return retry.New(retry.Config{
+		MaxAttempts: 20,
+		BaseDelay:   retry.DefaultBaseDelay,
+		CapDelay:    15 * time.Second,
+	})
+}
+
+func seedScenario2Customers(ctx context.Context, db *sql.DB, customerCount int) error {
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO customers (id, weight) VALUES ")
-	args := make([]any, 0, scenario2CustomerCount*2)
-	for i := 0; i < scenario2CustomerCount; i++ {
+	args := make([]any, 0, customerCount*2)
+	for i := 0; i < customerCount; i++ {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
@@ -230,13 +294,13 @@ func seedScenario2Customers(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func seedScenario2Webhooks(ctx context.Context, db *sql.DB) error {
+func seedScenario2Webhooks(ctx context.Context, db *sql.DB, customerCount int) error {
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active) VALUES ")
 
-	args := make([]any, 0, scenario2CustomerCount*len(scenario2Partners)*4)
+	args := make([]any, 0, customerCount*len(scenario2Partners)*4)
 	row := 0
-	for i := 0; i < scenario2CustomerCount; i++ {
+	for i := 0; i < customerCount; i++ {
 		customerID := scenario2CustomerID(i)
 		for _, partner := range scenario2Partners {
 			if row > 0 {
@@ -261,8 +325,8 @@ func seedScenario2Webhooks(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func submitScenario2Events(ctx context.Context, store *ingest.Store, eventsPerCustomer int) error {
-	for i := 0; i < scenario2CustomerCount; i++ {
+func submitScenario2Events(ctx context.Context, store *ingest.Store, customerCount int, eventsPerCustomer int, interval time.Duration) error {
+	for i := 0; i < customerCount; i++ {
 		customerID := scenario2CustomerID(i)
 		for range eventsPerCustomer {
 			if _, err := store.Submit(ctx, ingest.Event{
@@ -272,16 +336,26 @@ func submitScenario2Events(ctx context.Context, store *ingest.Store, eventsPerCu
 			}); err != nil {
 				return fmt.Errorf("submit event for %s: %w", customerID, err)
 			}
+			if interval > 0 {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(interval):
+				}
+			}
 		}
 	}
 	return nil
 }
 
 type scenario2ReportParams struct {
+	profileName         string
 	totalDuration       time.Duration
 	totalEvents         int
 	expectedDeliveries  int
+	customerCount       int
 	eventsPerCustomer   int
+	submitInterval      time.Duration
 	workerCount         int
 	outageStart         time.Time
 	outageEnd           time.Time
@@ -329,11 +403,13 @@ func writeScenario2Report(ctx context.Context, db *sql.DB, path string, p scenar
 
 ## Description
 
-10 Customers, %d Events per Customer, 3 Webhooks per Customer. Each Event fans out to Partner A, Partner B, and Partner C for **%d expected Deliveries**.
+Profile **%s**: %d Customers, %d Events per Customer, 3 Webhooks per Customer. Each Event fans out to Partner A, Partner B, and Partner C for **%d expected Deliveries**.
 
 - Partner A: healthy.
 - Partner B: deterministic 30%% 5xx.
 - Partner C: 503 from %s to %s, then recovers.
+- Events are submitted every %s so the outage happens while new Deliveries are
+  still being enqueued.
 
 ## Performance Summary
 
@@ -359,8 +435,8 @@ func writeScenario2Report(ctx context.Context, db *sql.DB, path string, p scenar
 | Partner | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|
 `,
-		p.eventsPerCustomer, p.expectedDeliveries,
-		p.outageStart.Format(time.RFC3339), p.outageEnd.Format(time.RFC3339),
+		p.profileName, p.customerCount, p.eventsPerCustomer, p.expectedDeliveries,
+		p.outageStart.Format(time.RFC3339), p.outageEnd.Format(time.RFC3339), p.submitInterval,
 		p.totalDuration.Round(time.Second), p.totalEvents, totalDeliveries, p.expectedDeliveries,
 		p.workerCount, terminal, totalDeliveries,
 		terminal, totalDeliveries, totalDeliveries, totalDeliveries, passFail(terminalOK),
@@ -435,20 +511,14 @@ type partnerRecoveryStats struct {
 func queryPartnerRecovery(ctx context.Context, db *sql.DB, host string, outageStart time.Time, outageEnd time.Time) (partnerRecoveryStats, error) {
 	var stats partnerRecoveryStats
 	err := db.QueryRowContext(ctx, `
-		WITH first_attempt AS (
-			SELECT delivery_id, MIN(sent_at) AS first_sent_at
-			FROM delivery_attempts
-			GROUP BY delivery_id
-		)
 		SELECT
 			COUNT(*),
 			COUNT(*) FILTER (WHERE d.status = 'succeeded' AND d.updated_at >= $3)
 		FROM deliveries d
 		JOIN webhooks w ON w.id = d.webhook_id
-		JOIN first_attempt fa ON fa.delivery_id = d.id
 		WHERE w.url LIKE '%' || $1 || '%'
-		  AND fa.first_sent_at >= $2
-		  AND fa.first_sent_at < $3
+		  AND d.created_at >= $2
+		  AND d.created_at < $3
 	`, host, outageStart, outageEnd).Scan(&stats.Total, &stats.Succeeded)
 	if err != nil {
 		return partnerRecoveryStats{}, fmt.Errorf("query partner recovery: %w", err)

@@ -1,28 +1,63 @@
-# Scenario 2: Happy-Case Throughput
+# Scenario 2: Transient + Recovering Partners
 
 ## Description
 
-**10000 deliveries** across **8 customers** (1250 each), burst at T=0. No chaos injection (0% latency, 0% errors). Measures raw throughput of the claim→POST→mark pipeline.
+Profile **baseline**: 10 Customers, 100 Events per Customer, 3 Webhooks per Customer. Each Event fans out to Partner A, Partner B, and Partner C for **3000 expected Deliveries**.
 
-Compared to Scenario 1 (~17.6 deliveries/s with 5% 500s + 10% whale 502s + 15% latency + 1s drip).
+- Partner A: healthy.
+- Partner B: deterministic 30% 5xx.
+- Partner C: 503 from 2026-05-30T19:46:01+07:00 to 2026-05-30T19:46:31+07:00, then recovers.
+- Events are submitted every 20ms so the outage happens while new Deliveries are
+  still being enqueued.
 
-## Results
+## Performance Summary
 
 | Metric | Value |
-|---|---|
-| Total duration | 3s |
-| Total deliveries | 10000 |
-| Workers | 8 |
-| Throughput | **3194 deliveries/s** |
-| SCALABILITY_REVIEW: Normal target | 2,000-15,000/s |
-| SCALABILITY_REVIEW: Peak target | 20,000-150,000/s |
-| Verdict | Normal range (3194/s) — meets SCALABILITY_REVIEW normal target of 2,000-15,000/s |
+|---|---:|
+| Total duration | 3m39s |
+| Events submitted | 1000 |
+| Deliveries created | 3000 / 3000 |
+| Workers | 32 |
+| Terminal Deliveries | 3000 / 3000 |
 
-| **Fat Customers (P50/P95/P99/Max)** | 0 ms | 0 ms | 0 ms | 0 ms |
-| **Overall (P50/P95/P99/Max)** | 1997 ms | 3399 ms | 3529 ms | 3599 ms |
+## Acceptance Criteria
+
+| Criterion | Observed | Limit | Result |
+|---|---:|---:|---|
+| 100% Deliveries terminal | 3000 / 3000 | 3000 / 3000 | **PASS** |
+| Partner C outage-window Deliveries succeeded | 403 / 403 | 403 / 403 | **PASS** |
+| Partner A lifecycle p99 unaffected | 133 ms | < 2000 ms | **PASS** |
+| Partner C post-recovery retry spike | 74 max/s of 403 retries | <= 100 max/s | **PASS** |
+
+## Per-Partner Lifecycle Latency
+
+| Partner | p50 | p95 | p99 | max |
+|---|---:|---:|---:|---:|
+| Partner A | 60 ms | 105 ms | 133 ms | 177 ms |
+| Partner B | 72 ms | 107749 ms | 141369 ms | 160804 ms |
+| Partner C | 86 ms | 30590 ms | 36426 ms | 42458 ms |
+
+## Attempts Per Delivery
+
+| Attempts | Deliveries |
+|---|---:|
+| 1 | 2314 |
+| 2 | 13 |
+| 3 | 30 |
+| 4 | 42 |
+| 5 | 79 |
+| 6 | 85 |
+| 7 | 58 |
+| 8 | 47 |
+| 9 | 29 |
+| 10 | 200 |
+| 11 | 2 |
+| 13 | 2 |
+| 20 | 99 |
 
 ## Delivery Outcomes
 
 | Status | Count |
-|---|---|
-| succeeded | 10000 |
+|---|---:|
+| dead | 99 |
+| succeeded | 2901 |
