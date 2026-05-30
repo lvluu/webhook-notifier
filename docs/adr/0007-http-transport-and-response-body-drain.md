@@ -1,0 +1,5 @@
+# Shared HTTP transport and response body drain
+
+Workers use a shared, tuned `http.Client` per Worker instead of `http.DefaultClient` so high-concurrency Delivery bursts to one Integration Partner do not collapse onto Go's low default per-host idle connection pool. Per-Attempt deadlines are enforced with request contexts, while transport timeouts bound connection setup and response headers separately. Every response body is fully drained and closed before classifying the Attempt, because Go can only reuse an HTTP connection after the body has been consumed or discarded.
+
+The default transport keeps `MaxConnsPerHost=0` so the existing Host Concurrency Cap remains the partner-protection mechanism, while raising idle pool limits enough for sustained benchmark load. Benchmarks may override the transport config and request timeout through Worker options, but normal workers should share one client rather than constructing clients per Delivery.

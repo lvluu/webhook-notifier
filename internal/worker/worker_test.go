@@ -1,6 +1,7 @@
 package worker_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -11,14 +12,22 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"slices"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/worker"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 type stubScheduler struct{}
 
@@ -82,6 +91,125 @@ func (r *recordingClaimableCustomerStore) DiscoverClaimableCustomers(_ context.C
 
 func newTestWorker(opts ...worker.Option) *worker.Worker {
 	return worker.New(stubScheduler{}, opts...)
+}
+
+type recordingDeliveryStore struct {
+	succeeded int
+	retried   int
+	dead      int
+}
+
+func (r *recordingDeliveryStore) ClaimNextN(context.Context, string, int) ([]outbox.Delivery, error) {
+	return nil, nil
+}
+
+func (r *recordingDeliveryStore) HasPendingWork(context.Context, string) (bool, error) {
+	return false, nil
+}
+
+func (r *recordingDeliveryStore) MarkSucceeded(context.Context, string, int, time.Duration) error {
+	r.succeeded++
+	return nil
+}
+
+func (r *recordingDeliveryStore) MarkRetry(context.Context, string, int, string, time.Duration, time.Duration) error {
+	r.retried++
+	return nil
+}
+
+func (r *recordingDeliveryStore) MarkDead(context.Context, string, int, string, string, time.Duration) error {
+	r.dead++
+	return nil
+}
+
+func (r *recordingDeliveryStore) Requeue(context.Context, string, time.Duration) error {
+	return nil
+}
+
+func (r *recordingDeliveryStore) MarkSucceededBatch(context.Context, []outbox.BatchMarkItem) error {
+	return nil
+}
+
+func (r *recordingDeliveryStore) MarkRetryBatch(context.Context, []outbox.BatchMarkItem) error {
+	return nil
+}
+
+func (r *recordingDeliveryStore) MarkDeadBatch(context.Context, []outbox.BatchMarkItem) error {
+	return nil
+}
+
+func TestNew_DefaultHTTPClientUsesTunedTransport(t *testing.T) {
+	t.Parallel()
+
+	w := newTestWorker()
+
+	transport, ok := w.HTTP.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("HTTP.Transport: got %T, want *http.Transport", w.HTTP.Transport)
+	}
+
+	if transport.MaxIdleConns != 10000 {
+		t.Errorf("MaxIdleConns: got %d, want 10000", transport.MaxIdleConns)
+	}
+	if transport.MaxIdleConnsPerHost != 500 {
+		t.Errorf("MaxIdleConnsPerHost: got %d, want 500", transport.MaxIdleConnsPerHost)
+	}
+	if transport.MaxConnsPerHost != 0 {
+		t.Errorf("MaxConnsPerHost: got %d, want 0", transport.MaxConnsPerHost)
+	}
+	if transport.IdleConnTimeout != 90*time.Second {
+		t.Errorf("IdleConnTimeout: got %s, want 90s", transport.IdleConnTimeout)
+	}
+	if transport.TLSHandshakeTimeout != 10*time.Second {
+		t.Errorf("TLSHandshakeTimeout: got %s, want 10s", transport.TLSHandshakeTimeout)
+	}
+	if transport.ResponseHeaderTimeout <= 0 {
+		t.Errorf("ResponseHeaderTimeout: got %s, want positive timeout", transport.ResponseHeaderTimeout)
+	}
+	if transport.ExpectContinueTimeout <= 0 {
+		t.Errorf("ExpectContinueTimeout: got %s, want positive timeout", transport.ExpectContinueTimeout)
+	}
+}
+
+func TestNew_HTTPConfigOptionOverridesTransportDefaults(t *testing.T) {
+	t.Parallel()
+
+	w := newTestWorker(worker.WithHTTPConfig(worker.HTTPConfig{
+		MaxIdleConns:          111,
+		MaxIdleConnsPerHost:   22,
+		MaxConnsPerHost:       33,
+		IdleConnTimeout:       44 * time.Second,
+		TLSHandshakeTimeout:   55 * time.Second,
+		ResponseHeaderTimeout: 66 * time.Second,
+		ExpectContinueTimeout: 77 * time.Second,
+	}))
+
+	transport, ok := w.HTTP.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("HTTP.Transport: got %T, want *http.Transport", w.HTTP.Transport)
+	}
+
+	if transport.MaxIdleConns != 111 {
+		t.Errorf("MaxIdleConns: got %d, want 111", transport.MaxIdleConns)
+	}
+	if transport.MaxIdleConnsPerHost != 22 {
+		t.Errorf("MaxIdleConnsPerHost: got %d, want 22", transport.MaxIdleConnsPerHost)
+	}
+	if transport.MaxConnsPerHost != 33 {
+		t.Errorf("MaxConnsPerHost: got %d, want 33", transport.MaxConnsPerHost)
+	}
+	if transport.IdleConnTimeout != 44*time.Second {
+		t.Errorf("IdleConnTimeout: got %s, want 44s", transport.IdleConnTimeout)
+	}
+	if transport.TLSHandshakeTimeout != 55*time.Second {
+		t.Errorf("TLSHandshakeTimeout: got %s, want 55s", transport.TLSHandshakeTimeout)
+	}
+	if transport.ResponseHeaderTimeout != 66*time.Second {
+		t.Errorf("ResponseHeaderTimeout: got %s, want 66s", transport.ResponseHeaderTimeout)
+	}
+	if transport.ExpectContinueTimeout != 77*time.Second {
+		t.Errorf("ExpectContinueTimeout: got %s, want 77s", transport.ExpectContinueTimeout)
+	}
 }
 
 func TestRunClaimableCustomerDiscoveryNotifiesWithCursorWraparound(t *testing.T) {
@@ -257,6 +385,140 @@ func TestDeliver_PostsEventToReceiver(t *testing.T) {
 	}
 }
 
+func TestDeliver_DrainsLargeResponseBodySoConnectionIsReused(t *testing.T) {
+	t.Parallel()
+
+	body := bytes.Repeat([]byte("x"), 512*1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	var reused []bool
+	baseTransport := worker.NewHTTPClient(worker.DefaultHTTPConfig()).Transport
+	traceTransport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		trace := &httptrace.ClientTrace{
+			GotConn: func(info httptrace.GotConnInfo) {
+				reused = append(reused, info.Reused)
+			},
+		}
+		return baseTransport.RoundTrip(req.WithContext(httptrace.WithClientTrace(req.Context(), trace)))
+	})
+
+	w := newTestWorker(worker.WithHTTPClient(&http.Client{Transport: traceTransport}))
+	d := worker.Delivery{
+		EventID:    "evt_reuse",
+		DeliveryID: "dlv_reuse",
+		CustomerID: "cus_reuse",
+		URL:        srv.URL,
+		Body:       []byte(`{}`),
+		EventType:  "test.event",
+	}
+
+	for i := 0; i < 2; i++ {
+		status, err := w.Deliver(context.Background(), d)
+		if err != nil {
+			t.Fatalf("Deliver[%d]: %v", i, err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Deliver[%d] status: got %d, want 200", i, status)
+		}
+	}
+
+	if len(reused) != 2 {
+		t.Fatalf("GotConn calls: got %d, want 2", len(reused))
+	}
+	if !reused[1] {
+		t.Fatalf("second request did not reuse the first connection: %v", reused)
+	}
+}
+
+func TestProcess_DrainsResponseBodyBeforeClassifyingEveryOutcome(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+		wantMark   string
+	}{
+		{name: "success", statusCode: http.StatusOK, wantMark: "succeeded"},
+		{name: "retryable", statusCode: http.StatusServiceUnavailable, wantMark: "retried"},
+		{name: "terminal", statusCode: http.StatusNotFound, wantMark: "dead"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			body := bytes.Repeat([]byte("x"), 512*1024)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				_ = r.Body.Close()
+				w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+				w.WriteHeader(tt.statusCode)
+				_, _ = w.Write(body)
+			}))
+			defer srv.Close()
+
+			var reused []bool
+			baseTransport := worker.NewHTTPClient(worker.DefaultHTTPConfig()).Transport
+			traceTransport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				trace := &httptrace.ClientTrace{
+					GotConn: func(info httptrace.GotConnInfo) {
+						reused = append(reused, info.Reused)
+					},
+				}
+				return baseTransport.RoundTrip(req.WithContext(httptrace.WithClientTrace(req.Context(), trace)))
+			})
+
+			w := newTestWorker(worker.WithHTTPClient(&http.Client{Transport: traceTransport}))
+			store := &recordingDeliveryStore{}
+			delivery := outbox.Delivery{
+				ID:            "dlv_" + tt.name,
+				EventID:       "evt_" + tt.name,
+				CustomerID:    "cus_" + tt.name,
+				URL:           srv.URL,
+				Payload:       []byte(`{}`),
+				EventType:     "test.event",
+				AttemptNumber: 1,
+				CreatedAt:     time.Now(),
+			}
+
+			for i := 0; i < 2; i++ {
+				result := w.Process(context.Background(), store, delivery)
+				if result.Err != nil {
+					t.Fatalf("Process[%d]: %v", i, result.Err)
+				}
+			}
+
+			if len(reused) != 2 {
+				t.Fatalf("GotConn calls: got %d, want 2", len(reused))
+			}
+			if !reused[1] {
+				t.Fatalf("second request did not reuse the first connection: %v", reused)
+			}
+
+			switch tt.wantMark {
+			case "succeeded":
+				if store.succeeded != 2 {
+					t.Fatalf("MarkSucceeded calls: got %d, want 2", store.succeeded)
+				}
+			case "retried":
+				if store.retried != 2 {
+					t.Fatalf("MarkRetry calls: got %d, want 2", store.retried)
+				}
+			case "dead":
+				if store.dead != 2 {
+					t.Fatalf("MarkDead calls: got %d, want 2", store.dead)
+				}
+			}
+		})
+	}
+}
+
 // TestDeliver_PropagatesContextCancellation guards against a worker that
 // silently ignores ctx cancellation — important once retries land (#5) and
 // shutdown semantics matter.
@@ -286,6 +548,35 @@ func TestDeliver_PropagatesContextCancellation(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error from cancelled context, got nil")
+	}
+}
+
+func TestDeliver_UsesPerAttemptRequestTimeout(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	w := newTestWorker(worker.WithRequestTimeout(20 * time.Millisecond))
+	started := time.Now()
+	_, err := w.Deliver(context.Background(), worker.Delivery{
+		EventID:    "evt_timeout",
+		DeliveryID: "dlv_timeout",
+		CustomerID: "cus_timeout",
+		URL:        srv.URL,
+		Body:       []byte(`{}`),
+		EventType:  "test.event",
+	})
+	elapsed := time.Since(started)
+
+	if err == nil {
+		t.Fatal("Deliver: got nil error, want timeout")
+	}
+	if elapsed >= 150*time.Millisecond {
+		t.Fatalf("Deliver elapsed %s, want request timeout before handler completes", elapsed)
 	}
 }
 

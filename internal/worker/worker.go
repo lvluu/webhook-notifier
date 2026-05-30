@@ -62,11 +62,52 @@ type DeliveryStore interface {
 
 // Worker sends webhook Deliveries and records retry outcomes.
 type Worker struct {
-	HTTP        *http.Client
-	RetryPolicy retry.RetryPolicy
-	Scheduler   scheduler.Scheduler
-	HostLimiter *HostLimiter
-	Logger      *slog.Logger
+	HTTP           *http.Client
+	RetryPolicy    retry.RetryPolicy
+	Scheduler      scheduler.Scheduler
+	HostLimiter    *HostLimiter
+	Logger         *slog.Logger
+	RequestTimeout time.Duration
+}
+
+// HTTPConfig configures the shared HTTP client used for webhook Attempts.
+type HTTPConfig struct {
+	MaxIdleConns          int
+	MaxIdleConnsPerHost   int
+	MaxConnsPerHost       int
+	IdleConnTimeout       time.Duration
+	TLSHandshakeTimeout   time.Duration
+	ResponseHeaderTimeout time.Duration
+	ExpectContinueTimeout time.Duration
+}
+
+// DefaultHTTPConfig returns the worker's production-oriented HTTP transport
+// defaults.
+func DefaultHTTPConfig() HTTPConfig {
+	return HTTPConfig{
+		MaxIdleConns:          10000,
+		MaxIdleConnsPerHost:   500,
+		MaxConnsPerHost:       0,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
+}
+
+// NewHTTPClient returns a shared HTTP client configured for webhook delivery.
+func NewHTTPClient(config HTTPConfig) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConns:          config.MaxIdleConns,
+			MaxIdleConnsPerHost:   config.MaxIdleConnsPerHost,
+			MaxConnsPerHost:       config.MaxConnsPerHost,
+			IdleConnTimeout:       config.IdleConnTimeout,
+			TLSHandshakeTimeout:   config.TLSHandshakeTimeout,
+			ResponseHeaderTimeout: config.ResponseHeaderTimeout,
+			ExpectContinueTimeout: config.ExpectContinueTimeout,
+		},
+	}
 }
 
 // Option configures a Worker.
@@ -75,6 +116,20 @@ type Option func(*Worker)
 // WithHTTPClient sets the HTTP client used for webhook requests.
 func WithHTTPClient(c *http.Client) Option {
 	return func(w *Worker) { w.HTTP = c }
+}
+
+// WithHTTPConfig configures the worker's shared HTTP client transport.
+func WithHTTPConfig(config HTTPConfig) Option {
+	return func(w *Worker) { w.HTTP = NewHTTPClient(config) }
+}
+
+// WithRequestTimeout sets the per-Attempt request timeout.
+func WithRequestTimeout(timeout time.Duration) Option {
+	return func(w *Worker) {
+		if timeout > 0 {
+			w.RequestTimeout = timeout
+		}
+	}
 }
 
 // WithRetryPolicy sets the retry policy used to classify delivery attempts.
@@ -95,10 +150,11 @@ func WithLogger(logger *slog.Logger) Option {
 // New returns a Worker using scheduler s and optional overrides.
 func New(s scheduler.Scheduler, opts ...Option) *Worker {
 	w := &Worker{
-		HTTP:        http.DefaultClient,
-		RetryPolicy: retry.New(retry.Config{}),
-		Scheduler:   s,
-		Logger:      observe.NewLogger(nil),
+		HTTP:           NewHTTPClient(DefaultHTTPConfig()),
+		RetryPolicy:    retry.New(retry.Config{}),
+		Scheduler:      s,
+		Logger:         observe.NewLogger(nil),
+		RequestTimeout: 30 * time.Second,
 	}
 	for _, opt := range opts {
 		opt(w)
@@ -123,11 +179,18 @@ func (w *Worker) Deliver(ctx context.Context, d Delivery) (int, error) {
 // Send builds and executes the signed webhook HTTP request for d.
 func (w *Worker) Send(ctx context.Context, d Delivery) (*http.Response, error) {
 	if w.HTTP == nil {
-		w.HTTP = http.DefaultClient
+		w.HTTP = NewHTTPClient(DefaultHTTPConfig())
+	}
+	var cancel context.CancelFunc
+	if w.RequestTimeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, w.RequestTimeout)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.URL, bytes.NewReader(d.Body))
 	if err != nil {
+		if cancel != nil {
+			cancel()
+		}
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -145,10 +208,30 @@ func (w *Worker) Send(ctx context.Context, d Delivery) (*http.Response, error) {
 
 	resp, err := w.HTTP.Do(req)
 	if err != nil {
+		if cancel != nil {
+			cancel()
+		}
 		return nil, fmt.Errorf("post %s: %w", d.URL, err)
+	}
+	if cancel != nil && resp != nil && resp.Body != nil {
+		resp.Body = cancelOnCloseReadCloser{
+			ReadCloser: resp.Body,
+			cancel:     cancel,
+		}
 	}
 
 	return resp, nil
+}
+
+type cancelOnCloseReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c cancelOnCloseReadCloser) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
 }
 
 // deliveryOutcome captures the result of sending a delivery and classifying the
