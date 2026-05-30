@@ -32,6 +32,8 @@ func main() {
 		err = scenarios.RunScenario2(ctx)
 	case "scenario3":
 		err = scenarios.RunScenario3(ctx)
+	case "scenario4":
+		err = scenarios.RunScenario4(ctx)
 	default:
 		err = fmt.Errorf("unknown scenario: %s", scenario)
 	}
