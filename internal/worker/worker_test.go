@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -49,8 +50,13 @@ func (r *recordingScheduler) Notified() []string {
 
 type recordingClaimableCustomerStore struct {
 	mu        sync.Mutex
-	responses [][]string
+	responses []claimableCustomerResponse
 	calls     chan string
+}
+
+type claimableCustomerResponse struct {
+	customers []string
+	err       error
 }
 
 func (r *recordingClaimableCustomerStore) DiscoverClaimableCustomers(_ context.Context, afterCustomerID string, _ int) ([]string, error) {
@@ -63,8 +69,11 @@ func (r *recordingClaimableCustomerStore) DiscoverClaimableCustomers(_ context.C
 	}
 	response := r.responses[0]
 	r.responses = r.responses[1:]
-	out := make([]string, len(response))
-	copy(out, response)
+	if response.err != nil {
+		return nil, response.err
+	}
+	out := make([]string, len(response.customers))
+	copy(out, response.customers)
 	return out, nil
 }
 
@@ -79,10 +88,10 @@ func TestRunClaimableCustomerDiscoveryNotifiesWithCursorWraparound(t *testing.T)
 	defer cancel()
 
 	store := &recordingClaimableCustomerStore{
-		responses: [][]string{
-			{"cus_a", "cus_b"},
+		responses: []claimableCustomerResponse{
+			{customers: []string{"cus_a", "cus_b"}},
 			{},
-			{"cus_a"},
+			{customers: []string{"cus_a"}},
 		},
 		calls: make(chan string, 3),
 	}
@@ -91,8 +100,9 @@ func TestRunClaimableCustomerDiscoveryNotifiesWithCursorWraparound(t *testing.T)
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- worker.RunClaimableCustomerDiscovery(ctx, store, sched, worker.DiscoveryConfig{
-			Interval: time.Millisecond,
-			Limit:    2,
+			Interval:     time.Millisecond,
+			EmptyBackoff: time.Nanosecond,
+			Limit:        2,
 		})
 	}()
 
@@ -124,6 +134,54 @@ func TestRunClaimableCustomerDiscoveryNotifiesWithCursorWraparound(t *testing.T)
 	wantNotified := []string{"cus_a", "cus_b", "cus_a"}
 	if got := sched.Notified(); !slices.Equal(got, wantNotified) {
 		t.Fatalf("notified customers: got %v, want %v", got, wantNotified)
+	}
+}
+
+func TestRunClaimableCustomerDiscoveryRetriesAfterStoreError(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := &recordingClaimableCustomerStore{
+		responses: []claimableCustomerResponse{
+			{err: errors.New("database unavailable")},
+			{customers: []string{"cus_recovered"}},
+		},
+		calls: make(chan string, 2),
+	}
+	sched := &recordingScheduler{}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- worker.RunClaimableCustomerDiscovery(ctx, store, sched, worker.DiscoveryConfig{
+			Interval:     time.Millisecond,
+			ErrorBackoff: time.Nanosecond,
+			Limit:        1,
+		})
+	}()
+
+	for range 2 {
+		select {
+		case <-store.calls:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for discovery retry")
+		}
+	}
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != context.Canceled {
+			t.Fatalf("RunClaimableCustomerDiscovery: got %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for discovery loop shutdown")
+	}
+
+	want := []string{"cus_recovered"}
+	if got := sched.Notified(); !slices.Equal(got, want) {
+		t.Fatalf("notified customers: got %v, want %v", got, want)
 	}
 }
 
