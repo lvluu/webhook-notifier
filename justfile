@@ -65,7 +65,7 @@ demo: up migrate
 
 # fairness under load + late-arrival reactivity (issue #12)
 bench-1:
-    @echo "bench-1 stub — implemented in issue #12"
+    go run ./cmd/bench scenario1
 
 # transient + recovering partners (issue #13)
 bench-2:

@@ -222,7 +222,11 @@ func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Deli
 	}
 
 	resultErr := store.MarkRetry(ctx, d.ID, statusCode, reason, delay, duration)
-	log.Warn("delivery scheduled for retry", "reason", reason, "retry_delay_ms", delay.Milliseconds(), "status_code", statusCode, "duration_ms", duration.Milliseconds())
+	logArgs := []any{"reason", reason, "retry_delay_ms", delay.Milliseconds(), "status_code", statusCode, "duration_ms", duration.Milliseconds()}
+	if err != nil {
+		logArgs = append(logArgs, "error", err)
+	}
+	log.Warn("delivery scheduled for retry", logArgs...)
 	return ProcessResult{Err: resultErr}
 }
 
