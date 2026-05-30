@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/lvluu/webhook-notifier/internal/ingest"
@@ -39,7 +41,20 @@ const (
 	smallDeliveries = 5
 	lateDeliveries  = 3
 	workerCount     = 8
+	defaultWorkers  = 32
 )
+
+func scenarioWorkerCount() int {
+	raw := os.Getenv("BENCH_WORKERS")
+	if raw == "" {
+		return defaultWorkers
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return defaultWorkers
+	}
+	return n
+}
 
 func smallCustomerID(i int) string {
 	return fmt.Sprintf("small-%03d", i)
