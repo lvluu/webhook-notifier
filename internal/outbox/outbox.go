@@ -530,14 +530,22 @@ func (s *Store) MarkSucceededBatch(ctx context.Context, items []BatchMarkItem) e
 	if marked != len(items) {
 		return fmt.Errorf("batch mark succeeded: marked %d of %d deliveries", marked, len(items))
 	}
+	webhookIDs, err := batchDeliveryWebhookIDs(ctx, tx, ids)
+	if err != nil {
+		return err
+	}
 	var closedBreakers []string
 	for _, item := range items {
-		closed, webhookID, err := s.recordBreakerSuccessForDeliveryTx(ctx, tx, item.DeliveryID)
+		wid, ok := webhookIDs[item.DeliveryID]
+		if !ok {
+			return fmt.Errorf("delivery %s not found", item.DeliveryID)
+		}
+		closed, err := s.recordBreakerSuccess(ctx, tx, wid, item.DeliveryID)
 		if err != nil {
 			return err
 		}
 		if closed {
-			closedBreakers = append(closedBreakers, webhookID)
+			closedBreakers = append(closedBreakers, wid)
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -609,12 +617,20 @@ func (s *Store) MarkRetryBatch(ctx context.Context, items []BatchMarkItem) error
 	if marked != len(items) {
 		return fmt.Errorf("batch mark retry: marked %d of %d deliveries", marked, len(items))
 	}
+	webhookIDs, err := batchDeliveryWebhookIDs(ctx, tx, ids)
+	if err != nil {
+		return err
+	}
 	var trippedBreakers []struct {
 		webhookID string
 		reason    string
 	}
 	for _, item := range items {
-		tripped, webhookID, err := s.recordBreakerFailureForDeliveryTx(ctx, tx, item.DeliveryID, item.ErrorClass)
+		wid, ok := webhookIDs[item.DeliveryID]
+		if !ok {
+			return fmt.Errorf("delivery %s not found", item.DeliveryID)
+		}
+		tripped, err := s.recordBreakerFailure(ctx, tx, wid, item.ErrorClass)
 		if err != nil {
 			return err
 		}
@@ -622,7 +638,7 @@ func (s *Store) MarkRetryBatch(ctx context.Context, items []BatchMarkItem) error
 			trippedBreakers = append(trippedBreakers, struct {
 				webhookID string
 				reason    string
-			}{webhookID, item.ErrorClass})
+			}{wid, item.ErrorClass})
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -706,12 +722,20 @@ func (s *Store) MarkDeadBatch(ctx context.Context, items []BatchMarkItem) error 
 	if attemptsMarked != len(items) || deadLettersMarked != len(items) {
 		return fmt.Errorf("batch mark dead: marked %d attempts and %d dead letters of %d deliveries", attemptsMarked, deadLettersMarked, len(items))
 	}
+	webhookIDs, err := batchDeliveryWebhookIDs(ctx, tx, ids)
+	if err != nil {
+		return err
+	}
 	var trippedBreakers []struct {
 		webhookID string
 		reason    string
 	}
 	for _, item := range items {
-		tripped, webhookID, err := s.recordBreakerFailureForDeliveryTx(ctx, tx, item.DeliveryID, item.Reason)
+		wid, ok := webhookIDs[item.DeliveryID]
+		if !ok {
+			return fmt.Errorf("delivery %s not found", item.DeliveryID)
+		}
+		tripped, err := s.recordBreakerFailure(ctx, tx, wid, item.Reason)
 		if err != nil {
 			return err
 		}
@@ -719,7 +743,7 @@ func (s *Store) MarkDeadBatch(ctx context.Context, items []BatchMarkItem) error 
 			trippedBreakers = append(trippedBreakers, struct {
 				webhookID string
 				reason    string
-			}{webhookID, item.Reason})
+			}{wid, item.Reason})
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -742,13 +766,16 @@ func (s *Store) HasPendingWork(ctx context.Context, customerID string) (bool, er
 	err := s.db.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM deliveries d
-			JOIN webhooks w ON w.id = d.webhook_id
 			WHERE d.customer_id = $1
 			  AND d.status NOT IN ('succeeded', 'dead')
-			  AND (
-			      w.breaker_state = 'closed'
-			      OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = d.id)
-			      OR (w.breaker_state = 'open' AND w.breaker_next_probe_at <= now())
+			  AND EXISTS (
+			      SELECT 1 FROM webhooks w
+			      WHERE w.id = d.webhook_id
+			        AND (
+			            w.breaker_state = 'closed'
+			            OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = d.id)
+			            OR (w.breaker_state = 'open' AND w.breaker_next_probe_at <= now())
+			        )
 			  )
 		)
 	`, customerID).Scan(&exists)
@@ -839,47 +866,30 @@ func insertAttempt(ctx context.Context, tx *sql.Tx, deliveryID string, attemptNu
 // recordBreakerSuccess updates the breaker to closed. Returns true if the
 // breaker state actually changed (the UPDATE matched a row).
 func (s *Store) recordBreakerSuccess(ctx context.Context, tx *sql.Tx, webhookID string, deliveryID string) (bool, error) {
-	var previousState string
+	var updated string
 	err := tx.QueryRowContext(ctx, `
-		WITH previous AS (
-			SELECT id, breaker_state, breaker_probe_delivery_id::text AS probe_delivery_id
-			FROM webhooks
-			WHERE id = $1::uuid
-		),
-		updated AS (
-			UPDATE webhooks w
-			SET breaker_state = 'closed',
-			    breaker_failure_count = 0,
-			    breaker_opened_at = NULL,
-			    breaker_next_probe_at = NULL,
-			    breaker_cooldown_ms = $2,
-			    breaker_probe_delivery_id = NULL
-			FROM previous
-			WHERE w.id = previous.id
-			  AND NOT (
-			      previous.breaker_state = 'half_open'
-			      AND previous.probe_delivery_id IS DISTINCT FROM $3
-			  )
-			  AND (
-			      previous.breaker_state <> 'closed'
-			      OR w.breaker_failure_count <> 0
-			      OR w.breaker_opened_at IS NOT NULL
-			      OR w.breaker_next_probe_at IS NOT NULL
-			      OR w.breaker_probe_delivery_id IS NOT NULL
-			  )
-			RETURNING previous.breaker_state
-		)
-		SELECT breaker_state FROM updated
-	`, webhookID, s.breakerConfig.InitialCooldown.Milliseconds(), deliveryID).Scan(&previousState)
+		UPDATE webhooks
+		SET breaker_state = 'closed',
+		    breaker_failure_count = 0,
+		    breaker_opened_at = NULL,
+		    breaker_next_probe_at = NULL,
+		    breaker_cooldown_ms = $2,
+		    breaker_probe_delivery_id = NULL
+		WHERE id = $1::uuid
+		  AND breaker_state <> 'closed'
+		  AND NOT (
+		      breaker_state = 'half_open'
+		      AND breaker_probe_delivery_id IS DISTINCT FROM $3::uuid
+		  )
+		RETURNING id
+	`, webhookID, s.breakerConfig.InitialCooldown.Milliseconds(), deliveryID).Scan(&updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("record breaker success: %w", err)
 	}
-	if previousState != BreakerStateClosed {
-		slog.Default().Info("webhook circuit breaker closed", "webhook_id", webhookID)
-	}
+	slog.Default().Info("webhook circuit breaker closed", "webhook_id", webhookID)
 	return true, nil
 }
 
@@ -904,7 +914,7 @@ func (s *Store) recordBreakerFailure(ctx context.Context, tx *sql.Tx, webhookID 
 		cooldown := nextBreakerCooldown(time.Duration(cooldownMillis)*time.Millisecond, s.breakerConfig)
 		return s.openBreaker(ctx, tx, webhookID, failureCount+1, cooldown, reason)
 	case BreakerStateClosed:
-		failureCount, err = consecutiveWebhookFailures(ctx, tx, webhookID)
+		failureCount, err = consecutiveWebhookFailures(ctx, tx, webhookID, s.breakerConfig.FailureThreshold+1)
 		if err != nil {
 			return false, err
 		}
@@ -948,7 +958,34 @@ func deliveryWebhookID(ctx context.Context, tx *sql.Tx, deliveryID string) (stri
 	return webhookID, nil
 }
 
-func consecutiveWebhookFailures(ctx context.Context, tx *sql.Tx, webhookID string) (int, error) {
+// batchDeliveryWebhookIDs returns a map of deliveryID → webhookID for all
+// given IDs in a single round trip, avoiding N+1 in batch mark paths.
+func batchDeliveryWebhookIDs(ctx context.Context, tx *sql.Tx, deliveryIDs []string) (map[string]string, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id::text, webhook_id::text
+		FROM deliveries
+		WHERE id = ANY($1)
+	`, pq.Array(deliveryIDs))
+	if err != nil {
+		return nil, fmt.Errorf("load delivery webhook ids: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make(map[string]string, len(deliveryIDs))
+	for rows.Next() {
+		var id, webhookID string
+		if err := rows.Scan(&id, &webhookID); err != nil {
+			return nil, fmt.Errorf("scan delivery webhook id: %w", err)
+		}
+		ids[id] = webhookID
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate delivery webhook ids: %w", err)
+	}
+	return ids, nil
+}
+
+func consecutiveWebhookFailures(ctx context.Context, tx *sql.Tx, webhookID string, limit int) (int, error) {
 	var failures int
 	err := tx.QueryRowContext(ctx, `
 		WITH latest_success AS (
@@ -959,19 +996,22 @@ func consecutiveWebhookFailures(ctx context.Context, tx *sql.Tx, webhookID strin
 			  AND da.status_code >= 200
 			  AND da.status_code < 300
 		)
-		SELECT count(*)
-		FROM delivery_attempts da
-		JOIN deliveries d ON d.id = da.delivery_id
-		CROSS JOIN latest_success ls
-		WHERE d.webhook_id = $1::uuid
-		  AND da.sent_at > COALESCE(ls.sent_at, '-infinity'::timestamptz)
-		  AND (
-		      da.error_class IS NOT NULL
-		      OR da.status_code IS NULL
-		      OR da.status_code < 200
-		      OR da.status_code >= 300
-		  )
-	`, webhookID).Scan(&failures)
+		SELECT count(*) FROM (
+			SELECT 1
+			FROM delivery_attempts da
+			JOIN deliveries d ON d.id = da.delivery_id
+			CROSS JOIN latest_success ls
+			WHERE d.webhook_id = $1::uuid
+			  AND da.sent_at > COALESCE(ls.sent_at, '-infinity'::timestamptz)
+			  AND (
+			      da.error_class IS NOT NULL
+			      OR da.status_code IS NULL
+			      OR da.status_code < 200
+			      OR da.status_code >= 300
+			  )
+			LIMIT $2
+		) sub
+	`, webhookID, limit).Scan(&failures)
 	if err != nil {
 		return 0, fmt.Errorf("count consecutive webhook failures: %w", err)
 	}
