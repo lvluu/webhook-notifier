@@ -2,7 +2,7 @@
 
 This document describes the design of the Webhook Notifier component: a service that consumes business Events from a multi-tenant platform and reliably delivers them to Integration Partners over HTTP POST, with horizontal scalability and fair scheduling across Customers of vastly different sizes.
 
-Vocabulary used here is defined in [CONTEXT.md](../CONTEXT.md). Architectural commitments are anchored in [ADR-0001](adr/0001-round-robin-fairness-with-pluggable-scheduler.md), [ADR-0002](adr/0002-postgres-as-queue-no-broker-for-poc.md), [ADR-0003](adr/0003-retry-policy-and-delivery-lifecycle.md), [ADR-0006](adr/0006-db-backed-claimable-customer-discovery.md), [ADR-0007](adr/0007-http-transport-and-response-body-drain.md), and [ADR-0008](adr/0008-persisted-webhook-circuit-breaker.md).
+Vocabulary used here is defined in [CONTEXT.md](../CONTEXT.md). Architectural commitments are anchored in [ADR-0001](adr/0001-round-robin-fairness-with-pluggable-scheduler.md), [ADR-0002](adr/0002-postgres-as-queue-no-broker-for-poc.md), [ADR-0003](adr/0003-retry-policy-and-delivery-lifecycle.md), and [ADR-0006](adr/0006-db-backed-claimable-customer-discovery.md).
 
 ## Goals
 
@@ -34,7 +34,6 @@ flowchart LR
       S[Signer<br/>HMAC-SHA256]
       RP[RetryPolicy<br/>decorrelated jitter]
       HS[Per-host<br/>semaphore]
-      CB[Webhook<br/>circuit breaker]
     end
 
     subgraph Postgres
@@ -59,7 +58,6 @@ flowchart LR
     W --> S
     W --> RP
     W --> HS
-    W --> CB
     W -->|HTTP POST| PA
     W -->|HTTP POST| PB
     W -->|record| AT
@@ -113,7 +111,6 @@ flowchart LR
 - **SubscriptionRegistry** — Read-only `customer_id → []Webhook`. In-memory LRU with short TTL; cache miss falls back to PG. Avoids hot lookup on every Delivery.
 - **DLQ** (`dead_letters` table) — Terminal Deliveries with reason (`exhausted`, `terminal_4xx`, `terminal_network`).
 - **Per-host semaphore** — `map[host]chan struct{}`. Concurrency cap per partner hostname, default 20. Protects partner endpoints from self-inflicted DoS when many Deliveries target the same host.
-- **Webhook circuit breaker** — Persisted per-Webhook breaker state (`closed`, `open`, `half_open`) that keeps chronically failing Webhooks out of claim/discovery until a cooldown permits one probe. Complements RetryPolicy and the Host Concurrency Cap: RetryPolicy decides the outcome of an Attempt, HostLimiter limits local pressure on a hostname, and the breaker stops a broken Webhook from repeatedly occupying worker capacity across many Deliveries.
 
 ## Data model
 
@@ -139,12 +136,6 @@ url
 secret (encrypted)
 event_types (text[])
 active (bool)
-breaker_state (text)
-breaker_failure_count
-breaker_opened_at
-breaker_next_probe_at
-breaker_cooldown_ms
-breaker_probe_delivery_id
 ```
 
 Indexes:
@@ -218,18 +209,6 @@ func (h *HostLimiter) Acquire(ctx context.Context, host string) (release func(),
 
 Workers acquire before POSTing. On acquisition timeout the Delivery is requeued with a short `next_attempt_at` bump — the worker frees up to serve another Customer. This keeps fairness intact even when one partner is saturated.
 
-## Webhook circuit breaker
-
-Each Webhook has a persisted circuit breaker (ADR-0008):
-
-- `closed`: Deliveries are claimable normally. Attempt success resets the failure counter. Retryable or terminal Attempt failures increment it.
-- `open`: Deliveries for that Webhook are excluded from both claim and DB-backed claimable-Customer discovery. The queued work remains in the outbox; it just does not consume worker capacity.
-- `half_open`: after cooldown, the claim query atomically picks one Delivery as `breaker_probe_delivery_id`, transitions the Webhook to `half_open`, and claims only that Delivery as the probe. Probe success closes the breaker; probe failure reopens it and backs off the next cooldown.
-
-The breaker is deliberately per-Webhook, not per-host. A single Integration Partner hostname may serve many independent Webhooks, and one broken Webhook configuration should not suppress other Customers' healthy Webhooks on the same host. The Host Concurrency Cap remains the host-level protection mechanism.
-
-Default policy is conservative: 20 consecutive failures open the breaker, the first cooldown is 5 minutes, and repeated failed probes back off up to 15 minutes. The PoC uses consecutive failures rather than a sliding failure-rate window; that keeps the decision deterministic while still handling 100%-failing Integration Partner endpoints.
-
 ## Observability
 
 Metrics are flagged as a discussion point in the assignment brief, but the PoC ships with the endpoints and instrumentation hooks so the discussion has concrete artefacts:
@@ -241,8 +220,6 @@ Metrics are flagged as a discussion point in the assignment brief, but the PoC s
   - `webhook_dlq_total{reason}`
   - `webhook_scheduler_pick_duration_seconds`
   - `webhook_host_semaphore_wait_seconds{host}`
-  - `webhook_breaker_state{webhook_id,state}`
-  - `webhook_breaker_trips_total{reason}`
 - **`/health`** and **`/ready`** endpoints.
 - **`/debug/pprof`** mounted behind a flag.
 - **Structured logging** via `log/slog` with `customer_id`, `event_id`, `delivery_id`, `attempt_number` fields on every line.

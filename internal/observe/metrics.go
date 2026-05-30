@@ -21,8 +21,6 @@ var (
 	WebhookClaimEmptyTotal              prometheus.Counter
 	WebhookActiveCustomers              prometheus.Gauge
 	WebhookIngestFanoutPerEvent         prometheus.Histogram
-	WebhookBreakerState                 *prometheus.GaugeVec
-	WebhookBreakerTripsTotal            *prometheus.CounterVec
 )
 
 // ResetMetricsForTest reinitialises all metric variables to nil so the next
@@ -40,8 +38,6 @@ func ResetMetricsForTest() {
 	WebhookClaimEmptyTotal = nil
 	WebhookActiveCustomers = nil
 	WebhookIngestFanoutPerEvent = nil
-	WebhookBreakerState = nil
-	WebhookBreakerTripsTotal = nil
 }
 
 // RegisterPoolGauges registers six GaugeFunc metrics backed by sql.DB.Stats().
@@ -187,16 +183,6 @@ func initMetrics(reg prometheus.Registerer) {
 		Buckets: []float64{1, 2, 5, 10, 25, 50, 100},
 	})
 
-	WebhookBreakerState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "webhook_breaker_state",
-		Help: "Current persisted circuit breaker state for a webhook; value is 1 for the active state.",
-	}, []string{"webhook_id", "state"})
-
-	WebhookBreakerTripsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "webhook_breaker_trips_total",
-		Help: "Total number of webhook circuit breaker trips, by reason.",
-	}, []string{"reason"})
-
 	reg.MustRegister(
 		WebhookDeliveriesTotal,
 		WebhookDeliveryLatencySeconds,
@@ -209,8 +195,6 @@ func initMetrics(reg prometheus.Registerer) {
 		WebhookClaimEmptyTotal,
 		WebhookActiveCustomers,
 		WebhookIngestFanoutPerEvent,
-		WebhookBreakerState,
-		WebhookBreakerTripsTotal,
 	)
 }
 
@@ -312,26 +296,4 @@ func ObserveAttempts(attempts float64) {
 		return
 	}
 	WebhookAttemptsPerDelivery.Observe(attempts)
-}
-
-// SetBreakerState safely records the active breaker state for a Webhook.
-func SetBreakerState(webhookID string, state string) {
-	if WebhookBreakerState == nil {
-		return
-	}
-	for _, candidate := range []string{"closed", "open", "half_open"} {
-		value := 0.0
-		if candidate == state {
-			value = 1
-		}
-		WebhookBreakerState.WithLabelValues(webhookID, candidate).Set(value)
-	}
-}
-
-// IncBreakerTrip safely increments WebhookBreakerTripsTotal, skipping if nil.
-func IncBreakerTrip(reason string) {
-	if WebhookBreakerTripsTotal == nil {
-		return
-	}
-	WebhookBreakerTripsTotal.WithLabelValues(reason).Add(1)
 }
