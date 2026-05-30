@@ -267,6 +267,23 @@ func (w *Worker) classifyDelivery(ctx context.Context, d outbox.Delivery) delive
 		defer release()
 	}
 
+	lifetime := time.Since(d.CreatedAt)
+
+	// Pre-flight MaxAge check
+	_, terminal, reason := w.RetryPolicy.NextWithKey(d.AttemptNumber, d.PreviousDelay, nil, nil, d.ID, lifetime)
+	if terminal && reason == retry.ReasonAgeExceeded {
+		w.Logger.Warn("delivery expired pre-flight, skipping HTTP call",
+			"delivery_id", d.ID,
+			"lifetime_ms", lifetime.Milliseconds(),
+			"max_age_ms", w.RetryPolicy.MaxAge.Milliseconds(),
+		)
+		return deliveryOutcome{
+			lifetime:   lifetime,
+			errorClass: reason,
+			reason:     reason,
+		}
+	}
+
 	started := time.Now()
 	resp, err := w.Send(ctx, Delivery{
 		EventID:       d.EventID,
@@ -279,7 +296,8 @@ func (w *Worker) classifyDelivery(ctx context.Context, d outbox.Delivery) delive
 		AttemptNumber: d.AttemptNumber,
 	})
 	duration := time.Since(started)
-	lifetime := time.Since(d.CreatedAt)
+	lifetime = time.Since(d.CreatedAt)
+
 	if resp != nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		if closeErr := resp.Body.Close(); closeErr != nil && err == nil {
@@ -292,7 +310,7 @@ func (w *Worker) classifyDelivery(ctx context.Context, d outbox.Delivery) delive
 		statusCode = resp.StatusCode
 	}
 
-	delay, terminal, reason := w.RetryPolicy.NextWithKey(d.AttemptNumber, d.PreviousDelay, resp, err, d.ID)
+	delay, terminal, reason := w.RetryPolicy.NextWithKey(d.AttemptNumber, d.PreviousDelay, resp, err, d.ID, lifetime)
 
 	if reason == retry.ReasonSucceeded {
 		return deliveryOutcome{

@@ -63,7 +63,7 @@ func TestScenario2RetryPolicySurvivesPartnerCOutage(t *testing.T) {
 		elapsed, attempt, prevDelay := time.Duration(0), 1, time.Duration(0)
 		for elapsed < scenario2OutageDuration {
 			resp := response(http.StatusServiceUnavailable)
-			delay, terminal, reason := policy.NextWithKey(attempt, prevDelay, resp, nil, key)
+			delay, terminal, reason := policy.NextWithKey(attempt, prevDelay, resp, nil, key, elapsed)
 			_ = resp.Body.Close()
 			if terminal {
 				t.Fatalf("%s exhausted before recovery at attempt %d after %s: %s", key, attempt, elapsed, reason)
@@ -74,7 +74,7 @@ func TestScenario2RetryPolicySurvivesPartnerCOutage(t *testing.T) {
 		}
 
 		resp := response(http.StatusOK)
-		_, terminal, reason := policy.NextWithKey(attempt, prevDelay, resp, nil, key)
+		_, terminal, reason := policy.NextWithKey(attempt, prevDelay, resp, nil, key, elapsed)
 		_ = resp.Body.Close()
 		if !terminal || reason != retry.ReasonSucceeded {
 			t.Fatalf("%s did not succeed after recovery: terminal=%v reason=%q", key, terminal, reason)
@@ -91,7 +91,7 @@ func TestScenario2RetryPolicyTerminalsWithinBenchTimeout(t *testing.T) {
 		elapsed, prevDelay := time.Duration(0), time.Duration(0)
 		for attempt := 1; ; attempt++ {
 			resp := response(http.StatusInternalServerError)
-			delay, terminal, _ := policy.NextWithKey(attempt, prevDelay, resp, nil, key)
+			delay, terminal, _ := policy.NextWithKey(attempt, prevDelay, resp, nil, key, elapsed)
 			_ = resp.Body.Close()
 			if terminal {
 				if elapsed > 5*time.Minute {
