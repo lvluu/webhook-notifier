@@ -40,6 +40,7 @@ func (integrationStubScheduler) Pick(_ context.Context) (scheduler.CustomerID, u
 	return "", 0, false, nil
 }
 func (integrationStubScheduler) Notify(scheduler.CustomerID) {}
+func (integrationStubScheduler) Remove(scheduler.CustomerID) {}
 
 func newIntegrationWorker(opts ...worker.Option) *worker.Worker {
 	return worker.New(integrationStubScheduler{}, opts...)

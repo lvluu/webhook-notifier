@@ -34,7 +34,7 @@ const (
 	whaleCustomerID = "whale"
 	lateSmallID     = "small-late"
 	eventType       = "bench.test"
-	whaleDeliveries = 5000
+	whaleDeliveries = 50000
 	smallCount      = 100
 	smallDeliveries = 5
 	lateDeliveries  = 3

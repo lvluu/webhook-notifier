@@ -1,6 +1,7 @@
 package receiver
 
 import (
+	"hash/fnv"
 	"io"
 	"math/rand"
 	"net/http"
@@ -69,6 +70,14 @@ func WithRandSource(src rand.Source) Option {
 	})
 }
 
+// WithStableDecisions makes probability checks deterministic per request
+// identity instead of dependent on concurrent handler ordering.
+func WithStableDecisions(seed string) Option {
+	return optionFunc(func(rs *ReceiverServer) {
+		rs.stableSeed = seed
+	})
+}
+
 type downtimeState struct {
 	afterN       int
 	dur          time.Duration
@@ -105,6 +114,7 @@ type ReceiverServer struct {
 	statusCode  int
 	latencyProb float64
 	latencyDur  time.Duration
+	stableSeed  string
 	nowFunc     func() time.Time
 	srvDowntime downtimeState
 	routes      map[string]*routeConfig
@@ -240,14 +250,35 @@ func (rs *ReceiverServer) serveCode(r *http.Request) int {
 		}
 	}
 
-	if latencyProb > 0 && rs.randFloat64() < latencyProb {
+	if latencyProb > 0 && rs.probabilityHit(r, "latency", latencyProb) {
 		time.Sleep(latencyDur)
 	}
 
-	if statusProb > 0 && rs.randFloat64() < statusProb {
+	if statusProb > 0 && rs.probabilityHit(r, "status", statusProb) {
 		return statusCode
 	}
 	return http.StatusOK
+}
+
+func (rs *ReceiverServer) probabilityHit(r *http.Request, kind string, prob float64) bool {
+	if rs.stableSeed == "" {
+		return rs.randFloat64() < prob
+	}
+	return stableProbability(rs.stableSeed, r, kind) < prob
+}
+
+func stableProbability(seed string, r *http.Request, kind string) float64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(seed))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(kind))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(r.URL.Path))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(r.Header.Get("X-Delivery-Id")))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(r.Header.Get("X-Attempt-Number")))
+	return float64(h.Sum64()) / float64(^uint64(0))
 }
 
 func (rs *ReceiverServer) randFloat64() float64 {

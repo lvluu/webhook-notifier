@@ -325,10 +325,12 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 		}
 		if len(deliveries) == 0 {
 			hasWork, checkErr := store.HasPendingWork(ctx, customerID)
-			if checkErr == nil && hasWork {
-				// Customer has (future) work — keep in rotation so retries
-				// get picked up once their backoff expires.
-				w.Scheduler.Notify(customerID)
+			if checkErr == nil {
+				if hasWork {
+					w.Scheduler.Notify(customerID)
+				} else {
+					w.Scheduler.Remove(customerID)
+				}
 			}
 			continue
 		}

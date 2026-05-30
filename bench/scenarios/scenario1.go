@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +53,7 @@ func RunScenario1(ctx context.Context) error {
 		// Whale endpoint degradation: 10% of POSTs to /hooks/whale get 502,
 		// simulating a partner under heavy load or with intermittent outages.
 		receiver.WithRouteStatus("/hooks/whale", 0.10, http.StatusBadGateway),
+		receiver.WithStableDecisions("scenario-1"),
 	)
 	defer rs.Close()
 
@@ -95,38 +97,48 @@ func RunScenario1(ctx context.Context) error {
 	instrSched.Notify(whaleCustomerID)
 	slog.Info("notified scheduler for whale")
 
-	dripDone := make(chan struct{})
+	dripDone := make(chan error, 1)
 	go func() {
-		defer close(dripDone)
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for i := range smallCount {
 			select {
 			case <-workerCtx.Done():
+				dripDone <- workerCtx.Err()
 				return
 			case <-ticker.C:
 			}
 			cid := smallCustomerID(i)
 			if err := ingestSmallDeliveries(workerCtx, ingestStore, cid, smallDeliveries); err != nil {
-				slog.Error("drip failed", "customer", cid, "error", err)
+				dripDone <- fmt.Errorf("drip small customer %s: %w", cid, err)
 				return
 			}
 		}
+		dripDone <- nil
 	}()
 	slog.Info("started small drip", "count", smallCount, "interval", "1s")
 
 	picksBeforeLate := instrSched.TotalPicks()
 	activeAtNotifyCh := make(chan int, 1)
+	lateDone := make(chan error, 1)
 
 	go func() {
+		var active int
+		defer func() { activeAtNotifyCh <- active }()
+
 		select {
 		case <-workerCtx.Done():
+			lateDone <- workerCtx.Err()
 			return
 		case <-time.After(30 * time.Second):
 		}
 		if err := ingestSmallDeliveries(workerCtx, ingestStore, lateSmallID, lateDeliveries); err != nil {
-			slog.Error("late inject failed", "error", err)
+			lateDone <- fmt.Errorf("late inject: %w", err)
+			return
 		}
+		// Begin tracking BEFORE Notify so the cycle-start baseline captures
+		// all picks before the late customer enters rotation.
+		instrSched.BeginTracking(lateSmallID)
 		instrSched.Notify(lateSmallID)
 		slog.Info("notified scheduler for late small")
 
@@ -135,7 +147,8 @@ func RunScenario1(ctx context.Context) error {
 			slog.Error("count active customers at late notify", "error", err)
 			n = 0
 		}
-		activeAtNotifyCh <- n
+		active = n
+		lateDone <- nil
 	}()
 
 	slog.Info("waiting for all deliveries to complete")
@@ -144,14 +157,40 @@ func RunScenario1(ctx context.Context) error {
 	pollCtx, cancelPoll := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancelPoll()
 
+	dripComplete := false
+	lateComplete := false
+	expectedDeliveries := whaleDeliveries + smallCount*smallDeliveries + lateDeliveries
+
 	for {
+		if !dripComplete {
+			select {
+			case err := <-dripDone:
+				if err != nil {
+					return err
+				}
+				dripComplete = true
+			default:
+			}
+		}
+		if !lateComplete {
+			select {
+			case err := <-lateDone:
+				if err != nil {
+					return err
+				}
+				lateComplete = true
+			default:
+			}
+		}
+
 		pending, err := countPendingDeliveries(pollCtx, db)
 		if err != nil {
 			return fmt.Errorf("poll pending deliveries: %w", err)
 		}
-		if pending == 0 {
+		if dripComplete && lateComplete && pending == 0 {
 			break
 		}
+
 		elapsed := time.Since(startTime)
 		if elapsed%30 == 0 || elapsed < 5*time.Second {
 			slog.Info("waiting for completion", "pending", pending, "elapsed_seconds", int(elapsed.Seconds()))
@@ -165,19 +204,30 @@ func RunScenario1(ctx context.Context) error {
 
 	cancelWorkers()
 	workerWg.Wait()
-	<-dripDone
 
 	totalDuration := time.Since(startTime)
 	slog.Info("all deliveries completed", "duration_seconds", int(totalDuration.Seconds()))
 
+	lateCyclePicks := instrSched.CyclePicks()
 	picksAfterLate := instrSched.TotalPicks()
-	lateCyclePicks := picksAfterLate - picksBeforeLate
 	activeAtLateNotify := <-activeAtNotifyCh
+	totalDeliveries, err := queryTotalDeliveries(ctx, db)
+	if err != nil {
+		return fmt.Errorf("query total deliveries: %w", err)
+	}
+	lateFirstLatencyMs, err := queryFirstTerminalLatencyMs(ctx, db, lateSmallID)
+	if err != nil {
+		return fmt.Errorf("query late first latency: %w", err)
+	}
 
 	reportPath := "bench/results/scenario-1.md"
 	if err := writeScenario1Report(ctx, db, reportPath, scenario1ReportParams{
 		totalDuration:   totalDuration,
+		totalDeliveries: totalDeliveries,
+		expectedTotal:   expectedDeliveries,
+		lateFirstMs:     lateFirstLatencyMs,
 		lateCyclePicks:  lateCyclePicks,
+		picksUntilFirst: lateCyclePicks,
 		activeAtNotify:  activeAtLateNotify,
 		picksBeforeLate: picksBeforeLate,
 		picksAfterLate:  picksAfterLate,
@@ -201,7 +251,11 @@ func countActiveCustomers(ctx context.Context, db *sql.DB) (int, error) {
 
 type scenario1ReportParams struct {
 	totalDuration   time.Duration
-	lateCyclePicks  int64
+	totalDeliveries int
+	expectedTotal   int
+	lateFirstMs     float64
+	lateCyclePicks  int64 // picks from BeginTracking to first service of late customer
+	picksUntilFirst int64 // same value, clearer name for the report
 	activeAtNotify  int
 	picksBeforeLate int64
 	picksAfterLate  int64
@@ -218,11 +272,22 @@ func writeScenario1Report(
 		Customer string // empty = all
 	}
 	rows := []latencyRow{
-		{Label: "Whale (P50/P95/P99/Max)", Customer: whaleCustomerID},
-		{Label: "All Small (P50/P95/P99/Max)", Customer: "small-%"},
-		{Label: "Late Small (P50/P95/P99/Max)", Customer: lateSmallID},
-		{Label: "Overall (P50/P95/P99/Max)", Customer: ""},
+		{Label: "Whale", Customer: whaleCustomerID},
+		{Label: "All Small", Customer: "small-%"},
+		{Label: "Late Small", Customer: lateSmallID},
+		{Label: "Overall", Customer: ""},
 	}
+	_, _, allSmallP99, _, err := queryLatencyPercentiles(ctx, db, "small-%")
+	if err != nil {
+		return fmt.Errorf("query small lifecycle latencies: %w", err)
+	}
+	httpP50, httpP95, httpP99, httpMax, err := queryAttemptDurationPercentiles(ctx, db)
+	if err != nil {
+		return fmt.Errorf("query HTTP attempt durations: %w", err)
+	}
+	totalOK := p.totalDeliveries == p.expectedTotal
+	smallP99OK := allSmallP99 < 2000
+	cycleOK := p.picksUntilFirst <= int64(p.activeAtNotify)
 
 	f, err := os.Create(path)
 	if err != nil {
@@ -230,28 +295,46 @@ func writeScenario1Report(
 	}
 	defer func() { _ = f.Close() }()
 
-_, _ = fmt.Fprintf(f, `# Scenario 1: Fairness Under Load — Late-Arriving Small Customer
+	_, _ = fmt.Fprintf(f, `# Scenario 1: Fairness Under Load — Late-Arriving Small Customer
 
 ## Description
 
-One **Whale** (5k deliveries, burst at T=0) + **100 Small Customers** (5 deliveries each, dripped one per second starting at T=1) + **1 Late Small Customer** (3 deliveries, injected at T=30).
+One **Whale** (50k deliveries, burst at T=0) + **100 Small Customers** (5 deliveries each, dripped one per second starting at T=1) + **1 Late Small Customer** (3 deliveries, injected at T=30).
 
 **Chaos conditions**: 15%% of requests experience 300ms latency (simulating network round-trips), 5%% transient 500 errors (exercising retry), and the whale endpoint returns 502 10%% of the time (simulating a partner under load).
 
-The acceptance criterion is that the late-arriving Small Customer must be picked by a worker within at most one round-robin cycle of its Notify, and that small-customer P99 latency stays under 10s despite failures.
+The acceptance criteria are that Small Customers have lifecycle p99 under 2s, the late-arriving Small Customer is picked within at most one round-robin cycle of its Notify, and the generated workload matches the deterministic setup.
 
 ## Results
 
 | Metric | Value |
 |---|---|
 | Total duration | %s |
+| Total deliveries | %d / %d |
 | Workers | %d |
-| RR cycle picks after late Notify | %d |
+| Picks until first late service | %d |
 | Active Customers at late Notify | %d |
+| Late Small first terminal lifecycle latency | %.0f ms |
 | RR cycle bound satisfied | %s |
 
-`, p.totalDuration.Round(time.Second), workerCount, p.lateCyclePicks, p.activeAtNotify,
-		boolStr(p.lateCyclePicks <= int64(p.activeAtNotify)))
+## Acceptance Criteria
+
+| Criterion | Observed | Limit | Result |
+|---|---:|---:|---|
+| Full workload created | %d deliveries | %d deliveries | %s |
+| All Small lifecycle p99 | %.0f ms | < 2000 ms | %s |
+| Late Small picked within one RR cycle | %d picks | <= %d active Customers | %s |
+
+## Lifecycle Latency (enqueue to terminal)
+
+| Class | p50 | p95 | p99 | max |
+|---|---:|---:|---:|---:|
+
+`, p.totalDuration.Round(time.Second), p.totalDeliveries, p.expectedTotal,
+		workerCount, p.picksUntilFirst, p.activeAtNotify, p.lateFirstMs, boolStr(cycleOK),
+		p.totalDeliveries, p.expectedTotal, passFail(totalOK),
+		allSmallP99, passFail(smallP99OK),
+		p.picksUntilFirst, p.activeAtNotify, passFail(cycleOK))
 
 	for _, r := range rows {
 		p50, p95, p99, maxLat, err := queryLatencyPercentiles(ctx, db, r.Customer)
@@ -262,6 +345,14 @@ The acceptance criterion is that the late-arriving Small Customer must be picked
 		_, _ = fmt.Fprintf(f, "| **%s** | %.0f ms | %.0f ms | %.0f ms | %.0f ms |\n",
 			r.Label, p50, p95, p99, maxLat)
 	}
+	_, _ = fmt.Fprintf(f, `
+## HTTP Attempt Duration
+
+| Scope | p50 | p95 | p99 | max |
+|---|---:|---:|---:|---:|
+| **All attempts** | %.0f ms | %.0f ms | %.0f ms | %.0f ms |
+
+`, httpP50, httpP95, httpP99, httpMax)
 
 	_, _ = fmt.Fprintf(f, "\n## Delivery Outcomes\n\n")
 	outcomes, err := queryDeliveryOutcomes(ctx, db)
@@ -289,15 +380,15 @@ The acceptance criterion is that the late-arriving Small Customer must be picked
 ## Round-Robin Cycle Bound
 
 Picks before late Notify: **%d**
-Picks after late Notify: **%d**
-Delta (picks during cycle): **%d**
+Picks after late Notify: **%d** (total for remaining benchmark)
+Picks until first late service: **%d**
 Active Customers at late Notify: **%d**
 
 %s
 `,
 		p.picksBeforeLate, p.picksAfterLate,
-		p.lateCyclePicks, p.activeAtNotify,
-		cycleVerdict(p.lateCyclePicks, int64(p.activeAtNotify)))
+		p.picksUntilFirst, p.activeAtNotify,
+		cycleVerdict(p.picksUntilFirst, int64(p.activeAtNotify)))
 
 	return f.Close()
 }
@@ -307,8 +398,9 @@ func queryLatencyPercentiles(ctx context.Context, db *sql.DB, customerFilter str
 	var args []any
 	if customerFilter == "" {
 		whereClause = "status = 'succeeded'"
-	} else if customerFilter == "small-%" {
-		whereClause = "status = 'succeeded' AND customer_id LIKE 'small-%'"
+	} else if strings.Contains(customerFilter, "%") {
+		whereClause = "status = 'succeeded' AND customer_id LIKE $1"
+		args = append(args, customerFilter)
 	} else {
 		whereClause = "status = 'succeeded' AND customer_id = $1"
 		args = append(args, customerFilter)
@@ -333,11 +425,55 @@ func queryLatencyPercentiles(ctx context.Context, db *sql.DB, customerFilter str
 	return p50f, p95f, p99f, maxf, nil
 }
 
+func queryAttemptDurationPercentiles(ctx context.Context, db *sql.DB) (p50, p95, p99, maxMs float64, err error) {
+	err = db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(percentile_cont(0.50) WITHIN GROUP (ORDER BY duration_ms), 0),
+			COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms), 0),
+			COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY duration_ms), 0),
+			COALESCE(MAX(duration_ms), 0)
+		FROM delivery_attempts
+	`).Scan(&p50, &p95, &p99, &maxMs)
+	if err != nil {
+		return 0, 0, 0, 0, fmt.Errorf("query attempt durations: %w", err)
+	}
+	return p50, p95, p99, maxMs, nil
+}
+
+func queryTotalDeliveries(ctx context.Context, db *sql.DB) (int, error) {
+	var n int
+	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deliveries`).Scan(&n)
+	return n, err
+}
+
+func queryFirstTerminalLatencyMs(ctx context.Context, db *sql.DB, customerID string) (float64, error) {
+	var ms float64
+	err := db.QueryRowContext(ctx, `
+		SELECT EXTRACT(EPOCH FROM (updated_at - created_at)) * 1000
+		FROM deliveries
+		WHERE customer_id = $1
+		  AND status IN ('succeeded', 'dead')
+		ORDER BY updated_at
+		LIMIT 1
+	`, customerID).Scan(&ms)
+	if err != nil {
+		return 0, fmt.Errorf("query first terminal latency: %w", err)
+	}
+	return ms, nil
+}
+
 func boolStr(v bool) string {
 	if v {
 		return "✅ Yes"
 	}
 	return "❌ No"
+}
+
+func passFail(v bool) string {
+	if v {
+		return "**PASS**"
+	}
+	return "**FAIL**"
 }
 
 func cycleVerdict(picks, active int64) string {

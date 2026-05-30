@@ -24,6 +24,7 @@ type stubScheduler struct{}
 
 func (stubScheduler) Pick(_ context.Context) (string, uint32, bool, error) { return "", 0, false, nil }
 func (stubScheduler) Notify(string)                                        {}
+func (stubScheduler) Remove(string)                                        {}
 
 type recordingScheduler struct {
 	mu       sync.Mutex
@@ -33,6 +34,8 @@ type recordingScheduler struct {
 func (r *recordingScheduler) Pick(_ context.Context) (string, uint32, bool, error) {
 	return "", 0, false, nil
 }
+
+func (r *recordingScheduler) Remove(string) {}
 
 func (r *recordingScheduler) Notify(customerID string) {
 	r.mu.Lock()

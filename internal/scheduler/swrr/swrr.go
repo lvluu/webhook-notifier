@@ -129,6 +129,29 @@ func (s *swrr) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bool, er
 	return winner.id, winner.weight, true, nil
 }
 
+// Remove removes the Customer from rotation. No-op if not present.
+func (s *swrr) Remove(customerID scheduler.CustomerID) {
+	if customerID == "" {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.activeSet[customerID]; !ok {
+		return
+	}
+
+	delete(s.activeSet, customerID)
+	newList := make([]scheduler.CustomerID, 0, len(s.activeList))
+	for _, c := range s.activeList {
+		if c != customerID {
+			newList = append(newList, c)
+		}
+	}
+	s.activeList = newList
+}
+
 // Notify registers the Customer for weighted rotation if not already present
 // and if its weight is > 0. Idempotent.
 func (s *swrr) Notify(customerID scheduler.CustomerID) {
