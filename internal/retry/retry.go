@@ -38,11 +38,14 @@ const (
 	ReasonTimeout = "timeout"
 	// ReasonTerminal4xx records a non-retryable HTTP 4xx response.
 	ReasonTerminal4xx = "terminal_4xx"
+	// ReasonAgeExceeded records a delivery that exceeded its MaxAge.
+	ReasonAgeExceeded = "age_exceeded"
 )
 
 // Config tunes RetryPolicy while preserving ADR-0003 defaults.
 type Config struct {
 	MaxAttempts int
+	MaxAge      time.Duration
 	BaseDelay   time.Duration
 	CapDelay    time.Duration
 }
@@ -50,6 +53,7 @@ type Config struct {
 // RetryPolicy classifies delivery Attempts and computes retry delay.
 type RetryPolicy struct {
 	maxAttempts int
+	MaxAge      time.Duration
 	baseDelay   time.Duration
 	capDelay    time.Duration
 }
@@ -58,6 +62,7 @@ type RetryPolicy struct {
 func New(config Config) RetryPolicy {
 	policy := RetryPolicy{
 		maxAttempts: config.MaxAttempts,
+		MaxAge:      config.MaxAge,
 		baseDelay:   config.BaseDelay,
 		capDelay:    config.CapDelay,
 	}
@@ -79,20 +84,21 @@ func New(config Config) RetryPolicy {
 
 // Next returns the next retry delay, whether the outcome is terminal, and the
 // reason that should be recorded for audit/DLQ classification.
-func (p RetryPolicy) Next(attempt int, prevDelay time.Duration, resp *http.Response, err error) (time.Duration, bool, string) {
-	return p.next(attempt, prevDelay, resp, err, "")
+func (p RetryPolicy) Next(attempt int, prevDelay time.Duration, resp *http.Response, err error, lifetime time.Duration) (time.Duration, bool, string) {
+	return p.next(attempt, prevDelay, resp, err, "", lifetime)
 }
 
 // NextWithKey classifies an Attempt like Next, using key as deterministic
 // entropy for jitter so simultaneous failures do not retry in lockstep.
-func (p RetryPolicy) NextWithKey(attempt int, prevDelay time.Duration, resp *http.Response, err error, key string) (time.Duration, bool, string) {
-	return p.next(attempt, prevDelay, resp, err, key)
+func (p RetryPolicy) NextWithKey(attempt int, prevDelay time.Duration, resp *http.Response, err error, key string, lifetime time.Duration) (time.Duration, bool, string) {
+	return p.next(attempt, prevDelay, resp, err, key, lifetime)
 }
 
-func (p RetryPolicy) next(attempt int, prevDelay time.Duration, resp *http.Response, err error, key string) (time.Duration, bool, string) {
+func (p RetryPolicy) next(attempt int, prevDelay time.Duration, resp *http.Response, err error, key string, lifetime time.Duration) (time.Duration, bool, string) {
 	if p.maxAttempts <= 0 || p.baseDelay <= 0 || p.capDelay <= 0 {
 		p = New(Config{
 			MaxAttempts: p.maxAttempts,
+			MaxAge:      p.MaxAge,
 			BaseDelay:   p.baseDelay,
 			CapDelay:    p.capDelay,
 		})
@@ -105,6 +111,9 @@ func (p RetryPolicy) next(attempt int, prevDelay time.Duration, resp *http.Respo
 	reason, retryable := p.classify(resp, err)
 	if !retryable {
 		return 0, true, reason
+	}
+	if p.MaxAge > 0 && lifetime >= p.MaxAge {
+		return 0, true, ReasonAgeExceeded
 	}
 	if attempt >= p.maxAttempts {
 		return 0, true, ReasonExhausted

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/lvluu/webhook-notifier/internal/outbox"
+	"github.com/lvluu/webhook-notifier/internal/retry"
 	"github.com/lvluu/webhook-notifier/internal/worker"
 )
 
@@ -518,6 +519,85 @@ func TestProcess_DrainsResponseBodyBeforeClassifyingEveryOutcome(t *testing.T) {
 		})
 	}
 }
+
+func TestProcess_MaxAge(t *testing.T) {
+	t.Parallel()
+
+	maxAge := 1 * time.Hour
+
+	t.Run("pre-flight expiration skips Send", func(t *testing.T) {
+		t.Parallel()
+
+		called := false
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		w := newTestWorker(worker.WithRetryPolicy(retry.New(retry.Config{MaxAge: maxAge})))
+		store := &recordingDeliveryStore{}
+
+		// Delivery created 2 hours ago (exceeds 1h MaxAge)
+		delivery := outbox.Delivery{
+			ID:            "dlv_expired",
+			URL:           srv.URL,
+			AttemptNumber: 1,
+			CreatedAt:     time.Now().Add(-2 * time.Hour),
+		}
+
+		result := w.Process(context.Background(), store, delivery)
+		if result.Err != nil {
+			t.Fatalf("Process: %v", result.Err)
+		}
+
+		if called {
+			t.Error("HTTP Send was called for expired delivery")
+		}
+		if store.dead != 1 {
+			t.Errorf("MarkDead calls: got %d, want 1", store.dead)
+		}
+	})
+
+	t.Run("post-attempt expiration after failure", func(t *testing.T) {
+		t.Parallel()
+
+		called := false
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			time.Sleep(10 * time.Millisecond)
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		tightMaxAge := 10 * time.Millisecond
+		w := newTestWorker(worker.WithRetryPolicy(retry.New(retry.Config{MaxAge: tightMaxAge})))
+		store := &recordingDeliveryStore{}
+
+		delivery := outbox.Delivery{
+			ID:            "dlv_expires_soon",
+			URL:           srv.URL,
+			AttemptNumber: 1,
+			CreatedAt:     time.Now().Add(-5 * time.Millisecond),
+		}
+
+		result := w.Process(context.Background(), store, delivery)
+		if result.Err != nil {
+			t.Fatalf("Process: %v", result.Err)
+		}
+
+		if !called {
+			t.Error("HTTP Send was not called")
+		}
+		if store.dead != 1 {
+			t.Errorf("MarkDead calls: got %d, want 1", store.dead)
+		}
+		if store.retried != 0 {
+			t.Errorf("MarkRetry calls: got %d, want 0", store.retried)
+		}
+	})
+}
+
 
 // TestDeliver_PropagatesContextCancellation guards against a worker that
 // silently ignores ctx cancellation — important once retries land (#5) and

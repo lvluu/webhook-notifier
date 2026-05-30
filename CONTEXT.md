@@ -44,8 +44,12 @@ _Avoid_: rate limit, throttle, backpressure
 Returning a claimed (in-flight) Delivery to `failed_retry` with a bumped `next_attempt_at`, without recording an Attempt row or incrementing the attempt counter. Used when a Delivery cannot proceed for a non-partner reason (e.g. host concurrency cap hit). A Requeue is not an Attempt — the partner never saw the POST.
 _Avoid_: retry (implies an Attempt was made), release (ambiguous with claim release)
 
+**Delivery Expiration**:
+The point at which a Delivery is considered too old to be useful and is moved to the DLQ, regardless of remaining retry attempts. Controlled by the configured MaxAge.
+_Avoid_: ttl, timeout, drop
+
 **DLQ (Dead-Letter Queue)**:
-The terminal resting place for a Delivery that can no longer be retried, either because its Attempts exhausted the RetryPolicy or because the outcome is non-retryable. Not a real queue — a table that ops can inspect and manually replay.
+The terminal resting place for a Delivery that can no longer be retried, either because its Attempts exhausted the RetryPolicy, it reached its Delivery Expiration, or the outcome is non-retryable. Not a real queue — a table that ops can inspect and manually replay.
 _Avoid_: failure store, error log
 
 **Webhook Circuit Breaker**:

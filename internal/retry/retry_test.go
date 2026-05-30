@@ -22,6 +22,7 @@ func TestRetryPolicyNextTruthTable(t *testing.T) {
 		name         string
 		attempt      int
 		prevDelay    time.Duration
+		lifetime     time.Duration
 		statusCode   int
 		retryAfter   string
 		err          error
@@ -136,7 +137,7 @@ func TestRetryPolicyNextTruthTable(t *testing.T) {
 				resp = response(tt.statusCode, tt.retryAfter)
 				defer resp.Body.Close()
 			}
-			delay, terminal, reason := policy.Next(tt.attempt, tt.prevDelay, resp, tt.err)
+			delay, terminal, reason := policy.Next(tt.attempt, tt.prevDelay, resp, tt.err, tt.lifetime)
 			if terminal != tt.wantTerminal {
 				t.Fatalf("terminal: got %v, want %v", terminal, tt.wantTerminal)
 			}
@@ -156,6 +157,52 @@ func TestRetryPolicyNextTruthTable(t *testing.T) {
 	}
 }
 
+func TestRetryPolicyMaxAge(t *testing.T) {
+	t.Parallel()
+
+	maxAge := 1 * time.Hour
+	policy := retry.New(retry.Config{MaxAge: maxAge})
+
+	t.Run("within age limit", func(t *testing.T) {
+		resp := response(http.StatusInternalServerError, "")
+		defer resp.Body.Close()
+
+		_, terminal, reason := policy.Next(1, time.Second, resp, nil, 30*time.Minute)
+		if terminal {
+			t.Fatalf("terminal: got true, want false")
+		}
+		if reason != retry.ReasonRetryable5xx {
+			t.Fatalf("reason: got %q, want %q", reason, retry.ReasonRetryable5xx)
+		}
+	})
+
+	t.Run("exactly age limit", func(t *testing.T) {
+		resp := response(http.StatusInternalServerError, "")
+		defer resp.Body.Close()
+
+		_, terminal, reason := policy.Next(1, time.Second, resp, nil, maxAge)
+		if !terminal {
+			t.Fatalf("terminal: got false, want true")
+		}
+		if reason != retry.ReasonAgeExceeded {
+			t.Fatalf("reason: got %q, want %q", reason, retry.ReasonAgeExceeded)
+		}
+	})
+
+	t.Run("exceeds age limit", func(t *testing.T) {
+		resp := response(http.StatusInternalServerError, "")
+		defer resp.Body.Close()
+
+		_, terminal, reason := policy.Next(1, time.Second, resp, nil, maxAge+time.Second)
+		if !terminal {
+			t.Fatalf("terminal: got false, want true")
+		}
+		if reason != retry.ReasonAgeExceeded {
+			t.Fatalf("reason: got %q, want %q", reason, retry.ReasonAgeExceeded)
+		}
+	})
+}
+
 func TestRetryPolicyNextAll5xxAreRetryable(t *testing.T) {
 	t.Parallel()
 
@@ -168,7 +215,7 @@ func TestRetryPolicyNextAll5xxAreRetryable(t *testing.T) {
 			resp := response(statusCode, "")
 			defer resp.Body.Close()
 
-			delay, terminal, reason := policy.Next(1, time.Second, resp, nil)
+			delay, terminal, reason := policy.Next(1, time.Second, resp, nil, 0)
 			if terminal {
 				t.Fatalf("terminal: got true, want false")
 			}
@@ -197,7 +244,7 @@ func TestRetryPolicyNextTerminal4xxExcept408And429(t *testing.T) {
 			resp := response(statusCode, "")
 			defer resp.Body.Close()
 
-			delay, terminal, reason := policy.Next(1, time.Second, resp, nil)
+			delay, terminal, reason := policy.Next(1, time.Second, resp, nil, 0)
 			if !terminal {
 				t.Fatalf("terminal: got false, want true")
 			}
