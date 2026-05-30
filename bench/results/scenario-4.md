@@ -10,9 +10,9 @@ This repo uses just bench-4 as the canonical task command for the issue #15 benc
 
 | Workers | Deliveries | Received Attempts | Duration | Throughput (Deliveries/sec) | Duplicate (delivery_id, attempt_number) tuples |
 |---:|---:|---:|---:|---:|---:|
-| 1 | 10000 | 10000 | 10.171s | 983.15 | 0 |
-| 4 | 10000 | 10000 | 2.714s | 3684.01 | 0 |
-| 8 | 10000 | 10000 | 1.695s | 5898.53 | 0 |
+| 1 | 10000 | 10000 | 15.291s | 653.99 | 0 |
+| 4 | 10000 | 10000 | 5.306s | 1884.67 | 0 |
+| 8 | 10000 | 10000 | 3.538s | 2826.39 | 0 |
 
 ## Retry Probe
 
@@ -33,7 +33,7 @@ This repo uses just bench-4 as the canonical task command for the issue #15 benc
 
 | Criterion | Observed | Limit | Result |
 |---|---:|---:|---|
-| Scaling: 8 workers vs 1 worker | 6.00x | >= 4.00x | **PASS** |
+| Scaling: 8 workers vs 1 worker | 4.32x | >= 4.00x | **PASS** |
 | Throughput duplicate tuples | 0 | 0 | **PASS** |
 | Retry probe duplicate tuples | 0 | 0 | **PASS** |
 | Retry probe idempotency header stability | true | true | **PASS** |
