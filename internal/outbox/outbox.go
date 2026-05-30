@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/lib/pq"
@@ -31,6 +32,47 @@ const (
 	StatusDead DeliveryStatus = "dead"
 )
 
+const (
+	// BreakerStateClosed means the Webhook is claimable normally.
+	BreakerStateClosed = "closed"
+	// BreakerStateOpen means Deliveries for the Webhook are skipped until the next probe time.
+	BreakerStateOpen = "open"
+	// BreakerStateHalfOpen means exactly one Delivery is allowed as a recovery probe.
+	BreakerStateHalfOpen = "half_open"
+)
+
+// BreakerConfig controls persisted per-Webhook circuit breaker transitions.
+type BreakerConfig struct {
+	FailureThreshold int
+	InitialCooldown  time.Duration
+	MaxCooldown      time.Duration
+}
+
+func defaultBreakerConfig() BreakerConfig {
+	return BreakerConfig{
+		FailureThreshold: 20,
+		InitialCooldown:  5 * time.Minute,
+		MaxCooldown:      15 * time.Minute,
+	}
+}
+
+func normalizeBreakerConfig(config BreakerConfig) BreakerConfig {
+	defaults := defaultBreakerConfig()
+	if config.FailureThreshold <= 0 {
+		config.FailureThreshold = defaults.FailureThreshold
+	}
+	if config.InitialCooldown <= 0 {
+		config.InitialCooldown = defaults.InitialCooldown
+	}
+	if config.MaxCooldown <= 0 {
+		config.MaxCooldown = defaults.MaxCooldown
+	}
+	if config.MaxCooldown < config.InitialCooldown {
+		config.MaxCooldown = config.InitialCooldown
+	}
+	return config
+}
+
 // Delivery is a claimed outbox row with enough data for the worker to POST it.
 type Delivery struct {
 	ID             string
@@ -54,8 +96,9 @@ type Delivery struct {
 
 // Store claims and mutates Delivery rows in Postgres.
 type Store struct {
-	db         *sql.DB
-	claimLease time.Duration
+	db            *sql.DB
+	claimLease    time.Duration
+	breakerConfig BreakerConfig
 }
 
 // Option configures a Store.
@@ -71,11 +114,19 @@ func WithClaimLease(claimLease time.Duration) Option {
 	}
 }
 
+// WithBreakerConfig configures per-Webhook circuit breaker transitions.
+func WithBreakerConfig(config BreakerConfig) Option {
+	return func(s *Store) {
+		s.breakerConfig = normalizeBreakerConfig(config)
+	}
+}
+
 // New returns an outbox store backed by db.
 func New(db *sql.DB, opts ...Option) *Store {
 	store := &Store{
-		db:         db,
-		claimLease: DefaultClaimLease,
+		db:            db,
+		claimLease:    DefaultClaimLease,
+		breakerConfig: defaultBreakerConfig(),
 	}
 	for _, opt := range opts {
 		opt(store)
@@ -111,22 +162,47 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 	claimStarted := time.Now()
 
 	rows, err := s.db.QueryContext(ctx, `
-		WITH claimed AS (
+		WITH candidate AS (
+			SELECT d.id, d.webhook_id
+			FROM deliveries d
+			JOIN webhooks w ON w.id = d.webhook_id
+			WHERE d.customer_id = $1
+			  AND (
+			      (d.status IN ('pending', 'failed_retry') AND d.next_attempt_at <= now())
+			      OR (d.status = 'in_flight' AND d.claimed_at < now() - ($2 * interval '1 millisecond'))
+			  )
+			  AND (
+			      w.breaker_state = 'closed'
+			      OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = d.id)
+			      OR (w.breaker_state = 'open' AND w.breaker_next_probe_at <= now())
+			)
+			ORDER BY d.next_attempt_at, d.created_at, d.id
+			LIMIT $3
+			FOR UPDATE OF d SKIP LOCKED
+		),
+		probe AS (
+			UPDATE webhooks w
+			SET breaker_state = 'half_open',
+			    breaker_probe_delivery_id = c.id
+			FROM candidate c
+			WHERE w.id = c.webhook_id
+			  AND w.breaker_state = 'open'
+			  AND w.breaker_next_probe_at <= now()
+			RETURNING c.id
+		),
+		claimed AS (
 			UPDATE deliveries
 			SET status = 'in_flight',
 			    attempt_count = attempt_count + 1,
 			    claimed_at = now(),
 			    updated_at = now()
 			WHERE id IN (
-				SELECT id FROM deliveries
-				WHERE customer_id = $1
-				  AND (
-				      (status IN ('pending', 'failed_retry') AND next_attempt_at <= now())
-				      OR (status = 'in_flight' AND claimed_at < now() - ($2 * interval '1 millisecond'))
-				  )
-				ORDER BY next_attempt_at, created_at, id
-				LIMIT $3
-				FOR UPDATE SKIP LOCKED
+				SELECT c.id
+				FROM candidate c
+				JOIN webhooks w ON w.id = c.webhook_id
+				WHERE w.breaker_state = 'closed'
+				   OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = c.id)
+				   OR c.id IN (SELECT id FROM probe)
 			)
 			RETURNING *
 		)
@@ -193,14 +269,20 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT customer_id
-		FROM deliveries
-		WHERE customer_id > $1
+		SELECT DISTINCT d.customer_id
+		FROM deliveries d
+		JOIN webhooks w ON w.id = d.webhook_id
+		WHERE d.customer_id > $1
 		  AND (
-		      (status IN ('pending', 'failed_retry') AND next_attempt_at <= now())
-		      OR (status = 'in_flight' AND claimed_at < now() - ($2 * interval '1 millisecond'))
+		      (d.status IN ('pending', 'failed_retry') AND d.next_attempt_at <= now())
+		      OR (d.status = 'in_flight' AND d.claimed_at < now() - ($2 * interval '1 millisecond'))
 		  )
-		ORDER BY customer_id
+		  AND (
+		      w.breaker_state = 'closed'
+		      OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = d.id)
+		      OR (w.breaker_state = 'open' AND w.breaker_next_probe_at <= now())
+		  )
+		ORDER BY d.customer_id
 		LIMIT $3
 	`, afterCustomerID, s.claimLease.Milliseconds(), limit)
 	if err != nil {
@@ -230,52 +312,41 @@ func (s *Store) MarkSucceeded(ctx context.Context, deliveryID string, statusCode
 		return fmt.Errorf("delivery_id is required")
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	var webhookID string
+	var breakerClosed bool
+	err := s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int, wid string) error {
+		webhookID = wid
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO delivery_attempts (delivery_id, attempt_number, status_code, duration_ms, sent_at)
+			VALUES ($1, $2, $3, $4, now())
+		`, deliveryID, attemptNumber, statusCode, duration.Milliseconds())
+		if err != nil {
+			return fmt.Errorf("insert delivery attempt: %w", err)
+		}
+
+		_, err = tx.ExecContext(ctx, `
+			UPDATE deliveries
+			SET status = 'succeeded',
+			    updated_at = now(),
+			    last_error = NULL
+			WHERE id = $1
+		`, deliveryID)
+		if err != nil {
+			return fmt.Errorf("mark delivery succeeded: %w", err)
+		}
+
+		closed, err := s.recordBreakerSuccess(ctx, tx, wid, deliveryID)
+		if closed {
+			breakerClosed = true
+		}
+		return err
+	})
 	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
+		return err
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	var attemptNumber int
-	err = tx.QueryRowContext(ctx, `
-		SELECT attempt_count
-		FROM deliveries
-		WHERE id = $1
-		  AND status = 'in_flight'
-		FOR UPDATE
-	`, deliveryID).Scan(&attemptNumber)
-	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("delivery %s is not in flight", deliveryID)
+	if breakerClosed {
+		observe.SetBreakerState(webhookID, BreakerStateClosed)
 	}
-	if err != nil {
-		return fmt.Errorf("load in-flight delivery: %w", err)
-	}
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO delivery_attempts (delivery_id, attempt_number, status_code, duration_ms, sent_at)
-		VALUES ($1, $2, $3, $4, now())
-	`, deliveryID, attemptNumber, statusCode, duration.Milliseconds())
-	if err != nil {
-		return fmt.Errorf("insert delivery attempt: %w", err)
-	}
-
-	_, err = tx.ExecContext(ctx, `
-		UPDATE deliveries
-		SET status = 'succeeded',
-		    updated_at = now(),
-		    last_error = NULL
-		WHERE id = $1
-	`, deliveryID)
-	if err != nil {
-		return fmt.Errorf("mark delivery succeeded: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit success: %w", err)
-	}
-
 	return nil
 }
 
@@ -288,7 +359,12 @@ func (s *Store) MarkRetry(ctx context.Context, deliveryID string, statusCode int
 		return fmt.Errorf("delay must be non-negative")
 	}
 
-	return s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int) error {
+	var webhookID string
+	var breakerTripped bool
+	var tripReason string
+	err := s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int, wid string) error {
+		webhookID = wid
+		tripReason = errorClass
 		if err := insertAttempt(ctx, tx, deliveryID, attemptNumber, statusCode, errorClass, duration); err != nil {
 			return err
 		}
@@ -306,8 +382,21 @@ func (s *Store) MarkRetry(ctx context.Context, deliveryID string, statusCode int
 			return fmt.Errorf("mark delivery failed retry: %w", err)
 		}
 
-		return nil
+		tripped, err := s.recordBreakerFailure(ctx, tx, wid, errorClass)
+		if tripped {
+			breakerTripped = true
+		}
+		return err
 	})
+	if err != nil {
+		return err
+	}
+	if breakerTripped {
+		slog.Default().Warn("webhook circuit breaker opened", "webhook_id", webhookID, "reason", tripReason)
+		observe.SetBreakerState(webhookID, BreakerStateOpen)
+		observe.IncBreakerTrip(tripReason)
+	}
+	return nil
 }
 
 // MarkDead records the final failed Attempt, moves the Delivery to dead, and
@@ -320,7 +409,12 @@ func (s *Store) MarkDead(ctx context.Context, deliveryID string, statusCode int,
 		return fmt.Errorf("reason is required")
 	}
 
-	return s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int) error {
+	var webhookID string
+	var breakerTripped bool
+	var tripReason string
+	err := s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int, wid string) error {
+		webhookID = wid
+		tripReason = reason
 		if err := insertAttempt(ctx, tx, deliveryID, attemptNumber, statusCode, errorClass, duration); err != nil {
 			return err
 		}
@@ -350,8 +444,21 @@ func (s *Store) MarkDead(ctx context.Context, deliveryID string, statusCode int,
 			return fmt.Errorf("insert dead letter: %w", err)
 		}
 
-		return nil
+		tripped, err := s.recordBreakerFailure(ctx, tx, wid, reason)
+		if tripped {
+			breakerTripped = true
+		}
+		return err
 	})
+	if err != nil {
+		return err
+	}
+	if breakerTripped {
+		slog.Default().Warn("webhook circuit breaker opened", "webhook_id", webhookID, "reason", tripReason)
+		observe.SetBreakerState(webhookID, BreakerStateOpen)
+		observe.IncBreakerTrip(tripReason)
+	}
+	return nil
 }
 
 // BatchMarkItem is one delivery outcome to be applied in a batched mark operation.
@@ -387,8 +494,14 @@ func (s *Store) MarkSucceededBatch(ctx context.Context, items []BatchMarkItem) e
 		durationsMs[i] = item.Duration.Milliseconds()
 	}
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin batch success transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var marked int
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		WITH batch AS (
 			SELECT * FROM unnest(
 				$1::text[], $2::int[], $3::bigint[]
@@ -417,6 +530,22 @@ func (s *Store) MarkSucceededBatch(ctx context.Context, items []BatchMarkItem) e
 	if marked != len(items) {
 		return fmt.Errorf("batch mark succeeded: marked %d of %d deliveries", marked, len(items))
 	}
+	var closedBreakers []string
+	for _, item := range items {
+		closed, webhookID, err := s.recordBreakerSuccessForDeliveryTx(ctx, tx, item.DeliveryID)
+		if err != nil {
+			return err
+		}
+		if closed {
+			closedBreakers = append(closedBreakers, webhookID)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit batch success transaction: %w", err)
+	}
+	for _, wid := range closedBreakers {
+		observe.SetBreakerState(wid, BreakerStateClosed)
+	}
 	return nil
 }
 
@@ -442,8 +571,14 @@ func (s *Store) MarkRetryBatch(ctx context.Context, items []BatchMarkItem) error
 		delaysMs[i] = item.Delay.Milliseconds()
 	}
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin batch retry transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var marked int
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		WITH batch AS (
 			SELECT * FROM unnest(
 				$1::text[], $2::int[], $3::bigint[], $4::text[], $5::bigint[]
@@ -474,6 +609,30 @@ func (s *Store) MarkRetryBatch(ctx context.Context, items []BatchMarkItem) error
 	if marked != len(items) {
 		return fmt.Errorf("batch mark retry: marked %d of %d deliveries", marked, len(items))
 	}
+	var trippedBreakers []struct {
+		webhookID string
+		reason    string
+	}
+	for _, item := range items {
+		tripped, webhookID, err := s.recordBreakerFailureForDeliveryTx(ctx, tx, item.DeliveryID, item.ErrorClass)
+		if err != nil {
+			return err
+		}
+		if tripped {
+			trippedBreakers = append(trippedBreakers, struct {
+				webhookID string
+				reason    string
+			}{webhookID, item.ErrorClass})
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit batch retry transaction: %w", err)
+	}
+	for _, ev := range trippedBreakers {
+		slog.Default().Warn("webhook circuit breaker opened", "webhook_id", ev.webhookID, "reason", ev.reason)
+		observe.SetBreakerState(ev.webhookID, BreakerStateOpen)
+		observe.IncBreakerTrip(ev.reason)
+	}
 	return nil
 }
 
@@ -503,8 +662,14 @@ func (s *Store) MarkDeadBatch(ctx context.Context, items []BatchMarkItem) error 
 		reasons[i] = item.Reason
 	}
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin batch dead transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var attemptsMarked, deadLettersMarked int
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		WITH batch AS (
 			SELECT * FROM unnest(
 				$1::text[], $2::int[], $3::bigint[], $4::text[], $5::text[]
@@ -541,6 +706,30 @@ func (s *Store) MarkDeadBatch(ctx context.Context, items []BatchMarkItem) error 
 	if attemptsMarked != len(items) || deadLettersMarked != len(items) {
 		return fmt.Errorf("batch mark dead: marked %d attempts and %d dead letters of %d deliveries", attemptsMarked, deadLettersMarked, len(items))
 	}
+	var trippedBreakers []struct {
+		webhookID string
+		reason    string
+	}
+	for _, item := range items {
+		tripped, webhookID, err := s.recordBreakerFailureForDeliveryTx(ctx, tx, item.DeliveryID, item.Reason)
+		if err != nil {
+			return err
+		}
+		if tripped {
+			trippedBreakers = append(trippedBreakers, struct {
+				webhookID string
+				reason    string
+			}{webhookID, item.Reason})
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit batch dead transaction: %w", err)
+	}
+	for _, ev := range trippedBreakers {
+		slog.Default().Warn("webhook circuit breaker opened", "webhook_id", ev.webhookID, "reason", ev.reason)
+		observe.SetBreakerState(ev.webhookID, BreakerStateOpen)
+		observe.IncBreakerTrip(ev.reason)
+	}
 	return nil
 }
 
@@ -552,9 +741,15 @@ func (s *Store) HasPendingWork(ctx context.Context, customerID string) (bool, er
 	var exists bool
 	err := s.db.QueryRowContext(ctx, `
 		SELECT EXISTS (
-			SELECT 1 FROM deliveries
-			WHERE customer_id = $1
-			  AND status NOT IN ('succeeded', 'dead')
+			SELECT 1 FROM deliveries d
+			JOIN webhooks w ON w.id = d.webhook_id
+			WHERE d.customer_id = $1
+			  AND d.status NOT IN ('succeeded', 'dead')
+			  AND (
+			      w.breaker_state = 'closed'
+			      OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = d.id)
+			      OR (w.breaker_state = 'open' AND w.breaker_next_probe_at <= now())
+			  )
 		)
 	`, customerID).Scan(&exists)
 	return exists, err
@@ -572,7 +767,7 @@ func (s *Store) Requeue(ctx context.Context, deliveryID string, delay time.Durat
 		return fmt.Errorf("delay must be non-negative")
 	}
 
-	return s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, _ int) error {
+	return s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, _ int, _ string) error {
 		_, err := tx.ExecContext(ctx, `
 			UPDATE deliveries
 			SET status = 'failed_retry',
@@ -589,7 +784,7 @@ func (s *Store) Requeue(ctx context.Context, deliveryID string, delay time.Durat
 	})
 }
 
-func (s *Store) withInFlightDelivery(ctx context.Context, deliveryID string, mutate func(*sql.Tx, int) error) error {
+func (s *Store) withInFlightDelivery(ctx context.Context, deliveryID string, mutate func(*sql.Tx, int, string) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
@@ -599,13 +794,14 @@ func (s *Store) withInFlightDelivery(ctx context.Context, deliveryID string, mut
 	}()
 
 	var attemptNumber int
+	var webhookID string
 	err = tx.QueryRowContext(ctx, `
-		SELECT attempt_count
+		SELECT attempt_count, webhook_id::text
 		FROM deliveries
 		WHERE id = $1
 		  AND status = 'in_flight'
 		FOR UPDATE
-	`, deliveryID).Scan(&attemptNumber)
+	`, deliveryID).Scan(&attemptNumber, &webhookID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("delivery %s is not in flight", deliveryID)
 	}
@@ -613,7 +809,7 @@ func (s *Store) withInFlightDelivery(ctx context.Context, deliveryID string, mut
 		return fmt.Errorf("load in-flight delivery: %w", err)
 	}
 
-	if err := mutate(tx, attemptNumber); err != nil {
+	if err := mutate(tx, attemptNumber, webhookID); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -638,6 +834,181 @@ func insertAttempt(ctx context.Context, tx *sql.Tx, deliveryID string, attemptNu
 	}
 
 	return nil
+}
+
+// recordBreakerSuccess updates the breaker to closed. Returns true if the
+// breaker state actually changed (the UPDATE matched a row).
+func (s *Store) recordBreakerSuccess(ctx context.Context, tx *sql.Tx, webhookID string, deliveryID string) (bool, error) {
+	var previousState string
+	err := tx.QueryRowContext(ctx, `
+		WITH previous AS (
+			SELECT id, breaker_state, breaker_probe_delivery_id::text AS probe_delivery_id
+			FROM webhooks
+			WHERE id = $1::uuid
+		),
+		updated AS (
+			UPDATE webhooks w
+			SET breaker_state = 'closed',
+			    breaker_failure_count = 0,
+			    breaker_opened_at = NULL,
+			    breaker_next_probe_at = NULL,
+			    breaker_cooldown_ms = $2,
+			    breaker_probe_delivery_id = NULL
+			FROM previous
+			WHERE w.id = previous.id
+			  AND NOT (
+			      previous.breaker_state = 'half_open'
+			      AND previous.probe_delivery_id IS DISTINCT FROM $3
+			  )
+			  AND (
+			      previous.breaker_state <> 'closed'
+			      OR w.breaker_failure_count <> 0
+			      OR w.breaker_opened_at IS NOT NULL
+			      OR w.breaker_next_probe_at IS NOT NULL
+			      OR w.breaker_probe_delivery_id IS NOT NULL
+			  )
+			RETURNING previous.breaker_state
+		)
+		SELECT breaker_state FROM updated
+	`, webhookID, s.breakerConfig.InitialCooldown.Milliseconds(), deliveryID).Scan(&previousState)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("record breaker success: %w", err)
+	}
+	if previousState != BreakerStateClosed {
+		slog.Default().Info("webhook circuit breaker closed", "webhook_id", webhookID)
+	}
+	return true, nil
+}
+
+// recordBreakerFailure assesses the failure against the breaker state and
+// opens the breaker if the consecutive-failure threshold is met. Returns true
+// if the breaker was opened as a result of this call.
+func (s *Store) recordBreakerFailure(ctx context.Context, tx *sql.Tx, webhookID string, reason string) (bool, error) {
+	var state string
+	var failureCount int
+	var cooldownMillis int64
+	err := tx.QueryRowContext(ctx, `
+		SELECT breaker_state, breaker_failure_count, breaker_cooldown_ms
+		FROM webhooks
+		WHERE id = $1::uuid
+	`, webhookID).Scan(&state, &failureCount, &cooldownMillis)
+	if err != nil {
+		return false, fmt.Errorf("load webhook breaker: %w", err)
+	}
+
+	switch state {
+	case BreakerStateHalfOpen:
+		cooldown := nextBreakerCooldown(time.Duration(cooldownMillis)*time.Millisecond, s.breakerConfig)
+		return s.openBreaker(ctx, tx, webhookID, failureCount+1, cooldown, reason)
+	case BreakerStateClosed:
+		failureCount, err = consecutiveWebhookFailures(ctx, tx, webhookID)
+		if err != nil {
+			return false, err
+		}
+		if failureCount >= s.breakerConfig.FailureThreshold {
+			return s.openBreaker(ctx, tx, webhookID, failureCount, s.breakerConfig.InitialCooldown, reason)
+		}
+	}
+	return false, nil
+}
+
+// recordBreakerSuccessForDeliveryTx returns (stateChanged, webhookID, err).
+func (s *Store) recordBreakerSuccessForDeliveryTx(ctx context.Context, tx *sql.Tx, deliveryID string) (bool, string, error) {
+	webhookID, err := deliveryWebhookID(ctx, tx, deliveryID)
+	if err != nil {
+		return false, "", err
+	}
+	closed, err := s.recordBreakerSuccess(ctx, tx, webhookID, deliveryID)
+	return closed, webhookID, err
+}
+
+// recordBreakerFailureForDeliveryTx returns (stateChanged, webhookID, err).
+func (s *Store) recordBreakerFailureForDeliveryTx(ctx context.Context, tx *sql.Tx, deliveryID string, reason string) (bool, string, error) {
+	webhookID, err := deliveryWebhookID(ctx, tx, deliveryID)
+	if err != nil {
+		return false, "", err
+	}
+	tripped, err := s.recordBreakerFailure(ctx, tx, webhookID, reason)
+	return tripped, webhookID, err
+}
+
+func deliveryWebhookID(ctx context.Context, tx *sql.Tx, deliveryID string) (string, error) {
+	var webhookID string
+	err := tx.QueryRowContext(ctx, `
+		SELECT webhook_id::text
+		FROM deliveries
+		WHERE id = $1
+	`, deliveryID).Scan(&webhookID)
+	if err != nil {
+		return "", fmt.Errorf("load delivery webhook: %w", err)
+	}
+	return webhookID, nil
+}
+
+func consecutiveWebhookFailures(ctx context.Context, tx *sql.Tx, webhookID string) (int, error) {
+	var failures int
+	err := tx.QueryRowContext(ctx, `
+		WITH latest_success AS (
+			SELECT max(da.sent_at) AS sent_at
+			FROM delivery_attempts da
+			JOIN deliveries d ON d.id = da.delivery_id
+			WHERE d.webhook_id = $1::uuid
+			  AND da.status_code >= 200
+			  AND da.status_code < 300
+		)
+		SELECT count(*)
+		FROM delivery_attempts da
+		JOIN deliveries d ON d.id = da.delivery_id
+		CROSS JOIN latest_success ls
+		WHERE d.webhook_id = $1::uuid
+		  AND da.sent_at > COALESCE(ls.sent_at, '-infinity'::timestamptz)
+		  AND (
+		      da.error_class IS NOT NULL
+		      OR da.status_code IS NULL
+		      OR da.status_code < 200
+		      OR da.status_code >= 300
+		  )
+	`, webhookID).Scan(&failures)
+	if err != nil {
+		return 0, fmt.Errorf("count consecutive webhook failures: %w", err)
+	}
+	return failures, nil
+}
+
+// openBreaker transitions a webhook breaker from non-open to open. Returns
+// true if the state actually changed (the row was updated). Callers are
+// responsible for emitting log/metrics after the enclosing transaction commits.
+func (s *Store) openBreaker(ctx context.Context, tx *sql.Tx, webhookID string, failureCount int, cooldown time.Duration, reason string) (bool, error) {
+	result, err := tx.ExecContext(ctx, `
+		UPDATE webhooks
+		SET breaker_state = 'open',
+		    breaker_failure_count = $2,
+		    breaker_opened_at = now(),
+		    breaker_next_probe_at = now() + ($3 * interval '1 millisecond'),
+		    breaker_cooldown_ms = $3,
+		    breaker_probe_delivery_id = NULL
+		WHERE id = $1::uuid
+		  AND breaker_state <> 'open'
+	`, webhookID, failureCount, cooldown.Milliseconds())
+	if err != nil {
+		return false, fmt.Errorf("open breaker: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	return rows > 0, nil
+}
+
+func nextBreakerCooldown(current time.Duration, config BreakerConfig) time.Duration {
+	if current <= 0 {
+		return config.InitialCooldown
+	}
+	next := current * 2
+	if next > config.MaxCooldown {
+		return config.MaxCooldown
+	}
+	return next
 }
 
 func nullIfEmpty(value string) sql.NullString {
