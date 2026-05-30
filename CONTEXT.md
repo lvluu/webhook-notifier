@@ -48,6 +48,10 @@ _Avoid_: retry (implies an Attempt was made), release (ambiguous with claim rele
 The terminal resting place for a Delivery that can no longer be retried, either because its Attempts exhausted the RetryPolicy or because the outcome is non-retryable. Not a real queue — a table that ops can inspect and manually replay.
 _Avoid_: failure store, error log
 
+**Webhook Circuit Breaker**:
+The health state of one Webhook destination. When a Webhook is repeatedly failing, its circuit breaker can pause further Deliveries for that Webhook until a later probe shows the Integration Partner endpoint is healthy again.
+_Avoid_: host breaker, customer breaker, rate limit
+
 ## Example dialogue
 
 > Dev: "What if a Customer with 500k Subscribers and three matching Webhooks does a bulk import?"
