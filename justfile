@@ -73,7 +73,7 @@ bench-2:
 
 # terminal classification fast-fail (issue #14)
 bench-3:
-    @echo "bench-3 stub — implemented in issue #14"
+    go run ./cmd/bench scenario3
 
 # horizontal scale + atomicity + idempotency (issue #15)
 bench-4:

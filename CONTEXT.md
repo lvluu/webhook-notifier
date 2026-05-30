@@ -45,7 +45,7 @@ Returning a claimed (in-flight) Delivery to `failed_retry` with a bumped `next_a
 _Avoid_: retry (implies an Attempt was made), release (ambiguous with claim release)
 
 **DLQ (Dead-Letter Queue)**:
-The terminal resting place for a Delivery whose Attempts exhausted the RetryPolicy. Not a real queue — a table that ops can inspect and manually replay.
+The terminal resting place for a Delivery that can no longer be retried, either because its Attempts exhausted the RetryPolicy or because the outcome is non-retryable. Not a real queue — a table that ops can inspect and manually replay.
 _Avoid_: failure store, error log
 
 ## Example dialogue
