@@ -13,7 +13,6 @@ import (
 
 	"github.com/lvluu/webhook-notifier/bench/receiver"
 	"github.com/lvluu/webhook-notifier/internal/ingest"
-	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/registry"
 	"github.com/lvluu/webhook-notifier/internal/scheduler/roundrobin"
 	"github.com/lvluu/webhook-notifier/internal/worker"
@@ -53,7 +52,7 @@ func RunScenario1(ctx context.Context) error {
 	plainSched := roundrobin.New()
 	instrSched := newInstrumentedScheduler(plainSched)
 	ingestStore := ingest.New(db, reg, instrSched)
-	outboxStore := outbox.New(db)
+	outboxStore := baselineOutboxStore(db)
 
 	if err := seedCustomers(ctx, db); err != nil {
 		return fmt.Errorf("seed customers: %w", err)

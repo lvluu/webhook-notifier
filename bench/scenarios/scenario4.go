@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/lvluu/webhook-notifier/bench/receiver"
-	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/retry"
 	"github.com/lvluu/webhook-notifier/internal/scheduler/roundrobin"
 	"github.com/lvluu/webhook-notifier/internal/worker"
@@ -168,7 +167,7 @@ func prepareScenario4Workload(ctx context.Context, db *sql.DB, receiverBaseURL s
 
 func drainScenario4(ctx context.Context, db *sql.DB, numWorkers int, policy retry.RetryPolicy) (time.Duration, error) {
 	plainSched := roundrobin.New()
-	outboxStore := outbox.New(db)
+	outboxStore := baselineOutboxStore(db)
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()

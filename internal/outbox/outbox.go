@@ -175,10 +175,10 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 			      w.breaker_state = 'closed'
 			      OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = d.id)
 			      OR (w.breaker_state = 'open' AND w.breaker_next_probe_at <= now())
-			  )
+			)
 			ORDER BY d.next_attempt_at, d.created_at, d.id
 			LIMIT $3
-			FOR UPDATE OF d, w SKIP LOCKED
+			FOR UPDATE OF d SKIP LOCKED
 		),
 		probe AS (
 			UPDATE webhooks w
@@ -750,10 +750,9 @@ func (s *Store) recordBreakerSuccess(ctx context.Context, tx *sql.Tx, webhookID 
 	var previousState string
 	err := tx.QueryRowContext(ctx, `
 		WITH previous AS (
-			SELECT breaker_state, breaker_probe_delivery_id::text AS probe_delivery_id
+			SELECT id, breaker_state, breaker_probe_delivery_id::text AS probe_delivery_id
 			FROM webhooks
 			WHERE id = $1::uuid
-			FOR UPDATE
 		),
 		updated AS (
 			UPDATE webhooks w
@@ -764,11 +763,18 @@ func (s *Store) recordBreakerSuccess(ctx context.Context, tx *sql.Tx, webhookID 
 			    breaker_cooldown_ms = $2,
 			    breaker_probe_delivery_id = NULL
 			FROM previous
-			WHERE w.id = $1::uuid
+			WHERE w.id = previous.id
 			  AND NOT (
 			      previous.breaker_state = 'half_open'
 			      AND previous.probe_delivery_id IS DISTINCT FROM $3
-			)
+			  )
+			  AND (
+			      previous.breaker_state <> 'closed'
+			      OR w.breaker_failure_count <> 0
+			      OR w.breaker_opened_at IS NOT NULL
+			      OR w.breaker_next_probe_at IS NOT NULL
+			      OR w.breaker_probe_delivery_id IS NOT NULL
+			  )
 			RETURNING previous.breaker_state
 		)
 		SELECT breaker_state FROM updated
@@ -794,7 +800,6 @@ func (s *Store) recordBreakerFailure(ctx context.Context, tx *sql.Tx, webhookID 
 		SELECT breaker_state, breaker_failure_count, breaker_cooldown_ms
 		FROM webhooks
 		WHERE id = $1::uuid
-		FOR UPDATE
 	`, webhookID).Scan(&state, &failureCount, &cooldownMillis)
 	if err != nil {
 		return fmt.Errorf("load webhook breaker: %w", err)
@@ -807,29 +812,14 @@ func (s *Store) recordBreakerFailure(ctx context.Context, tx *sql.Tx, webhookID 
 			return err
 		}
 	case BreakerStateClosed:
-		failureCount++
+		failureCount, err = consecutiveWebhookFailures(ctx, tx, webhookID)
+		if err != nil {
+			return err
+		}
 		if failureCount >= s.breakerConfig.FailureThreshold {
 			if err := s.openBreaker(ctx, tx, webhookID, failureCount, s.breakerConfig.InitialCooldown, reason); err != nil {
 				return err
 			}
-			break
-		}
-		_, err := tx.ExecContext(ctx, `
-			UPDATE webhooks
-			SET breaker_failure_count = $2
-			WHERE id = $1::uuid
-		`, webhookID, failureCount)
-		if err != nil {
-			return fmt.Errorf("increment breaker failure count: %w", err)
-		}
-	case BreakerStateOpen:
-		_, err := tx.ExecContext(ctx, `
-			UPDATE webhooks
-			SET breaker_failure_count = breaker_failure_count + 1
-			WHERE id = $1::uuid
-		`, webhookID)
-		if err != nil {
-			return fmt.Errorf("increment open breaker failure count: %w", err)
 		}
 	}
 	return nil
@@ -864,8 +854,38 @@ func deliveryWebhookID(ctx context.Context, tx *sql.Tx, deliveryID string) (stri
 	return webhookID, nil
 }
 
+func consecutiveWebhookFailures(ctx context.Context, tx *sql.Tx, webhookID string) (int, error) {
+	var failures int
+	err := tx.QueryRowContext(ctx, `
+		WITH latest_success AS (
+			SELECT max(da.sent_at) AS sent_at
+			FROM delivery_attempts da
+			JOIN deliveries d ON d.id = da.delivery_id
+			WHERE d.webhook_id = $1::uuid
+			  AND da.status_code >= 200
+			  AND da.status_code < 300
+		)
+		SELECT count(*)
+		FROM delivery_attempts da
+		JOIN deliveries d ON d.id = da.delivery_id
+		CROSS JOIN latest_success ls
+		WHERE d.webhook_id = $1::uuid
+		  AND da.sent_at > COALESCE(ls.sent_at, '-infinity'::timestamptz)
+		  AND (
+		      da.error_class IS NOT NULL
+		      OR da.status_code IS NULL
+		      OR da.status_code < 200
+		      OR da.status_code >= 300
+		  )
+	`, webhookID).Scan(&failures)
+	if err != nil {
+		return 0, fmt.Errorf("count consecutive webhook failures: %w", err)
+	}
+	return failures, nil
+}
+
 func (s *Store) openBreaker(ctx context.Context, tx *sql.Tx, webhookID string, failureCount int, cooldown time.Duration, reason string) error {
-	_, err := tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		UPDATE webhooks
 		SET breaker_state = 'open',
 		    breaker_failure_count = $2,
@@ -874,13 +894,16 @@ func (s *Store) openBreaker(ctx context.Context, tx *sql.Tx, webhookID string, f
 		    breaker_cooldown_ms = $3,
 		    breaker_probe_delivery_id = NULL
 		WHERE id = $1::uuid
+		  AND breaker_state <> 'open'
 	`, webhookID, failureCount, cooldown.Milliseconds())
 	if err != nil {
 		return fmt.Errorf("open breaker: %w", err)
 	}
-	slog.Default().Warn("webhook circuit breaker opened", "webhook_id", webhookID, "reason", reason, "cooldown_ms", cooldown.Milliseconds())
-	observe.SetBreakerState(webhookID, BreakerStateOpen)
-	observe.IncBreakerTrip(reason)
+	if rows, _ := result.RowsAffected(); rows > 0 {
+		slog.Default().Warn("webhook circuit breaker opened", "webhook_id", webhookID, "reason", reason, "cooldown_ms", cooldown.Milliseconds())
+		observe.SetBreakerState(webhookID, BreakerStateOpen)
+		observe.IncBreakerTrip(reason)
+	}
 	return nil
 }
 

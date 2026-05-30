@@ -15,23 +15,23 @@ The acceptance criteria are that Small Customers have lifecycle p99 under 2s, th
 | Verdict | Small Customers stayed responsive while the Whale backlog drained |
 | Total duration | 1m41s |
 | Total deliveries | 50503 / 50503 |
-| End-to-end throughput (includes 100s drip) | 502 deliveries/s |
+| End-to-end throughput (includes 100s drip) | 500 deliveries/s |
 | Workers | 32 |
-| All Small lifecycle p99 | 417 ms |
-| Late Small first terminal lifecycle latency | 78 ms |
-| Whale backlog-drain p99 | 21958 ms |
-| Whale backlog-drain max | 22153 ms |
-| Implied whale drain throughput | 2257 deliveries/s |
-| Projected 1000-whale drain on one node | 6h9m13s |
-| HTTP attempt p99 | 304 ms |
+| All Small lifecycle p99 | 461 ms |
+| Late Small first terminal lifecycle latency | 81 ms |
+| Whale backlog-drain p99 | 50273 ms |
+| Whale backlog-drain max | 50468 ms |
+| Implied whale drain throughput | 991 deliveries/s |
+| Projected 1000-whale drain on one node | 14h1m8s |
+| HTTP attempt p99 | 303 ms |
 
 ## Acceptance Criteria
 
 | Criterion | Observed | Limit | Result |
 |---|---:|---:|---|
 | Full workload created | 50503 deliveries | 50503 deliveries | **PASS** |
-| All Small lifecycle p99 | 417 ms | < 2000 ms | **PASS** |
-| Late Small picked within one RR cycle | 2 picks | <= 2 active Customers | **PASS** |
+| All Small lifecycle p99 | 461 ms | < 2000 ms | **PASS** |
+| Late Small picked within one RR cycle | 3 picks | <= 3 active Customers | **PASS** |
 
 ## Backlog Drain Latency
 
@@ -40,15 +40,15 @@ The 1000-whale projection is a single-node capacity estimate from this run, not 
 
 | Class | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|
-| **Whale** | 13672 ms | 21298 ms | 21958 ms | 22153 ms |
-| **All Small** | 27 ms | 392 ms | 417 ms | 439 ms |
-| **Late Small** | 75 ms | 78 ms | 78 ms | 78 ms |
+| **Whale** | 34024 ms | 49107 ms | 50273 ms | 50468 ms |
+| **All Small** | 95 ms | 419 ms | 461 ms | 635 ms |
+| **Late Small** | 60 ms | 79 ms | 80 ms | 81 ms |
 
 ## HTTP Attempt Duration
 
 | Scope | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|
-| **All attempts** | 0 ms | 301 ms | 304 ms | 388 ms |
+| **All attempts** | 0 ms | 301 ms | 303 ms | 334 ms |
 
 
 ## Delivery Outcomes
@@ -65,4 +65,4 @@ The 1000-whale projection is a single-node capacity estimate from this run, not 
 
 ## Round-Robin Reactivity
 
-**PASS**: 2 Picks ≤ 2 active Customers — the late-arriving Small was served within one round-robin cycle.
+**PASS**: 3 Picks ≤ 3 active Customers — the late-arriving Small was served within one round-robin cycle.
