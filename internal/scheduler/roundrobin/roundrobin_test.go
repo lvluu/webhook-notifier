@@ -30,32 +30,32 @@ func TestRoundRobin_TableDriven(t *testing.T) {
 			wantOK: []bool{false},
 		},
 		{
-			name:   "single Customer exhausted after one Pick",
+			name:   "single Customer stays in rotation",
 			notify: []string{"cus_A"},
-			picks:  2,
-			want:   []string{"cus_A", ""},
-			wantOK: []bool{true, false},
+			picks:  3,
+			want:   []string{"cus_A", "cus_A", "cus_A"},
+			wantOK: []bool{true, true, true},
 		},
 		{
-			name:   "multi Customer exhausted in insertion order",
+			name:   "multi Customer cycles in insertion order",
 			notify: []string{"cus_A", "cus_B", "cus_C"},
-			picks:  4,
-			want:   []string{"cus_A", "cus_B", "cus_C", ""},
-			wantOK: []bool{true, true, true, false},
+			picks:  6,
+			want:   []string{"cus_A", "cus_B", "cus_C", "cus_A", "cus_B", "cus_C"},
+			wantOK: []bool{true, true, true, true, true, true},
 		},
 		{
 			name:   "duplicate Notify is idempotent",
 			notify: []string{"cus_A", "cus_B", "cus_A", "cus_B"},
-			picks:  3,
-			want:   []string{"cus_A", "cus_B", ""},
-			wantOK: []bool{true, true, false},
+			picks:  4,
+			want:   []string{"cus_A", "cus_B", "cus_A", "cus_B"},
+			wantOK: []bool{true, true, true, true},
 		},
 		{
 			name:   "empty CustomerID Notify is ignored",
 			notify: []string{"", "cus_A", ""},
-			picks:  2,
-			want:   []string{"cus_A", ""},
-			wantOK: []bool{true, false},
+			picks:  3,
+			want:   []string{"cus_A", "cus_A", "cus_A"},
+			wantOK: []bool{true, true, true},
 		},
 	}
 
@@ -80,8 +80,8 @@ func TestRoundRobin_TableDriven(t *testing.T) {
 				if got != tt.want[i] {
 					t.Errorf("Pick[%d]: got %q, want %q", i, got, tt.want[i])
 				}
-				if ok && batchHint != 1 {
-					t.Errorf("Pick[%d] batchHint: got %d, want 1", i, batchHint)
+				if ok && batchHint != roundrobin.ClaimBatchSize {
+					t.Errorf("Pick[%d] batchHint: got %d, want %d", i, batchHint, roundrobin.ClaimBatchSize)
 				}
 			}
 		})
@@ -162,9 +162,6 @@ func TestRoundRobin_FairnessProperty(t *testing.T) {
 					t.Fatalf("Pick[%d]: got ok=false, want ok=true", i)
 				}
 				counts[customer]++
-				// Re-notify to keep Customer in rotation (simulates worker
-				// re-notifying after successful claim).
-				s.Notify(customer)
 			}
 
 			activeCount := len(tt.customers)
@@ -189,6 +186,89 @@ func TestRoundRobin_FairnessProperty(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRoundRobin_Remove verifies that Remove correctly removes a Customer from
+// rotation and that the cursor adjusts properly.
+func TestRoundRobin_Remove(t *testing.T) {
+	t.Parallel()
+
+	t.Run("remove from single Customer leaves scheduler empty", func(t *testing.T) {
+		t.Parallel()
+		s := roundrobin.New()
+		s.Notify("cus_A")
+		s.Remove("cus_A")
+		_, _, ok, _ := s.Pick(context.Background())
+		if ok {
+			t.Fatal("expected ok=false after removing only customer")
+		}
+	})
+
+	t.Run("remove from middle preserves order", func(t *testing.T) {
+		t.Parallel()
+		s := roundrobin.New()
+		s.Notify("cus_A")
+		s.Notify("cus_B")
+		s.Notify("cus_C")
+		s.Remove("cus_B")
+
+		ctx := context.Background()
+		got1, _, ok1, _ := s.Pick(ctx)
+		got2, _, ok2, _ := s.Pick(ctx)
+		got3, _, ok3, _ := s.Pick(ctx)
+		if !ok1 || !ok2 || !ok3 {
+			t.Fatal("expected three successful picks from 3→2 customers after remove")
+		}
+		if got1 != "cus_A" || got2 != "cus_C" || got3 != "cus_A" {
+			t.Fatalf("got %q %q %q, want cus_A cus_C cus_A", got1, got2, got3)
+		}
+	})
+
+	t.Run("remove from cursor position adjusts cursor", func(t *testing.T) {
+		t.Parallel()
+		s := roundrobin.New()
+		s.Notify("cus_A")
+		s.Notify("cus_B")
+		s.Notify("cus_C")
+
+		ctx := context.Background()
+		// Advance cursor past A.
+		s.Pick(ctx) // returns A, cursor now at 1 (B)
+
+		// Remove A (before cursor) — cursor should shift down.
+		s.Remove("cus_A")
+
+		got1, _, ok1, _ := s.Pick(ctx)
+		got2, _, ok2, _ := s.Pick(ctx)
+		if !ok1 || !ok2 {
+			t.Fatal("expected two successful picks")
+		}
+		if got1 != "cus_B" || got2 != "cus_C" {
+			t.Fatalf("got %q %q, want cus_B cus_C", got1, got2)
+		}
+	})
+
+	t.Run("no-op for unknown customer", func(t *testing.T) {
+		t.Parallel()
+		s := roundrobin.New()
+		s.Notify("cus_A")
+		s.Remove("unknown")
+		got, _, ok, _ := s.Pick(context.Background())
+		if !ok || got != "cus_A" {
+			t.Fatalf("got %q ok=%v, want cus_A ok=true", got, ok)
+		}
+	})
+
+	t.Run("no-op for empty ID", func(t *testing.T) {
+		t.Parallel()
+		s := roundrobin.New()
+		s.Notify("cus_A")
+		s.Remove("")
+		got, _, ok, _ := s.Pick(context.Background())
+		if !ok || got != "cus_A" {
+			t.Fatalf("got %q ok=%v, want cus_A ok=true", got, ok)
+		}
+	})
 }
 
 // TestRoundRobin_ConcurrentNotifyAndPick exercises thread safety — the

@@ -20,9 +20,14 @@ type CustomerID = string
 //
 // Notify informs the Scheduler that the given Customer has new pending work.
 // Implementations must be safe for concurrent use.
+//
+// Remove tells the Scheduler that the given Customer has no more pending work
+// and should be removed from the rotation. It is a no-op if the Customer is
+// not currently registered.
 type Scheduler interface {
 	Pick(ctx context.Context) (customerID CustomerID, batchHint uint32, ok bool, err error)
 	Notify(customerID CustomerID)
+	Remove(customerID CustomerID)
 }
 
 // WeightSource resolves a Customer's fairness weight. A weight of 0 means the

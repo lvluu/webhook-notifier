@@ -8,15 +8,17 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/scheduler"
 )
 
+// ClaimBatchSize is the number of deliveries a worker can claim per scheduler
+// pick. Higher values amortize DB transaction overhead across multiple deliveries.
+const ClaimBatchSize uint32 = 32
+
 // roundRobin is a plain round-robin Scheduler over the set of Customers with
 // pending Deliveries (ADR-0001).
 //
 // State: an ordered slice of CustomerIDs and a cursor. Notify appends a
 // Customer when not already present; Pick returns the Customer at the cursor
-// and removes it from rotation. The worker loop honours the "set of Customers
-// with pending Deliveries" contract by re-calling Notify after each
-// successful claim — if the claim returns ok=false the worker does not
-// re-Notify and the Customer leaves rotation naturally.
+// and advances. Customers remain in rotation until explicitly removed via
+// Remove, so multiple workers can claim from the same Customer concurrently.
 type roundRobin struct {
 	mu        sync.Mutex
 	customers []scheduler.CustomerID
@@ -28,10 +30,10 @@ func New() scheduler.Scheduler {
 	return &roundRobin{}
 }
 
-// Pick returns the next Customer in rotation and removes it from the active
-// set, or ok=false when empty. batchHint is always 1 for plain round-robin.
-// The caller must re-Notify if the Customer still has pending work after this
-// pick.
+// Pick returns the next Customer in rotation and advances the cursor.
+// Customers remain in rotation — the caller must call Remove when the
+// Customer has no remaining work. batchHint is set to ClaimBatchSize so
+// workers can claim multiple deliveries per round-trip.
 func (r *roundRobin) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return "", 0, false, err
@@ -49,17 +51,35 @@ func (r *roundRobin) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bo
 	}
 
 	customer := r.customers[r.cursor]
-	// Remove by shifting elements after cursor left by one. This preserves
-	// insertion order so round-robin cycles through Customers in the order
-	// they were Notify'd.
-	copy(r.customers[r.cursor:], r.customers[r.cursor+1:])
-	r.customers = r.customers[:len(r.customers)-1]
-	// Clamp cursor if we removed the last element.
-	if len(r.customers) > 0 && r.cursor >= len(r.customers) {
-		r.cursor = 0
+	r.cursor = (r.cursor + 1) % len(r.customers)
+
+	return customer, ClaimBatchSize, true, nil
+}
+
+// Remove removes the Customer from the rotation. No-op if not present.
+func (r *roundRobin) Remove(customerID scheduler.CustomerID) {
+	if customerID == "" {
+		return
 	}
 
-	return customer, 1, true, nil
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for i, c := range r.customers {
+		if c == customerID {
+			if i < len(r.customers)-1 {
+				copy(r.customers[i:], r.customers[i+1:])
+			}
+			r.customers = r.customers[:len(r.customers)-1]
+			if i < r.cursor {
+				r.cursor--
+			}
+			if len(r.customers) > 0 && r.cursor >= len(r.customers) {
+				r.cursor = 0
+			}
+			return
+		}
+	}
 }
 
 // Notify registers the Customer for round-robin rotation if not already
