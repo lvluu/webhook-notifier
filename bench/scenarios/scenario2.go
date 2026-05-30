@@ -34,7 +34,7 @@ func fatCustomerID(i int) string {
 func RunScenario2(ctx context.Context) error {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
-		dsn = "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable"
+		dsn = defaultDatabaseURL
 	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
@@ -242,7 +242,7 @@ func writeScenario2Report(
 		{Label: "Overall (P50/P95/P99/Max)", Customer: ""},
 	}
 
-	f, err := os.Create(path)
+	f, err := os.Create(path) // #nosec G304 -- benchmark report path is a fixed scenario-owned file.
 	if err != nil {
 		return fmt.Errorf("create report: %w", err)
 	}

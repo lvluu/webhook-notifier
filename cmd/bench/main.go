@@ -1,3 +1,4 @@
+// Command bench runs the Webhook Notifier benchmark scenarios.
 package main
 
 import (

@@ -24,7 +24,7 @@ import (
 func RunScenario1(ctx context.Context) error {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
-		dsn = "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable"
+		dsn = defaultDatabaseURL
 	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
@@ -285,7 +285,7 @@ func writeScenario1Report(
 	whaleThroughput := float64(whaleDeliveries) / (whaleMax / 1000)
 	projectedThousandWhales := time.Duration((float64(whaleDeliveries*1000) / whaleThroughput) * float64(time.Second))
 
-	f, err := os.Create(path)
+	f, err := os.Create(path) // #nosec G304 -- benchmark report path is a fixed scenario-owned file.
 	if err != nil {
 		return fmt.Errorf("create report: %w", err)
 	}
@@ -392,12 +392,13 @@ The 1000-whale projection is a single-node capacity estimate from this run, not 
 func queryLatencyPercentiles(ctx context.Context, db *sql.DB, customerFilter string) (p50, p95, p99, maxMs float64, err error) {
 	var whereClause string
 	var args []any
-	if customerFilter == "" {
+	switch {
+	case customerFilter == "":
 		whereClause = "status = 'succeeded'"
-	} else if strings.Contains(customerFilter, "%") {
+	case strings.Contains(customerFilter, "%"):
 		whereClause = "status = 'succeeded' AND customer_id LIKE $1"
 		args = append(args, customerFilter)
-	} else {
+	default:
 		whereClause = "status = 'succeeded' AND customer_id = $1"
 		args = append(args, customerFilter)
 	}
@@ -410,7 +411,7 @@ func queryLatencyPercentiles(ctx context.Context, db *sql.DB, customerFilter str
 			COALESCE(MAX(EXTRACT(EPOCH FROM (updated_at - created_at)) * 1000), 0)
 		FROM deliveries
 		WHERE %s
-	`, whereClause)
+	`, whereClause) // #nosec G201 -- whereClause is selected from fixed branches above.
 
 	var p50f, p95f, p99f, maxf float64
 	err = db.QueryRowContext(ctx, query, args...).Scan(&p50f, &p95f, &p99f, &maxf)
@@ -456,13 +457,6 @@ func queryFirstTerminalLatencyMs(ctx context.Context, db *sql.DB, customerID str
 		return 0, fmt.Errorf("query first terminal latency: %w", err)
 	}
 	return ms, nil
-}
-
-func boolStr(v bool) string {
-	if v {
-		return "✅ Yes"
-	}
-	return "❌ No"
 }
 
 func passFail(v bool) string {

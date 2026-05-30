@@ -152,7 +152,7 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 	if err != nil {
 		return nil, fmt.Errorf("cte claim: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var deliveries []Delivery
 	for rows.Next() {

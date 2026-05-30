@@ -11,6 +11,8 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 )
 
+const defaultDatabaseURL = "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable" // #nosec G101 -- local benchmark database credentials.
+
 // resetBenchData truncates all bench-managed tables so the scenario is
 // idempotent across aborted runs.  The order respects FK constraints:
 // child tables (delivery_attempts, dead_letters) are dropped before/during
@@ -82,7 +84,7 @@ func seedCustomers(ctx context.Context, db *sql.DB) error {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		sb.WriteString(fmt.Sprintf("($%d, $%d)", i*2+1, i*2+2))
+		_, _ = fmt.Fprintf(&sb, "($%d, $%d)", i*2+1, i*2+2)
 		args = append(args, c.id, c.weight)
 	}
 	sb.WriteString(" ON CONFLICT (id) DO NOTHING")
@@ -108,7 +110,7 @@ func seedWebhooks(ctx context.Context, db *sql.DB, receiverBaseURL string) error
 			sb.WriteString(", ")
 		}
 		base := i * 4
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, true)", base+1, base+2, base+3, base+4))
+		_, _ = fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, true)", base+1, base+2, base+3, base+4)
 		args = append(args, cid, receiverBaseURL+"/hooks/"+cid, "", fmt.Sprintf("{%s}", eventType))
 	}
 	sb.WriteString(" ON CONFLICT DO NOTHING")

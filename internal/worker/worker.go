@@ -379,8 +379,8 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 				slog.Int("attempt_number", delivery.AttemptNumber),
 			)
 
-			isSucceeded := outcome.reason == retry.ReasonSucceeded || (outcome.reason == "" && outcome.errorClass == "")
-			if isSucceeded {
+			switch {
+			case outcome.reason == retry.ReasonSucceeded || (outcome.reason == "" && outcome.errorClass == ""):
 				succeeded = append(succeeded, outbox.BatchMarkItem{
 					DeliveryID:    delivery.ID,
 					StatusCode:    outcome.statusCode,
@@ -392,7 +392,7 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 					"status_code", outcome.statusCode,
 					"duration_ms", outcome.duration.Milliseconds(),
 				)
-			} else if outcome.reason != "" {
+			case outcome.reason != "":
 				dead = append(dead, outbox.BatchMarkItem{
 					DeliveryID:    delivery.ID,
 					StatusCode:    outcome.statusCode,
@@ -407,7 +407,7 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 					"status_code", outcome.statusCode,
 					"duration_ms", outcome.duration.Milliseconds(),
 				)
-			} else {
+			default:
 				retries = append(retries, outbox.BatchMarkItem{
 					DeliveryID:    delivery.ID,
 					StatusCode:    outcome.statusCode,
