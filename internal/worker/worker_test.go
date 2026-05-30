@@ -598,7 +598,6 @@ func TestProcess_MaxAge(t *testing.T) {
 	})
 }
 
-
 // TestDeliver_PropagatesContextCancellation guards against a worker that
 // silently ignores ctx cancellation — important once retries land (#5) and
 // shutdown semantics matter.
