@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -265,6 +266,84 @@ func TestClaimNextRecoversStaleInFlightDelivery(t *testing.T) {
 	}
 	if recovered.AttemptNumber != 2 {
 		t.Fatalf("recovered attempt number: got %d, want 2", recovered.AttemptNumber)
+	}
+}
+
+func TestDiscoverClaimableCustomersMatchesClaimEligibility(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	store := outbox.New(db, outbox.WithClaimLease(time.Hour))
+
+	submitOneDelivery(t, ctx, db, "cus_pending")
+	claimableRetry := submitOneDelivery(t, ctx, db, "cus_retry_due")
+	futureRetry := submitOneDelivery(t, ctx, db, "cus_retry_future")
+	staleInFlight := submitOneDelivery(t, ctx, db, "cus_stale_inflight")
+	freshInFlight := submitOneDelivery(t, ctx, db, "cus_fresh_inflight")
+
+	_, err := db.ExecContext(ctx, `
+		UPDATE deliveries
+		SET status = 'failed_retry', next_attempt_at = now() - interval '1 second'
+		WHERE id = $1
+	`, claimableRetry)
+	if err != nil {
+		t.Fatalf("make retry due: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `
+		UPDATE deliveries
+		SET status = 'failed_retry', next_attempt_at = now() + interval '1 hour'
+		WHERE id = $1
+	`, futureRetry)
+	if err != nil {
+		t.Fatalf("make retry future: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `
+		UPDATE deliveries
+		SET status = 'in_flight', claimed_at = now() - interval '2 hours'
+		WHERE id = $1
+	`, staleInFlight)
+	if err != nil {
+		t.Fatalf("make stale in-flight: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `
+		UPDATE deliveries
+		SET status = 'in_flight', claimed_at = now()
+		WHERE id = $1
+	`, freshInFlight)
+	if err != nil {
+		t.Fatalf("make fresh in-flight: %v", err)
+	}
+
+	got, err := store.DiscoverClaimableCustomers(ctx, "", 10)
+	if err != nil {
+		t.Fatalf("DiscoverClaimableCustomers: %v", err)
+	}
+
+	want := []string{"cus_pending", "cus_retry_due", "cus_stale_inflight"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("claimable customers: got %v, want %v", got, want)
+	}
+
+	afterPending, err := store.DiscoverClaimableCustomers(ctx, "cus_pending", 10)
+	if err != nil {
+		t.Fatalf("DiscoverClaimableCustomers after cursor: %v", err)
+	}
+	wantAfterPending := []string{"cus_retry_due", "cus_stale_inflight"}
+	if !slices.Equal(afterPending, wantAfterPending) {
+		t.Fatalf("claimable customers after cursor: got %v, want %v", afterPending, wantAfterPending)
+	}
+
+	limited, err := store.DiscoverClaimableCustomers(ctx, "", 2)
+	if err != nil {
+		t.Fatalf("DiscoverClaimableCustomers limited: %v", err)
+	}
+	wantLimited := []string{"cus_pending", "cus_retry_due"}
+	if !slices.Equal(limited, wantLimited) {
+		t.Fatalf("limited claimable customers: got %v, want %v", limited, wantLimited)
+	}
+
+	if _, err := store.DiscoverClaimableCustomers(ctx, "", 0); err == nil {
+		t.Fatal("DiscoverClaimableCustomers limit 0: got nil error, want error")
 	}
 }
 
@@ -591,6 +670,113 @@ func TestWorkerRun_SchedulerFairnessAcrossCustomers(t *testing.T) {
 	}
 }
 
+func TestWorkerRun_DBDiscoveryFeedsIndependentSchedulers(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	const deliveriesPerCustomer = 5
+	const totalDeliveries = deliveriesPerCustomer * 2
+
+	var (
+		seenMu sync.Mutex
+		seen   = make(map[string]int, totalDeliveries)
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := r.Header.Get("X-Delivery-Id") + ":" + r.Header.Get("X-Attempt-Number")
+		seenMu.Lock()
+		seen[key]++
+		seenMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	for i := 0; i < deliveriesPerCustomer; i++ {
+		insertWebhook(t, ctx, db, "cus_a", srv.URL, true, "subscriber.created")
+		insertWebhook(t, ctx, db, "cus_b", srv.URL, true, "subscriber.created")
+	}
+
+	submit := func(customerID string) {
+		t.Helper()
+		submitted, err := newIngestStore(db).Submit(ctx, ingest.Event{
+			CustomerID: customerID,
+			Type:       "subscriber.created",
+			Payload:    []byte(`{"subscriber_id":"sub_123"}`),
+		})
+		if err != nil {
+			t.Fatalf("Submit %s: %v", customerID, err)
+		}
+		if len(submitted.DeliveryIDs) != deliveriesPerCustomer {
+			t.Fatalf("%s delivery count: got %d, want %d", customerID, len(submitted.DeliveryIDs), deliveriesPerCustomer)
+		}
+	}
+	submit("cus_a")
+	submit("cus_b")
+
+	store := outbox.New(db)
+	schedulers := []scheduler.Scheduler{roundrobin.New(), roundrobin.New()}
+
+	runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, len(schedulers)*2)
+	for _, sched := range schedulers {
+		sched := sched
+		go func() {
+			errCh <- worker.RunClaimableCustomerDiscovery(runCtx, store, sched, worker.DiscoveryConfig{
+				Interval: time.Millisecond,
+				Limit:    1,
+			})
+		}()
+
+		w := newIntegrationWorker()
+		w.Scheduler = sched
+		go func() {
+			errCh <- w.Run(runCtx, store)
+		}()
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		cusASucceeded := countSucceededForCustomer(t, ctx, db, "cus_a")
+		cusBSucceeded := countSucceededForCustomer(t, ctx, db, "cus_b")
+		if cusASucceeded == deliveriesPerCustomer && cusBSucceeded == deliveriesPerCustomer {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	for range cap(errCh) {
+		err := <-errCh
+		if err != nil && err != context.Canceled {
+			t.Fatalf("background loop: %v", err)
+		}
+	}
+
+	if got := countSucceededForCustomer(t, ctx, db, "cus_a"); got != deliveriesPerCustomer {
+		t.Fatalf("cus_a succeeded: got %d, want %d", got, deliveriesPerCustomer)
+	}
+	if got := countSucceededForCustomer(t, ctx, db, "cus_b"); got != deliveriesPerCustomer {
+		t.Fatalf("cus_b succeeded: got %d, want %d", got, deliveriesPerCustomer)
+	}
+
+	seenMu.Lock()
+	defer seenMu.Unlock()
+	if len(seen) != totalDeliveries {
+		t.Fatalf("receiver unique attempts: got %d, want %d", len(seen), totalDeliveries)
+	}
+	var duplicates []string
+	for key, count := range seen {
+		if count > 1 {
+			duplicates = append(duplicates, key)
+		}
+	}
+	sort.Strings(duplicates)
+	if len(duplicates) > 0 {
+		t.Fatalf("duplicate attempts: %v", duplicates)
+	}
+}
+
 func TestRequeue_ReturnsInFlightToFailedRetryWithoutAttemptRow(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)
@@ -737,6 +923,24 @@ func insertWebhook(t *testing.T, ctx context.Context, db *sql.DB, customerID, ur
 	if err != nil {
 		t.Fatalf("insert webhook: %v", err)
 	}
+}
+
+func submitOneDelivery(t *testing.T, ctx context.Context, db *sql.DB, customerID string) string {
+	t.Helper()
+
+	insertWebhook(t, ctx, db, customerID, "https://partner.example/webhook", true, "subscriber.created")
+	submitted, err := newIngestStore(db).Submit(ctx, ingest.Event{
+		CustomerID: customerID,
+		Type:       "subscriber.created",
+		Payload:    []byte(`{"subscriber_id":"sub_123"}`),
+	})
+	if err != nil {
+		t.Fatalf("Submit %s: %v", customerID, err)
+	}
+	if len(submitted.DeliveryIDs) != 1 {
+		t.Fatalf("delivery count for %s: got %d, want 1", customerID, len(submitted.DeliveryIDs))
+	}
+	return submitted.DeliveryIDs[0]
 }
 
 func assertDeliveryStatus(t *testing.T, ctx context.Context, db *sql.DB, deliveryID, want string) {

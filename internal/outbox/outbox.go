@@ -148,6 +148,44 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 	return deliveries, nil
 }
 
+// DiscoverClaimableCustomers returns up to limit Customer IDs greater than
+// afterCustomerID that have at least one Delivery eligible for claim.
+func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID string, limit int) ([]string, error) {
+	if limit < 1 {
+		return nil, fmt.Errorf("limit must be >= 1")
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT customer_id
+		FROM deliveries
+		WHERE customer_id > $1
+		  AND (
+		      (status IN ('pending', 'failed_retry') AND next_attempt_at <= now())
+		      OR (status = 'in_flight' AND claimed_at < now() - ($2 * interval '1 millisecond'))
+		  )
+		ORDER BY customer_id
+		LIMIT $3
+	`, afterCustomerID, s.claimLease.Milliseconds(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("discover claimable customers: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var customerIDs []string
+	for rows.Next() {
+		var customerID string
+		if err := rows.Scan(&customerID); err != nil {
+			return nil, fmt.Errorf("scan claimable customer: %w", err)
+		}
+		customerIDs = append(customerIDs, customerID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate claimable customers: %w", err)
+	}
+
+	return customerIDs, nil
+}
+
 func (s *Store) selectClaimableDeliveryIDs(ctx context.Context, tx *sql.Tx, customerID string, limit int) ([]string, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id
