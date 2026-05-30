@@ -223,8 +223,6 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 	return customerIDs, nil
 }
 
-
-
 // MarkSucceeded records the successful Attempt and moves the Delivery to
 // succeeded.
 func (s *Store) MarkSucceeded(ctx context.Context, deliveryID string, statusCode int, duration time.Duration) error {
@@ -389,7 +387,8 @@ func (s *Store) MarkSucceededBatch(ctx context.Context, items []BatchMarkItem) e
 		durationsMs[i] = item.Duration.Milliseconds()
 	}
 
-	_, err := s.db.ExecContext(ctx, `
+	var marked int
+	err := s.db.QueryRowContext(ctx, `
 		WITH batch AS (
 			SELECT * FROM unnest(
 				$1::text[], $2::int[], $3::bigint[]
@@ -405,11 +404,18 @@ func (s *Store) MarkSucceededBatch(ctx context.Context, items []BatchMarkItem) e
 			  AND d.status = 'in_flight'
 			RETURNING d.id, d.attempt_count, b.status_code, b.duration_ms
 		)
-		INSERT INTO delivery_attempts (delivery_id, attempt_number, status_code, duration_ms, sent_at)
-		SELECT id, attempt_count, status_code, duration_ms, now() FROM updated
-	`, pq.Array(ids), pq.Array(statusCodes), pq.Array(durationsMs))
+		, inserted AS (
+			INSERT INTO delivery_attempts (delivery_id, attempt_number, status_code, duration_ms, sent_at)
+			SELECT id, attempt_count, status_code, duration_ms, now() FROM updated
+			RETURNING delivery_id
+		)
+		SELECT COUNT(*) FROM inserted
+	`, pq.Array(ids), pq.Array(statusCodes), pq.Array(durationsMs)).Scan(&marked)
 	if err != nil {
 		return fmt.Errorf("batch mark succeeded: %w", err)
+	}
+	if marked != len(items) {
+		return fmt.Errorf("batch mark succeeded: marked %d of %d deliveries", marked, len(items))
 	}
 	return nil
 }
@@ -436,7 +442,8 @@ func (s *Store) MarkRetryBatch(ctx context.Context, items []BatchMarkItem) error
 		delaysMs[i] = item.Delay.Milliseconds()
 	}
 
-	_, err := s.db.ExecContext(ctx, `
+	var marked int
+	err := s.db.QueryRowContext(ctx, `
 		WITH batch AS (
 			SELECT * FROM unnest(
 				$1::text[], $2::int[], $3::bigint[], $4::text[], $5::bigint[]
@@ -454,11 +461,18 @@ func (s *Store) MarkRetryBatch(ctx context.Context, items []BatchMarkItem) error
 			  AND d.status = 'in_flight'
 			RETURNING d.id, d.attempt_count, b.status_code, b.duration_ms, b.error_class
 		)
-		INSERT INTO delivery_attempts (delivery_id, attempt_number, status_code, error_class, duration_ms, sent_at)
-		SELECT id, attempt_count, status_code, NULLIF(error_class, ''), duration_ms, now() FROM updated
-	`, pq.Array(ids), pq.Array(statusCodes), pq.Array(durationsMs), pq.Array(errorClasses), pq.Array(delaysMs))
+		, inserted AS (
+			INSERT INTO delivery_attempts (delivery_id, attempt_number, status_code, error_class, duration_ms, sent_at)
+			SELECT id, attempt_count, status_code, NULLIF(error_class, ''), duration_ms, now() FROM updated
+			RETURNING delivery_id
+		)
+		SELECT COUNT(*) FROM inserted
+	`, pq.Array(ids), pq.Array(statusCodes), pq.Array(durationsMs), pq.Array(errorClasses), pq.Array(delaysMs)).Scan(&marked)
 	if err != nil {
 		return fmt.Errorf("batch mark retry: %w", err)
+	}
+	if marked != len(items) {
+		return fmt.Errorf("batch mark retry: marked %d of %d deliveries", marked, len(items))
 	}
 	return nil
 }
@@ -489,7 +503,8 @@ func (s *Store) MarkDeadBatch(ctx context.Context, items []BatchMarkItem) error 
 		reasons[i] = item.Reason
 	}
 
-	_, err := s.db.ExecContext(ctx, `
+	var attemptsMarked, deadLettersMarked int
+	err := s.db.QueryRowContext(ctx, `
 		WITH batch AS (
 			SELECT * FROM unnest(
 				$1::text[], $2::int[], $3::bigint[], $4::text[], $5::text[]
@@ -509,12 +524,22 @@ func (s *Store) MarkDeadBatch(ctx context.Context, items []BatchMarkItem) error 
 		attempts_inserted AS (
 			INSERT INTO delivery_attempts (delivery_id, attempt_number, status_code, error_class, duration_ms, sent_at)
 			SELECT id, attempt_count, status_code, NULLIF(error_class, ''), duration_ms, now() FROM updated
+			RETURNING delivery_id
+		),
+		dead_letters_inserted AS (
+			INSERT INTO dead_letters (delivery_id, last_error, attempts, reason, final_at)
+			SELECT id, NULLIF(error_class, ''), attempt_count, reason, now() FROM updated
+			RETURNING delivery_id
 		)
-		INSERT INTO dead_letters (delivery_id, last_error, attempts, reason, final_at)
-		SELECT id, NULLIF(error_class, ''), attempt_count, reason, now() FROM updated
-	`, pq.Array(ids), pq.Array(statusCodes), pq.Array(durationsMs), pq.Array(errorClasses), pq.Array(reasons))
+		SELECT
+			(SELECT COUNT(*) FROM attempts_inserted),
+			(SELECT COUNT(*) FROM dead_letters_inserted)
+	`, pq.Array(ids), pq.Array(statusCodes), pq.Array(durationsMs), pq.Array(errorClasses), pq.Array(reasons)).Scan(&attemptsMarked, &deadLettersMarked)
 	if err != nil {
 		return fmt.Errorf("batch mark dead: %w", err)
+	}
+	if attemptsMarked != len(items) || deadLettersMarked != len(items) {
+		return fmt.Errorf("batch mark dead: marked %d attempts and %d dead letters of %d deliveries", attemptsMarked, deadLettersMarked, len(items))
 	}
 	return nil
 }

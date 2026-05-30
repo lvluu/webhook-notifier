@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -579,6 +580,72 @@ func TestStoreValidatesRequiredIDs(t *testing.T) {
 
 			if err := tt.run(context.Background()); err == nil {
 				t.Fatal("expected validation error, got nil")
+			}
+		})
+	}
+}
+
+func TestBatchMarkErrorsWhenDeliveryIsNotInFlight(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	store := outbox.New(db)
+
+	tests := []struct {
+		name string
+		run  func(outbox.BatchMarkItem) error
+	}{
+		{
+			name: "succeeded",
+			run: func(item outbox.BatchMarkItem) error {
+				return store.MarkSucceededBatch(ctx, []outbox.BatchMarkItem{item})
+			},
+		},
+		{
+			name: "retry",
+			run: func(item outbox.BatchMarkItem) error {
+				item.ErrorClass = retry.ReasonRetryable5xx
+				item.Delay = time.Millisecond
+				return store.MarkRetryBatch(ctx, []outbox.BatchMarkItem{item})
+			},
+		},
+		{
+			name: "dead",
+			run: func(item outbox.BatchMarkItem) error {
+				item.ErrorClass = retry.ReasonTerminal4xx
+				item.Reason = retry.ReasonTerminal4xx
+				return store.MarkDeadBatch(ctx, []outbox.BatchMarkItem{item})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deliveryID := submitOneDelivery(t, ctx, db, "cus_batch_"+tt.name)
+			claimed, ok, err := store.ClaimNext(ctx, "cus_batch_"+tt.name)
+			if err != nil {
+				t.Fatalf("ClaimNext: %v", err)
+			}
+			if !ok {
+				t.Fatal("ClaimNext: got no delivery, want one")
+			}
+			if claimed.ID != deliveryID {
+				t.Fatalf("claimed ID: got %s, want %s", claimed.ID, deliveryID)
+			}
+			if err := store.MarkSucceeded(ctx, deliveryID, http.StatusOK, time.Millisecond); err != nil {
+				t.Fatalf("MarkSucceeded setup: %v", err)
+			}
+
+			err = tt.run(outbox.BatchMarkItem{
+				DeliveryID: deliveryID,
+				StatusCode: http.StatusOK,
+				Duration:   time.Millisecond,
+			})
+			if err == nil {
+				t.Fatal("expected batch mark error, got nil")
+			}
+			if !strings.Contains(err.Error(), "marked 0 of 1") &&
+				!strings.Contains(err.Error(), "marked 0 attempts and 0 dead letters of 1") {
+				t.Fatalf("error: got %q, want partial batch mark error", err.Error())
 			}
 		})
 	}
