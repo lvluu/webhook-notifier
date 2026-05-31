@@ -82,3 +82,7 @@ bench-4:
 # dead partner circuit breaker + pool protection (issue #27)
 bench-5:
     BENCH_PROFILE=stress go run ./cmd/bench scenario5
+
+# archive terminal deliveries into delivery_history
+archive-deliveries:
+    go run ./cmd/archive-deliveries

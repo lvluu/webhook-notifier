@@ -794,6 +794,20 @@ func TestStoreValidatesRequiredIDs(t *testing.T) {
 				return store.MarkDead(ctx, "", http.StatusNotFound, retry.ReasonTerminal4xx, retry.ReasonTerminal4xx, time.Millisecond)
 			},
 		},
+		{
+			name: "archive requires non-negative retention",
+			run: func(ctx context.Context) error {
+				_, err := store.ArchiveTerminalDeliveries(ctx, -time.Millisecond, 10)
+				return err
+			},
+		},
+		{
+			name: "archive requires positive limit",
+			run: func(ctx context.Context) error {
+				_, err := store.ArchiveTerminalDeliveries(ctx, time.Hour, 0)
+				return err
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -805,6 +819,74 @@ func TestStoreValidatesRequiredIDs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestArchiveTerminalDeliveriesMovesOldTerminalRowsToHistory(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	store := outbox.New(db)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	oldSucceededID := submitOneDeliveryToURL(t, ctx, db, "cus_history_success", srv.URL)
+	claimedSucceeded, ok, err := store.ClaimNext(ctx, "cus_history_success")
+	if err != nil {
+		t.Fatalf("ClaimNext succeeded delivery: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext succeeded delivery: got no delivery, want one")
+	}
+	if err := store.MarkSucceeded(ctx, claimedSucceeded.ID, http.StatusOK, 10*time.Millisecond); err != nil {
+		t.Fatalf("MarkSucceeded: %v", err)
+	}
+
+	oldDeadID := submitOneDeliveryToURL(t, ctx, db, "cus_history_dead", srv.URL)
+	claimedDead, ok, err := store.ClaimNext(ctx, "cus_history_dead")
+	if err != nil {
+		t.Fatalf("ClaimNext dead delivery: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext dead delivery: got no delivery, want one")
+	}
+	if err := store.MarkDead(ctx, claimedDead.ID, http.StatusNotFound, retry.ReasonTerminal4xx, retry.ReasonTerminal4xx, 10*time.Millisecond); err != nil {
+		t.Fatalf("MarkDead: %v", err)
+	}
+
+	recentID := submitOneDeliveryToURL(t, ctx, db, "cus_history_recent", srv.URL)
+	claimedRecent, ok, err := store.ClaimNext(ctx, "cus_history_recent")
+	if err != nil {
+		t.Fatalf("ClaimNext recent delivery: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext recent delivery: got no delivery, want one")
+	}
+	if err := store.MarkSucceeded(ctx, claimedRecent.ID, http.StatusOK, 10*time.Millisecond); err != nil {
+		t.Fatalf("MarkSucceeded recent: %v", err)
+	}
+
+	ageTerminalDelivery(t, ctx, db, oldSucceededID, 48*time.Hour)
+	ageTerminalDelivery(t, ctx, db, oldDeadID, 48*time.Hour)
+
+	archived, err := store.ArchiveTerminalDeliveries(ctx, 24*time.Hour, 10)
+	if err != nil {
+		t.Fatalf("ArchiveTerminalDeliveries: %v", err)
+	}
+	if archived != 2 {
+		t.Fatalf("archived count: got %d, want 2", archived)
+	}
+
+	assertDeliveryMissing(t, ctx, db, oldSucceededID)
+	assertDeliveryMissing(t, ctx, db, oldDeadID)
+	assertAttemptCount(t, ctx, db, oldSucceededID, 0)
+	assertAttemptCount(t, ctx, db, oldDeadID, 0)
+	assertDeadLetterMissing(t, ctx, db, oldDeadID)
+	assertDeliveryStatus(t, ctx, db, recentID, string(outbox.StatusSucceeded))
+
+	assertDeliveryHistory(t, ctx, db, oldSucceededID, "succeeded", sql.NullString{}, 1)
+	assertDeliveryHistory(t, ctx, db, oldDeadID, "dead", sql.NullString{String: retry.ReasonTerminal4xx, Valid: true}, 1)
 }
 
 func TestBatchMarkErrorsWhenDeliveryIsNotInFlight(t *testing.T) {
@@ -1362,6 +1444,19 @@ func assertDeliveryStatus(t *testing.T, ctx context.Context, db *sql.DB, deliver
 	}
 }
 
+func assertDeliveryMissing(t *testing.T, ctx context.Context, db *sql.DB, deliveryID string) {
+	t.Helper()
+
+	var exists bool
+	err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM deliveries WHERE id = $1)`, deliveryID).Scan(&exists)
+	if err != nil {
+		t.Fatalf("check delivery missing: %v", err)
+	}
+	if exists {
+		t.Fatalf("delivery %s still exists", deliveryID)
+	}
+}
+
 func assertAttemptCount(t *testing.T, ctx context.Context, db *sql.DB, deliveryID string, want int) {
 	t.Helper()
 
@@ -1372,6 +1467,87 @@ func assertAttemptCount(t *testing.T, ctx context.Context, db *sql.DB, deliveryI
 	}
 	if got != want {
 		t.Fatalf("attempt count: got %d, want %d", got, want)
+	}
+}
+
+func assertDeadLetterMissing(t *testing.T, ctx context.Context, db *sql.DB, deliveryID string) {
+	t.Helper()
+
+	var exists bool
+	err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM dead_letters WHERE delivery_id = $1)`, deliveryID).Scan(&exists)
+	if err != nil {
+		t.Fatalf("check dead letter missing: %v", err)
+	}
+	if exists {
+		t.Fatalf("dead letter %s still exists", deliveryID)
+	}
+}
+
+func assertDeliveryHistory(t *testing.T, ctx context.Context, db *sql.DB, deliveryID, wantStatus string, wantReason sql.NullString, wantAttempts int) {
+	t.Helper()
+
+	var gotStatus string
+	var gotReason sql.NullString
+	var gotAttempts int
+	var eventID, webhookID, customerID, eventType, urlHost string
+	var finalAt time.Time
+	err := db.QueryRowContext(ctx, `
+		SELECT
+		    event_id::text,
+		    webhook_id::text,
+		    customer_id,
+		    event_type,
+		    url_host,
+		    final_status,
+		    terminal_reason,
+		    attempt_count,
+		    final_at
+		FROM delivery_history
+		WHERE delivery_id = $1
+	`, deliveryID).Scan(&eventID, &webhookID, &customerID, &eventType, &urlHost, &gotStatus, &gotReason, &gotAttempts, &finalAt)
+	if err != nil {
+		t.Fatalf("select delivery history: %v", err)
+	}
+	if eventID == "" || webhookID == "" || customerID == "" || eventType == "" || urlHost == "" || finalAt.IsZero() {
+		t.Fatalf("delivery history has empty required fields: event=%q webhook=%q customer=%q type=%q host=%q final=%s", eventID, webhookID, customerID, eventType, urlHost, finalAt)
+	}
+	if gotStatus != wantStatus {
+		t.Fatalf("history status: got %q, want %q", gotStatus, wantStatus)
+	}
+	if gotReason.Valid != wantReason.Valid || gotReason.String != wantReason.String {
+		t.Fatalf("history reason: got %q valid=%v, want %q valid=%v", gotReason.String, gotReason.Valid, wantReason.String, wantReason.Valid)
+	}
+	if gotAttempts != wantAttempts {
+		t.Fatalf("history attempts: got %d, want %d", gotAttempts, wantAttempts)
+	}
+}
+
+func ageTerminalDelivery(t *testing.T, ctx context.Context, db *sql.DB, deliveryID string, age time.Duration) {
+	t.Helper()
+
+	_, err := db.ExecContext(ctx, `
+		UPDATE deliveries
+		SET updated_at = now() - ($2 * interval '1 millisecond')
+		WHERE id = $1
+	`, deliveryID, age.Milliseconds())
+	if err != nil {
+		t.Fatalf("age delivery: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `
+		UPDATE delivery_attempts
+		SET sent_at = now() - ($2 * interval '1 millisecond')
+		WHERE delivery_id = $1
+	`, deliveryID, age.Milliseconds())
+	if err != nil {
+		t.Fatalf("age delivery attempts: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `
+		UPDATE dead_letters
+		SET final_at = now() - ($2 * interval '1 millisecond')
+		WHERE delivery_id = $1
+	`, deliveryID, age.Milliseconds())
+	if err != nil {
+		t.Fatalf("age dead letter: %v", err)
 	}
 }
 
