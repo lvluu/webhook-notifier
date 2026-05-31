@@ -15,29 +15,29 @@ The dead-customer attempt count includes a small number of in-flight claims alre
 
 | Phase | Duration | Baseline Goroutines | Final Goroutines | Dead Customer Attempts | Dead Customer Pending |
 |---|---:|---:|---:|---:|---:|
-| Control | 14.382s | 4 | 3 | - | - |
-| Dead Partner | 16.377s | 4 | 3 | 481 | 5000 |
+| Control | 11.968s | 4 | 3 | - | - |
+| Dead Partner | 16.412s | 4 | 3 | 353 | 5000 |
 
 ## Healthy Customer p95
 
 | Customer | Control p95 | Dead Partner p95 | Ratio |
 |---|---:|---:|---:|
-| scenario-5-customer-02 | 13986.98 ms | 11091.05 ms | 0.79× |
-| scenario-5-customer-03 | 13948.86 ms | 10954.08 ms | 0.79× |
-| scenario-5-customer-04 | 13763.84 ms | 10824.54 ms | 0.79× |
-| scenario-5-customer-05 | 13580.41 ms | 10714.61 ms | 0.79× |
-| scenario-5-customer-06 | 13448.70 ms | 10608.14 ms | 0.79× |
-| scenario-5-customer-07 | 13327.21 ms | 10494.90 ms | 0.79× |
-| scenario-5-customer-08 | 13220.95 ms | 10418.51 ms | 0.79× |
-| scenario-5-customer-09 | 13082.97 ms | 10287.74 ms | 0.79× |
-| scenario-5-customer-10 | 12886.45 ms | 10203.34 ms | 0.79× |
+| scenario-5-customer-02 | 11734.16 ms | 12687.19 ms | 1.08× |
+| scenario-5-customer-03 | 11580.09 ms | 12554.44 ms | 1.08× |
+| scenario-5-customer-04 | 11475.33 ms | 12423.13 ms | 1.08× |
+| scenario-5-customer-05 | 11418.51 ms | 12213.65 ms | 1.07× |
+| scenario-5-customer-06 | 11270.54 ms | 12003.12 ms | 1.06× |
+| scenario-5-customer-07 | 11122.54 ms | 11812.86 ms | 1.06× |
+| scenario-5-customer-08 | 11086.78 ms | 11578.57 ms | 1.04× |
+| scenario-5-customer-09 | 10942.49 ms | 11286.31 ms | 1.03× |
+| scenario-5-customer-10 | 10882.20 ms | 11056.61 ms | 1.02× |
 
 ## Breaker Snapshots
 
 | Snapshot | State | Failure Count | Probe Delivery | Breaker Open Metric | Breaker Half-Open Metric | Breaker Closed Metric | Timeout Trips |
 |---|---|---:|---|---:|---:|---:|---:|
 | Open | open | 3 | - | 1 | 0 | 0 | 1 |
-| Half-open | half_open | 3 | 1a3b863b-6541-4656-b5a1-359bfd4857e4 | 1 | 0 | 0 | 1 |
+| Half-open | half_open | 3 | 11380c8d-69df-4f79-9d88-f1ef46f2c660 | 1 | 0 | 0 | 1 |
 | Final | open | 4 | - | 1 | 0 | 0 | 2 |
 
 ## Acceptance Criteria
@@ -48,7 +48,7 @@ The dead-customer attempt count includes a small number of in-flight claims alre
 | Customer 1 breaker opens after threshold | 3 failures | >= 2 | **PASS** |
 | Customer 1 half-open probe observed | **PASS** | true | **PASS** |
 | Customer 1 deliveries skipped after open | 5000 pending | > 0 | **PASS** |
-| Customer 1 dead-customer attempts before breaker hold | 481 attempts | <= 500 | **PASS** |
+| Customer 1 dead-customer attempts before breaker hold | 353 attempts | <= 500 | **PASS** |
 | Breaker trip metric recorded | 2 | >= 1 | **PASS** |
 | Goroutine count returned near baseline | -1 delta | <= 8 | **PASS** |
 | Overall result | **PASS** | PASS | **PASS** |

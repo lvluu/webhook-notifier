@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"runtime"
@@ -211,7 +212,7 @@ func runScenario5Phase(ctx context.Context, db *sql.DB, profile scenario5Profile
 		MaxCooldown:      profile.BreakerMaxCooldown,
 	}))
 	httpClient := worker.NewHTTPClient(worker.DefaultHTTPConfig())
-	workerLog := slog.New(slog.NewTextHandler(ioDiscardWriter{}, nil))
+	workerLog := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()
@@ -587,7 +588,7 @@ func waitForScenario5BreakerTransitions(ctx context.Context, db *sql.DB, custome
 		select {
 		case <-pollCtx.Done():
 			return scenario5BreakerSnapshot{}, scenario5BreakerSnapshot{}, scenario5BreakerSnapshot{}, fmt.Errorf("timed out waiting for breaker transitions: open=%v half_open=%v final=%v", haveOpen, haveHalfOpen, haveFinal)
-		case <-time.After(50 * time.Millisecond):
+		case <-time.After(10 * time.Millisecond):
 		}
 	}
 }
@@ -727,8 +728,3 @@ func probeID(snap scenario5BreakerSnapshot) string {
 	}
 	return "-"
 }
-
-// ioDiscardWriter implements io.Writer without importing io solely for discard.
-type ioDiscardWriter struct{}
-
-func (ioDiscardWriter) Write(p []byte) (int, error) { return len(p), nil }

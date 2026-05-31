@@ -21,17 +21,9 @@ func TestScenario2ProfileFromEnvDefaults(t *testing.T) {
 	if profile.Name != "dev" {
 		t.Fatalf("name: got %q, want dev", profile.Name)
 	}
-	if profile.CustomerCount != 5 {
-		t.Fatalf("customers: got %d, want 5", profile.CustomerCount)
-	}
-	if profile.EventsPerCustomer != 20 {
-		t.Fatalf("events/customer: got %d, want 20", profile.EventsPerCustomer)
-	}
-	if profile.SubmitInterval != 5*time.Millisecond {
-		t.Fatalf("submit interval: got %s, want 5ms", profile.SubmitInterval)
-	}
-	if profile.WorkerCount != 16 || profile.OutageDelay != time.Second || profile.OutageDuration != 5*time.Second || profile.BreakerFailureThreshold != 0 {
-		t.Fatalf("dev profile overrides not applied: %+v", profile)
+	want := mustBenchProfileConfig(t, "scenario2", "dev")
+	if profile.WorkerCount != want.WorkerCount || profile.CustomerCount != want.CustomerCount || profile.EventsPerCustomer != want.EventsPerCustomer || profile.SubmitInterval != want.SubmitInterval.Duration() || profile.OutageDelay != want.OutageDelay.Duration() || profile.OutageDuration != want.OutageDuration.Duration() || profile.BreakerFailureThreshold != want.BreakerFailureThreshold {
+		t.Fatalf("dev profile overrides not applied: %+v want %+v", profile, want)
 	}
 }
 
@@ -45,8 +37,9 @@ func TestScenario2ProfileFromEnvOverrides(t *testing.T) {
 	if profile.Name != "stress" {
 		t.Fatalf("name: got %q, want stress", profile.Name)
 	}
-	if profile.CustomerCount != 10 || profile.EventsPerCustomer != 100 || profile.SubmitInterval != 20*time.Millisecond || profile.WorkerCount != 64 || profile.OutageDelay != 5*time.Second || profile.OutageDuration != 30*time.Second || profile.BreakerFailureThreshold != 0 {
-		t.Fatalf("stress profile overrides not applied: %+v", profile)
+	want := mustBenchProfileConfig(t, "scenario2", "stress")
+	if profile.WorkerCount != want.WorkerCount || profile.CustomerCount != want.CustomerCount || profile.EventsPerCustomer != want.EventsPerCustomer || profile.SubmitInterval != want.SubmitInterval.Duration() || profile.OutageDelay != want.OutageDelay.Duration() || profile.OutageDuration != want.OutageDuration.Duration() || profile.BreakerFailureThreshold != want.BreakerFailureThreshold {
+		t.Fatalf("stress profile overrides not applied: %+v want %+v", profile, want)
 	}
 }
 
@@ -111,4 +104,22 @@ func response(statusCode int) *http.Response {
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader("")),
 	}
+}
+
+func mustBenchProfileConfig(t *testing.T, scenario, profile string) benchProfileConfig {
+	t.Helper()
+
+	profiles, err := readBenchProfiles()
+	if err != nil {
+		t.Fatalf("read bench profiles: %v", err)
+	}
+	scenarioProfiles, ok := profiles.Scenarios[scenario]
+	if !ok {
+		t.Fatalf("missing scenario %q in bench profiles", scenario)
+	}
+	got, ok := scenarioProfiles[profile]
+	if !ok {
+		t.Fatalf("missing profile %q for scenario %q", profile, scenario)
+	}
+	return got
 }
