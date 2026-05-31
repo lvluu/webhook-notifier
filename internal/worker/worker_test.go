@@ -62,24 +62,31 @@ func (r *recordingScheduler) Notified() []string {
 }
 
 type oneShotScheduler struct {
-	mu      sync.Mutex
-	picked  bool
-	removed []string
+	mu       sync.Mutex
+	picked   bool
+	customer string
+	removed  []string
+	notified []string
 }
 
 func (s *oneShotScheduler) Pick(ctx context.Context) (string, uint32, bool, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if !s.picked {
 		s.picked = true
-		s.mu.Unlock()
-		return "cus_future_only", 1, true, nil
+		if s.customer == "" {
+			s.customer = "cus_future_only"
+		}
+		return s.customer, 1, true, nil
 	}
-	s.mu.Unlock()
-	<-ctx.Done()
 	return "", 0, false, ctx.Err()
 }
 
-func (s *oneShotScheduler) Notify(string) {}
+func (s *oneShotScheduler) Notify(customerID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notified = append(s.notified, customerID)
+}
 
 func (s *oneShotScheduler) Remove(customerID string) {
 	s.mu.Lock()
@@ -92,6 +99,14 @@ func (s *oneShotScheduler) Removed() []string {
 	defer s.mu.Unlock()
 	out := make([]string, len(s.removed))
 	copy(out, s.removed)
+	return out
+}
+
+func (s *oneShotScheduler) Notified() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.notified))
+	copy(out, s.notified)
 	return out
 }
 
@@ -174,9 +189,12 @@ func (r *recordingDeliveryStore) MarkDeadBatch(context.Context, []outbox.BatchMa
 }
 
 type removeOnEmptyClaimStore struct {
-	cancel          context.CancelFunc
+	done            chan struct{}
+	once            sync.Once
 	claimCalls      int
 	claimableChecks int
+	claimableResult bool
+	claimableErr    error
 }
 
 func (s *removeOnEmptyClaimStore) ClaimNextN(context.Context, string, int) ([]outbox.Delivery, error) {
@@ -186,8 +204,10 @@ func (s *removeOnEmptyClaimStore) ClaimNextN(context.Context, string, int) ([]ou
 
 func (s *removeOnEmptyClaimStore) HasClaimableWork(context.Context, string) (bool, error) {
 	s.claimableChecks++
-	s.cancel()
-	return false, nil
+	s.once.Do(func() {
+		close(s.done)
+	})
+	return s.claimableResult, s.claimableErr
 }
 
 func (s *removeOnEmptyClaimStore) MarkSucceeded(context.Context, string, int, time.Duration) error {
@@ -216,11 +236,22 @@ func TestRun_RemovesCustomerWhenEmptyClaimHasNoClaimableWork(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sched := &oneShotScheduler{}
-	store := &removeOnEmptyClaimStore{cancel: cancel}
+	sched := &oneShotScheduler{customer: "cus_future_only"}
+	store := &removeOnEmptyClaimStore{
+		done:            make(chan struct{}),
+		claimableResult: false,
+	}
 	w := worker.New(sched)
 
-	err := w.Run(ctx, store)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- w.Run(ctx, store)
+	}()
+
+	<-store.done
+	cancel()
+
+	err := <-errCh
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run error: got %v, want context.Canceled", err)
 	}
@@ -233,6 +264,75 @@ func TestRun_RemovesCustomerWhenEmptyClaimHasNoClaimableWork(t *testing.T) {
 	removed := sched.Removed()
 	if !slices.Equal(removed, []string{"cus_future_only"}) {
 		t.Fatalf("Scheduler.Remove calls: got %v, want [cus_future_only]", removed)
+	}
+	if notified := sched.Notified(); len(notified) != 0 {
+		t.Fatalf("Scheduler.Notify calls: got %v, want none", notified)
+	}
+}
+
+func TestRun_NotifiesCustomerWhenEmptyClaimHasClaimableWork(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sched := &oneShotScheduler{customer: "cus_claimable"}
+	store := &removeOnEmptyClaimStore{
+		done:            make(chan struct{}),
+		claimableResult: true,
+	}
+	w := worker.New(sched)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- w.Run(ctx, store)
+	}()
+
+	<-store.done
+	cancel()
+
+	err := <-errCh
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error: got %v, want context.Canceled", err)
+	}
+	if removed := sched.Removed(); len(removed) != 0 {
+		t.Fatalf("Scheduler.Remove calls: got %v, want none", removed)
+	}
+	if notified := sched.Notified(); !slices.Equal(notified, []string{"cus_claimable"}) {
+		t.Fatalf("Scheduler.Notify calls: got %v, want [cus_claimable]", notified)
+	}
+}
+
+func TestRun_NotifiesCustomerWhenClaimabilityCheckErrors(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sched := &oneShotScheduler{customer: "cus_check_error"}
+	store := &removeOnEmptyClaimStore{
+		done:         make(chan struct{}),
+		claimableErr: errors.New("db down"),
+	}
+	w := worker.New(sched)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- w.Run(ctx, store)
+	}()
+
+	<-store.done
+	cancel()
+
+	err := <-errCh
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error: got %v, want context.Canceled", err)
+	}
+	if removed := sched.Removed(); len(removed) != 0 {
+		t.Fatalf("Scheduler.Remove calls: got %v, want none", removed)
+	}
+	if notified := sched.Notified(); !slices.Equal(notified, []string{"cus_check_error"}) {
+		t.Fatalf("Scheduler.Notify calls: got %v, want [cus_check_error]", notified)
 	}
 }
 

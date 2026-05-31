@@ -426,12 +426,18 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 		}
 		if len(deliveries) == 0 {
 			hasWork, checkErr := store.HasClaimableWork(ctx, customerID)
-			if checkErr == nil {
-				if hasWork {
-					w.Scheduler.Notify(customerID)
-				} else {
-					w.Scheduler.Remove(customerID)
-				}
+			switch {
+			case checkErr != nil:
+				w.Logger.Warn(
+					"claimability check failed; keeping customer in rotation",
+					"customer_id", customerID,
+					"error", checkErr,
+				)
+				w.Scheduler.Notify(customerID)
+			case hasWork:
+				w.Scheduler.Notify(customerID)
+			default:
+				w.Scheduler.Remove(customerID)
 			}
 			continue
 		}
