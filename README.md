@@ -92,7 +92,7 @@ DATABASE_URL=postgres://notifier:notifier@localhost:5432/notifier?sslmode=disabl
 │   └── observe/         # slog, Prometheus, /health, pprof
 ├── bench/
 │   ├── receiver/        # configurable test HTTP server fixture
-│   ├── scenarios/       # the four benchmark scenarios
+│   ├── scenarios/       # the five benchmark scenarios
 │   └── results/         # committed scenario reports
 ├── migrations/          # golang-migrate SQL files
 ├── docker-compose.yml   # Postgres only
