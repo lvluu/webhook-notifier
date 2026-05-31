@@ -283,17 +283,14 @@ func (s *Store) claimNextNWithoutBreaker(ctx context.Context, customerID string,
 		    e.type, e.payload, w.url, w.secret_encrypted,
 		    'in_flight' AS status,
 		    dc.attempt_number, d.next_attempt_at, dc.claimed_at,
-		    d.last_error, d.created_at, d.updated_at,
-		    CASE
-		        WHEN dc.attempt_number > 1 THEN (
-		            SELECT GREATEST(EXTRACT(EPOCH FROM (d.next_attempt_at - da.sent_at)) * 1000, 0)::bigint
-		            FROM delivery_attempts da
-		            WHERE da.delivery_id = d.id
-		            ORDER BY da.attempt_number DESC
-		            LIMIT 1
-		        )
-		        ELSE NULL
-		    END AS previous_delay_millis
+		d.last_error, d.created_at, d.updated_at,
+		(
+		    SELECT GREATEST(EXTRACT(EPOCH FROM (d.next_attempt_at - da.sent_at)) * 1000, 0)::bigint
+		    FROM delivery_attempts da
+		    WHERE da.delivery_id = d.id
+		    ORDER BY da.attempt_number DESC
+		    LIMIT 1
+		) AS previous_delay_millis
 		FROM claimed dc
 		JOIN deliveries d ON d.id = dc.delivery_id
 		JOIN events e ON e.id = d.event_id
@@ -1085,9 +1082,9 @@ func (s *Store) HasClaimableWork(ctx context.Context, customerID string) (bool, 
 }
 
 // Requeue returns a claimed Delivery to the retry pool without recording a
-// delivery_attempt row. Unlike the old approach, attempt_count is not
-// decremented because it was never incremented at claim time — the
-// attempt_number lives in the delivery_claims row until terminal status.
+// delivery_attempt row. The claim row is deleted and the delivery stays at its
+// current attempt_count because the retry budget only advances when a real HTTP
+// POST is recorded in delivery_attempts.
 func (s *Store) Requeue(ctx context.Context, deliveryID string, delay time.Duration) error {
 	if deliveryID == "" {
 		return fmt.Errorf("delivery_id is required")

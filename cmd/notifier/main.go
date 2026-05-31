@@ -10,10 +10,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -24,6 +22,7 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 	"github.com/lvluu/webhook-notifier/internal/observe"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
+	"github.com/lvluu/webhook-notifier/internal/pgdsn"
 	"github.com/lvluu/webhook-notifier/internal/registry"
 	"github.com/lvluu/webhook-notifier/internal/scheduler/roundrobin"
 	"github.com/lvluu/webhook-notifier/internal/worker"
@@ -60,7 +59,7 @@ func main() {
 		// #nosec G101 -- local Docker Compose default only; production supplies DATABASE_URL.
 		dsn = "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable"
 	}
-	dsn = ensurePostgresSessionJITOff(dsn)
+	dsn = pgdsn.WithSessionSetting(dsn, "jit", "off")
 
 	dbConn, err := sql.Open("postgres", dsn)
 	if err != nil {
@@ -154,25 +153,6 @@ func main() {
 		logger.Error("database close error", "error", err)
 	}
 	logger.Info("shutdown complete")
-}
-
-func ensurePostgresSessionJITOff(dsn string) string {
-	u, err := url.Parse(dsn)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return dsn
-	}
-	q := u.Query()
-	opts := q.Get("options")
-	if strings.Contains(opts, "jit=off") {
-		return dsn
-	}
-	if opts == "" {
-		q.Set("options", "-c jit=off")
-	} else {
-		q.Set("options", opts+" -c jit=off")
-	}
-	u.RawQuery = q.Encode()
-	return u.String()
 }
 
 type ingestSubmitter interface {
