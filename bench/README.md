@@ -54,10 +54,21 @@ When no path is provided, the benchmark writes the connection string to `/tmp/be
 ## Scenario Map
 
 - `scenario1` - fairness under load with a late-arriving small customer.
-- `scenario2` - transient and recovering partner failures.
-- `scenario3` - terminal 4xx fast-fail behavior.
+- `scenario2` - retry reliability and recovery under mixed partner failures.
+- `scenario3` - terminal 4xx classification with no retry waste.
 - `scenario4` - horizontal scale, claim atomicity, and idempotency stability.
 - `scenario5` - dead-partner circuit breaker and healthy-customer pool protection.
+
+## What The Bench Suite Proves
+
+The scenarios are split so each assignment requirement gets a targeted proof:
+
+- Fairness: `scenario1`
+- Reliability: `scenario2`, `scenario3`, and `scenario5`
+- Scalability: `scenario4`, with `scenario1` also showing fairness holds under load
+- Breaker protection: `scenario5`
+
+No single scenario proves every requirement. The suite is meant to be read together, with each run covering a different failure mode or load shape.
 
 ## Reports
 

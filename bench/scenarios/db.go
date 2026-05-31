@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -82,6 +83,7 @@ func openBenchDatabase(ctx context.Context) (*sql.DB, func(), error) {
 }
 
 func openBenchDatabaseAtDSN(ctx context.Context, dsn string, migrate bool) (*sql.DB, func(), error) {
+	dsn = ensurePostgresSessionJITOff(dsn)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open postgres: %w", err)
@@ -156,4 +158,23 @@ func writeBenchDSNFile(dsn string) (string, error) {
 		return "", fmt.Errorf("write bench database info file: %w", err)
 	}
 	return path, nil
+}
+
+func ensurePostgresSessionJITOff(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return dsn
+	}
+	q := u.Query()
+	opts := q.Get("options")
+	if strings.Contains(opts, "jit=off") {
+		return dsn
+	}
+	if opts == "" {
+		q.Set("options", "-c jit=off")
+	} else {
+		q.Set("options", opts+" -c jit=off")
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
 }
