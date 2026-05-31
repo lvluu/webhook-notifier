@@ -1,3 +1,13 @@
+x-chaos-common: &chaos-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  depends_on:
+    - notifier
+    - webhook-receiver
+  profiles:
+    - chaos
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -100,9 +110,7 @@ services:
       - "9092:9091"
 
   chaos-whales:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    <<: *chaos-common
     command:
       - chaos
       - -notifier
@@ -119,16 +127,9 @@ services:
       - "2500"
       - -burst
       - "2500"
-    depends_on:
-      - notifier
-      - webhook-receiver
-    profiles:
-      - chaos
 
   chaos-small:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    <<: *chaos-common
     command:
       - chaos
       - -notifier
@@ -145,11 +146,6 @@ services:
       - "500"
       - -burst
       - "500"
-    depends_on:
-      - notifier
-      - webhook-receiver
-    profiles:
-      - chaos
 
   prometheus:
     image: prom/prometheus:latest
