@@ -1,3 +1,4 @@
+// Command chaos emits synthetic webhook events to load test notifier.
 package main
 
 import (
@@ -29,6 +30,7 @@ func main() {
 	receiverURL := flag.String("receiver", "http://localhost:8081", "receiver base URL")
 	customerBase := flag.String("customer-base", "chaos", "customer ID prefix")
 	customerCount := flag.Int("customers", 10, "number of customers")
+	customerWeight := flag.Int("weight", 1, "fairness weight for registered customers")
 	rate := flag.Int("rate", 100, "events per second")
 	burst := flag.Int("burst", 10, "burst size per second")
 	duration := flag.Duration("duration", 0, "run duration (0 = forever)")
@@ -54,7 +56,7 @@ func main() {
 	for _, cid := range customerIDs {
 		body, _ := json.Marshal(map[string]interface{}{
 			"id":     cid,
-			"weight": 1,
+			"weight": *customerWeight,
 			"url":    *receiverURL + "/hooks/" + cid,
 		})
 		resp, err := client.Post(*notifierURL+"/api/customers", "application/json", bytes.NewReader(body))
@@ -62,11 +64,13 @@ func main() {
 			logger.Error("register customer failed", "customer", cid, "error", err)
 			continue
 		}
-		resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			logger.Warn("close register response body", "customer", cid, "error", err)
+		}
 	}
 
 	logger.Info("customers registered, starting event emission",
-		"rate", rate, "burst", burst, "duration", duration,
+		"rate", rate, "burst", burst, "duration", duration, "weight", *customerWeight,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -103,19 +107,14 @@ func main() {
 					go func() {
 						defer batchWg.Done()
 						cid := customerIDs[rand.Intn(len(customerIDs))]
-						eventType := "order.created"
-						if rand.Intn(3) == 0 {
-							eventType = "payment.received"
-						}
-
 						data, _ := json.Marshal(map[string]interface{}{
-							"id":     fmt.Sprintf("evt-%d", time.Now().UnixNano()),
-							"amount": rand.Float64() * 1000,
+							"subscriber_id": fmt.Sprintf("sub-%d", time.Now().UnixNano()),
+							"source":        *customerBase,
 						})
 
 						body, _ := json.Marshal(eventRequest{
 							CustomerID: cid,
-							Type:       eventType,
+							Type:       "subscriber.created",
 							EventTime:  time.Now().UTC().Format(time.RFC3339),
 							Data:       data,
 						})
@@ -125,7 +124,9 @@ func main() {
 							sent.Add(1)
 							return
 						}
-						resp.Body.Close()
+						if err := resp.Body.Close(); err != nil {
+							logger.Warn("close event response body", "customer", cid, "error", err)
+						}
 						sent.Add(1)
 					}()
 				}

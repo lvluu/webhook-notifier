@@ -92,7 +92,7 @@ func (s *Store) Submit(ctx context.Context, event Event) (SubmittedEvent, error)
 		INSERT INTO events (customer_id, type, payload)
 		VALUES ($1, $2, $3)
 		RETURNING id
-	`, event.CustomerID, event.Type, []byte(event.Payload)).Scan(&submitted.EventID)
+	`, event.CustomerID, event.Type, string(event.Payload)).Scan(&submitted.EventID)
 	if err != nil {
 		return SubmittedEvent{}, fmt.Errorf("insert event: %w", err)
 	}

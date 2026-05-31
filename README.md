@@ -53,6 +53,37 @@ just down
 
 Run `just` with no arguments to see all recipes.
 
+## Production-like stack
+
+For a runnable demo closer to production topology, start the full Compose stack:
+
+```bash
+just stack-build
+just stack-up 3
+just stack-smoke
+```
+
+This starts:
+
+- Postgres 17 with migrations applied during first container initialization.
+- PgBouncer in transaction-pooling mode between notifier replicas and Postgres.
+- Three scaled `notifier` replicas by default.
+- Caddy on `localhost:8080` as the host-facing ingress for `POST /api/customers` and `POST /api/events`.
+- A webhook receiver fixture on `localhost:8081`, with receiver metrics on `localhost:9092`.
+- Prometheus on `localhost:9091`.
+- Grafana on `localhost:3000`.
+
+Useful stack commands:
+
+```bash
+just stack-status          # container status
+just stack-logs notifier   # follow one service
+just stack-chaos 3         # opt-in aggressive subscriber.created whale/small load
+just stack-down            # remove containers and volumes
+```
+
+Prometheus discovers scaled notifier replicas through Docker DNS and scrapes each replica's `:9090` metrics endpoint directly. Caddy only fronts the business ingest API; it is not another notifier process and does not change worker scale. The opt-in chaos load emits `subscriber.created` Events from Whale Customers (`weight=3`) and Small Customers (`weight=1`) so fairness and queue-depth metrics map directly to the assignment scenario.
+
 ## Configuration
 
 Defaults work out of the box for local development. Override via environment variables (or a `.env` file in the repo root — `just` auto-loads it):
@@ -94,10 +125,23 @@ DATABASE_URL=postgres://notifier:notifier@localhost:5432/notifier?sslmode=disabl
 │   ├── receiver/        # configurable test HTTP server fixture
 │   ├── scenarios/       # the five benchmark scenarios
 │   └── results/         # committed scenario reports
+├── caddy/               # local ingress config for scaled Compose stack
+├── grafana/             # provisioned datasource and notifier dashboard
+├── prometheus/          # scrape config for notifier + receiver metrics
 ├── migrations/          # golang-migrate SQL files
-├── docker-compose.yml   # Postgres only
+├── docker-compose.yml   # production-like local stack
 └── justfile
 ```
+
+## Demo polish ideas
+
+The current stack demonstrates scale, fairness, delivery, and observability. To make the demo more interview-impressive, the highest-leverage next steps are:
+
+- Add a one-command scripted demo that resets the stack, starts `stack-chaos`, opens Grafana, and prints a short "what to watch" checklist.
+- Add a Grafana row for the fairness story: pending Deliveries by Customer class, scheduler picks, successful Deliveries/sec, and Postgres pool usage side by side.
+- Add a "bad partner" toggle to the receiver so the demo can show healthy Customers continuing while one Integration Partner fails.
+- Add a short terminal summary after chaos runs: total Deliveries, success rate, p95 latency, DLQ count, and receiver request count.
+- Add a Caddy access log panel or simple request counter so the ingress layer is visible without distracting from notifier internals.
 
 ## Working across machines
 

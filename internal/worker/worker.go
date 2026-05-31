@@ -68,6 +68,7 @@ type Worker struct {
 	HostLimiter    *HostLimiter
 	Logger         *slog.Logger
 	RequestTimeout time.Duration
+	MinBatchHint   int
 }
 
 // HTTPConfig configures the shared HTTP client used for webhook Attempts.
@@ -147,6 +148,15 @@ func WithLogger(logger *slog.Logger) Option {
 	return func(w *Worker) { w.Logger = logger }
 }
 
+// WithMinBatchHint sets the minimum batch size used during ClaimNextN.
+func WithMinBatchHint(minBatchHint int) Option {
+	return func(w *Worker) {
+		if minBatchHint > 0 {
+			w.MinBatchHint = minBatchHint
+		}
+	}
+}
+
 // New returns a Worker using scheduler s and optional overrides.
 func New(s scheduler.Scheduler, opts ...Option) *Worker {
 	w := &Worker{
@@ -155,6 +165,7 @@ func New(s scheduler.Scheduler, opts ...Option) *Worker {
 		Scheduler:      s,
 		Logger:         observe.NewLogger(nil),
 		RequestTimeout: 30 * time.Second,
+		MinBatchHint:   32,
 	}
 	for _, opt := range opts {
 		opt(w)
@@ -383,8 +394,7 @@ func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Deli
 }
 
 const (
-	idleBackoff  = 50 * time.Millisecond
-	minBatchHint = 32
+	idleBackoff = 50 * time.Millisecond
 )
 
 // Run continuously claims scheduled Deliveries and processes them.
@@ -417,7 +427,7 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 			continue
 		}
 
-		deliveries, err := store.ClaimNextN(ctx, customerID, max(int(batchHint), minBatchHint))
+		deliveries, err := store.ClaimNextN(ctx, customerID, max(int(batchHint), w.MinBatchHint))
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()

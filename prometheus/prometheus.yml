@@ -4,11 +4,15 @@ global:
 
 scrape_configs:
   - job_name: notifier
-    static_configs:
-      - targets:
-          - notifier:9090
-        labels:
-          service: notifier
+    dns_sd_configs:
+      - names:
+          - notifier
+        type: A
+        port: 9090
+        refresh_interval: 5s
+    relabel_configs:
+      - target_label: service
+        replacement: notifier
 
   - job_name: webhook-receiver
     static_configs:

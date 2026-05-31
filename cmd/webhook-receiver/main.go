@@ -1,3 +1,4 @@
+// Command webhook-receiver mocks partner endpoints for webhook delivery tests.
 package main
 
 import (
@@ -46,7 +47,9 @@ func main() {
 
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "webhook_requests_received_total %d\n", received.Load())
+		if _, err := fmt.Fprintf(w, "webhook_requests_received_total %d\n", received.Load()); err != nil {
+			logger.Warn("write metrics response", "error", err)
+		}
 	})
 
 	server := &http.Server{
@@ -58,7 +61,9 @@ func main() {
 	metricsMux := http.NewServeMux()
 	metricsMux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "webhook_requests_received_total %d\n", received.Load())
+		if _, err := fmt.Fprintf(w, "webhook_requests_received_total %d\n", received.Load()); err != nil {
+			logger.Warn("write metrics endpoint response", "error", err)
+		}
 	})
 	metricsServer := &http.Server{
 		Addr:              *metricsAddr,
@@ -86,5 +91,10 @@ func main() {
 	logger.Info("shutting down", "received", received.Load())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	server.Shutdown(ctx)
+	if err := server.Shutdown(ctx); err != nil {
+		logger.Warn("server shutdown", "error", err)
+	}
+	if err := metricsServer.Shutdown(ctx); err != nil {
+		logger.Warn("metrics server shutdown", "error", err)
+	}
 }

@@ -1,3 +1,4 @@
+// Command notifier runs the webhook notifier service.
 package main
 
 import (
@@ -30,11 +31,11 @@ func main() {
 	db := flag.String("db", "", "DATABASE_URL")
 	addr := flag.String("addr", ":8080", "business HTTP server address")
 	metricsAddr := flag.String("metrics-addr", ":9090", "metrics HTTP server address")
-	workerCount := flag.Int("workers", 16, "number of delivery workers")
-	batchSize := flag.Int("batch-size", 64, "claim batch size")
-	minBatch := flag.Int("min-batch", 32, "minimum batch hint")
-	concurrency := flag.Int("concurrency", 16, "host-level concurrency limit")
+	workerCount := flag.Int("workers", 64, "number of delivery workers")
+	minBatch := flag.Int("min-batch", 32, "minimum claim batch size per customer")
+	concurrency := flag.Int("concurrency", 16, "Host Concurrency Cap")
 	discoveryInterval := flag.Duration("discovery-interval", time.Second, "claimable customer discovery interval")
+	maxConns := flag.Int("max-conns", 0, "max DB connections (0 = workerCount + 10)")
 	flag.Parse()
 
 	logger := observe.NewLogger(os.Stderr)
@@ -43,7 +44,6 @@ func main() {
 		"addr", *addr,
 		"metrics_addr", *metricsAddr,
 		"workers", *workerCount,
-		"batch_size", *batchSize,
 		"min_batch", *minBatch,
 		"concurrency", *concurrency,
 		"discovery_interval", *discoveryInterval,
@@ -55,6 +55,7 @@ func main() {
 		dsn = os.Getenv("DATABASE_URL")
 	}
 	if dsn == "" {
+		// #nosec G101 -- local Docker Compose default only; production supplies DATABASE_URL.
 		dsn = "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable"
 	}
 
@@ -63,14 +64,19 @@ func main() {
 		logger.Error("failed to open database", "error", err)
 		os.Exit(1)
 	}
-	dbConn.SetMaxOpenConns(*workerCount + 10)
-	dbConn.SetMaxIdleConns(*workerCount + 5)
+	if *maxConns > 0 {
+		dbConn.SetMaxOpenConns(*maxConns)
+		dbConn.SetMaxIdleConns(*maxConns)
+	} else {
+		dbConn.SetMaxOpenConns(*workerCount + 10)
+		dbConn.SetMaxIdleConns(*workerCount + 5)
+	}
 	dbConn.SetConnMaxLifetime(30 * time.Minute)
 
 	promRegistry := prometheus.NewRegistry()
 	observe.RegisterMetrics(promRegistry)
 	observe.RegisterPoolGauges(promRegistry, dbConn)
-	observe.RegisterPendingCountGauges(promRegistry, dbConn)
+	observe.SetConfiguredWorkers(*workerCount)
 
 	infra := observe.NewInfraServer(observe.InfraServerConfig{
 		Addr:      *metricsAddr,
@@ -81,14 +87,22 @@ func main() {
 	infraErrCh := infra.Start()
 	logger.Info("infra server started", "addr", *metricsAddr)
 
-	sched := roundrobin.New()
-	outboxStore := outbox.New(dbConn)
-	limiter := worker.NewHostLimiter(worker.HostLimiterConfig{})
-
 	runCtx, cancel := context.WithCancel(context.Background())
+
+	runtimeCfg := loadWorkerRuntimeConfig()
+	runtimeCfg.WorkerCount = *workerCount
+	runtimeCfg.MinBatchHint = *minBatch
+	runtimeCfg.HostConcurrencyCap = *concurrency
+	runtimeCfg.Discovery.Interval = *discoveryInterval
+
+	deliveryRuntime, runtimeErrCh, err := startDeliveryRuntime(runCtx, logger, dbConn, runtimeCfg)
+	if err != nil {
+		logger.Error("failed to start delivery runtime", "error", err)
+		os.Exit(1)
+	}
 	defer cancel()
 
-	ingestStore := ingest.New(dbConn, registry.New(dbConn), sched)
+	ingestStore := ingest.New(dbConn, registry.New(dbConn), deliveryRuntime.scheduler)
 	business := &http.Server{
 		Addr:              *addr,
 		Handler:           newBusinessHandler(logger.With("component", "business-http"), ingestStore, dbConn),
@@ -103,47 +117,6 @@ func main() {
 	}()
 	logger.Info("business server started", "addr", *addr)
 
-	var wg sync.WaitGroup
-	allDone := make(chan struct{})
-
-	for i := 0; i < *workerCount; i++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-			w := worker.New(
-				sched,
-				worker.WithHTTPClient(worker.NewHTTPClient(worker.DefaultHTTPConfig())),
-				worker.WithHostLimiter(limiter),
-				worker.WithRequestTimeout(30*time.Second),
-				worker.WithLogger(logger.With("component", "worker", "worker_id", workerID)),
-			)
-			err := w.Run(runCtx, outboxStore)
-			if err != nil && !errors.Is(err, context.Canceled) {
-				logger.Error("worker error", "worker_id", workerID, "error", err)
-			}
-		}(i + 1)
-	}
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		err := worker.RunClaimableCustomerDiscovery(runCtx, outboxStore, sched, worker.DiscoveryConfig{
-			Interval:     *discoveryInterval,
-			EmptyBackoff: 5 * time.Second,
-			ErrorBackoff: time.Second,
-			MaxBackoff:   30 * time.Second,
-			Limit:        1000,
-		})
-		if err != nil && !errors.Is(err, context.Canceled) {
-			logger.Error("discovery error", "error", err)
-		}
-	}()
-
-	go func() {
-		wg.Wait()
-		close(allDone)
-	}()
-
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
 
@@ -154,8 +127,10 @@ func main() {
 		logger.Error("infra server error", "error", err)
 	case err := <-businessErrCh:
 		logger.Error("business server error", "error", err)
-	case <-allDone:
-		logger.Info("all workers finished")
+	case err, ok := <-runtimeErrCh:
+		if ok && err != nil {
+			logger.Error("delivery runtime error", "error", err)
+		}
 	}
 
 	cancel()
@@ -168,6 +143,9 @@ func main() {
 	}
 	if err := business.Shutdown(shutdownCtx); err != nil {
 		logger.Error("business server shutdown error", "error", err)
+	}
+	if err := deliveryRuntime.Stop(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
+		logger.Error("delivery runtime shutdown error", "error", err)
 	}
 	if err := dbConn.Close(); err != nil {
 		logger.Error("database close error", "error", err)
@@ -291,7 +269,7 @@ func newBusinessHandler(logger *slog.Logger, ing ingestSubmitter, db *sql.DB) ht
 
 		_, err = tx.ExecContext(r.Context(), `
 			INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active)
-			VALUES ($1, $2, '', ARRAY['order.created', 'payment.received'], true)
+			VALUES ($1, $2, '', ARRAY['subscriber.created', 'order.created', 'payment.received'], true)
 		`, cmd.ID, cmd.URL)
 		if err != nil {
 			logger.Error("upsert webhook", "customer_id", cmd.ID, "error", err)
@@ -317,15 +295,19 @@ func newBusinessHandler(logger *slog.Logger, ing ingestSubmitter, db *sql.DB) ht
 }
 
 type workerRuntimeConfig struct {
-	WorkerCount    int
-	RequestTimeout time.Duration
-	Discovery      worker.DiscoveryConfig
+	WorkerCount        int
+	MinBatchHint       int
+	HostConcurrencyCap int
+	RequestTimeout     time.Duration
+	Discovery          worker.DiscoveryConfig
 }
 
 func loadWorkerRuntimeConfig() workerRuntimeConfig {
 	return workerRuntimeConfig{
-		WorkerCount:    16,
-		RequestTimeout: 30 * time.Second,
+		WorkerCount:        64,
+		MinBatchHint:       32,
+		HostConcurrencyCap: 16,
+		RequestTimeout:     30 * time.Second,
 		Discovery: worker.DiscoveryConfig{
 			Interval:     time.Second,
 			EmptyBackoff: 5 * time.Second,
@@ -374,7 +356,9 @@ func startDeliveryRuntime(
 
 	sched := roundrobin.New()
 	outboxStore := outbox.New(db)
-	limiter := worker.NewHostLimiter(worker.HostLimiterConfig{})
+	limiter := worker.NewHostLimiter(worker.HostLimiterConfig{
+		MaxPerHost: cfg.HostConcurrencyCap,
+	})
 
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.WorkerCount; i++ {
@@ -385,12 +369,13 @@ func startDeliveryRuntime(
 				sched,
 				worker.WithHTTPClient(worker.NewHTTPClient(worker.DefaultHTTPConfig())),
 				worker.WithHostLimiter(limiter),
+				worker.WithMinBatchHint(cfg.MinBatchHint),
 				worker.WithRequestTimeout(cfg.RequestTimeout),
 				worker.WithLogger(logger.With("component", "worker", "worker_id", workerID)),
 			)
 			err := w.Run(runCtx, outboxStore)
 			if err != nil && !errors.Is(err, context.Canceled) {
-				trySendRuntimeError(errCh, fmt.Errorf("worker %d: %w", workerID, err))
+				trySendRuntimeError(logger, errCh, fmt.Errorf("worker %d: %w", workerID, err))
 			}
 		}(i + 1)
 	}
@@ -400,7 +385,7 @@ func startDeliveryRuntime(
 		defer wg.Done()
 		err := worker.RunClaimableCustomerDiscovery(runCtx, outboxStore, sched, cfg.Discovery)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			trySendRuntimeError(errCh, fmt.Errorf("discovery: %w", err))
+			trySendRuntimeError(logger, errCh, fmt.Errorf("discovery: %w", err))
 		}
 	}()
 
@@ -417,10 +402,13 @@ func startDeliveryRuntime(
 	}, errCh, nil
 }
 
-func trySendRuntimeError(errCh chan<- error, err error) {
+func trySendRuntimeError(logger *slog.Logger, errCh chan<- error, err error) {
 	select {
 	case errCh <- err:
 	default:
+		if logger != nil {
+			logger.Error("runtime error channel full; dropping runtime error", "error", err)
+		}
 	}
 }
 

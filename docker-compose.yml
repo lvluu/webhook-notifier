@@ -5,6 +5,7 @@ services:
       POSTGRES_USER: notifier
       POSTGRES_PASSWORD: notifier
       POSTGRES_DB: notifier
+      POSTGRES_INITDB_ARGS: "--auth-host=md5"
     ports:
       - "5432:5432"
     healthcheck:
@@ -14,7 +15,8 @@ services:
       retries: 10
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d:ro
+      - ./migrations:/migrations:ro
+      - ./migrations/init.sh:/docker-entrypoint-initdb.d/init.sh:ro
     command:
       - postgres
       - -c
@@ -22,21 +24,24 @@ services:
       - -c
       - shared_buffers=256MB
       - -c
-      - wal_level=minimal
-      - -c
-      - fsync=off
-      - -c
-      - full_page_writes=off
+      - max_wal_senders=0
       - -c
       - synchronous_commit=off
+      - -c
+      - password_encryption=md5
 
   pgbouncer:
-    image: bitnami/pgbouncer:latest
-    ports:
-      - "6432:6432"
-    volumes:
-      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
-      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    image: edoburu/pgbouncer:latest
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: notifier
+      DB_PASSWORD: notifier
+      DB_NAME: notifier
+      POOL_MODE: session
+      DEFAULT_POOL_SIZE: "25"
+      MAX_CLIENT_CONN: "200"
+      LISTEN_PORT: "6432"
     depends_on:
       postgres:
         condition: service_healthy
@@ -55,20 +60,26 @@ services:
       - :9090
       - -workers
       - "64"
-      - -batch-size
-      - "64"
       - -min-batch
       - "32"
       - -concurrency
       - "16"
       - -discovery-interval
       - 5s
-    ports:
-      - "8080:8080"
-      - "9090:9090"
+      - -max-conns
+      - "30"
     depends_on:
       pgbouncer:
         condition: service_started
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - notifier
 
   webhook-receiver:
     build:
@@ -88,7 +99,7 @@ services:
       - "8081:8080"
       - "9092:9091"
 
-  chaos:
+  chaos-whales:
     build:
       context: .
       dockerfile: Dockerfile
@@ -99,15 +110,41 @@ services:
       - -receiver
       - http://webhook-receiver:8080
       - -customer-base
-      - chaos
+      - whale
       - -customers
-      - "100"
+      - "50"
+      - -weight
+      - "3"
+      - -rate
+      - "2500"
+      - -burst
+      - "2500"
+    depends_on:
+      - notifier
+      - webhook-receiver
+    profiles:
+      - chaos
+
+  chaos-small:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - chaos
+      - -notifier
+      - http://notifier:8080
+      - -receiver
+      - http://webhook-receiver:8080
+      - -customer-base
+      - small
+      - -customers
+      - "5000"
+      - -weight
+      - "1"
       - -rate
       - "500"
       - -burst
-      - "100"
-      - -duration
-      - 60s
+      - "500"
     depends_on:
       - notifier
       - webhook-receiver
@@ -127,7 +164,8 @@ services:
       - "3000:3000"
     volumes:
       - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
-      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
 
