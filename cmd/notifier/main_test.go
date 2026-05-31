@@ -57,7 +57,11 @@ func TestBusinessHandler_InvalidJSON(t *testing.T) {
 	t.Parallel()
 
 	logger := slogDiscard()
-	handler := newBusinessHandler(logger, nil)
+	handler := newBusinessHandler(logger, stubIngestSubmitter{
+		submitFn: func(_ context.Context, _ ingest.Event) (ingest.SubmittedEvent, error) {
+			return ingest.SubmittedEvent{}, nil
+		},
+	})
 	req := httptest.NewRequest(http.MethodPost, "/events", strings.NewReader("{"))
 	rr := httptest.NewRecorder()
 
@@ -103,6 +107,52 @@ func TestBusinessHandler_RequiresFlodeskEventShape(t *testing.T) {
 		http.MethodPost,
 		"/events",
 		strings.NewReader(`{"customer_id":"cus_1","type":"subscriber.created","payload":{"x":1}}`),
+	)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestBusinessHandler_RejectsMissingEventName(t *testing.T) {
+	t.Parallel()
+
+	logger := slogDiscard()
+	handler := newBusinessHandler(logger, stubIngestSubmitter{
+		submitFn: func(_ context.Context, _ ingest.Event) (ingest.SubmittedEvent, error) {
+			return ingest.SubmittedEvent{}, nil
+		},
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/events",
+		strings.NewReader(`{"customer_id":"cus_1","event_time":"2026-05-31T00:00:00Z","subscriber":{"id":"sub_1"}}`),
+	)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestBusinessHandler_RejectsMissingEventTime(t *testing.T) {
+	t.Parallel()
+
+	logger := slogDiscard()
+	handler := newBusinessHandler(logger, stubIngestSubmitter{
+		submitFn: func(_ context.Context, _ ingest.Event) (ingest.SubmittedEvent, error) {
+			return ingest.SubmittedEvent{}, nil
+		},
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/events",
+		strings.NewReader(`{"customer_id":"cus_1","event_name":"subscriber.created","subscriber":{"id":"sub_1"}}`),
 	)
 	rr := httptest.NewRecorder()
 

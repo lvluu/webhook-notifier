@@ -296,6 +296,11 @@ func newBusinessHandler(logger *slog.Logger, ingestStore ingestSubmitter) http.H
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if ingestStore == nil {
+			logger.Error("ingest store is not configured")
+			http.Error(w, "service unavailable", http.StatusInternalServerError)
+			return
+		}
 
 		var raw map[string]json.RawMessage
 		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
@@ -317,15 +322,12 @@ func newBusinessHandler(logger *slog.Logger, ingestStore ingestSubmitter) http.H
 			http.Error(w, "event_time is required", http.StatusBadRequest)
 			return
 		}
+		// event_time is contract-required for the Flodesk envelope and remains
+		// part of the persisted event payload after customer_id is removed.
 		delete(raw, "customer_id")
 		payload, err := json.Marshal(raw)
 		if err != nil {
 			http.Error(w, "invalid event payload", http.StatusBadRequest)
-			return
-		}
-		if ingestStore == nil {
-			logger.Error("ingest store is not configured")
-			http.Error(w, "service unavailable", http.StatusInternalServerError)
 			return
 		}
 
