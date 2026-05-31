@@ -129,7 +129,7 @@ func readBenchProfiles() (benchProfilesFile, error) {
 			return
 		}
 
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) //nolint:gosec // path is resolved from the repo-local bench profiles file
 		if err != nil {
 			benchProfilesErr = fmt.Errorf("read bench profiles: %w", err)
 			return

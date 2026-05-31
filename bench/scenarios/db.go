@@ -24,11 +24,11 @@ import (
 // applied.
 func openBenchDatabase(ctx context.Context) (*sql.DB, func(), error) {
 	if dsn := os.Getenv("BENCH_DATABASE_URL"); dsn != "" {
-		slog.Info("using bench database override", "component", "bench-db", "source", "BENCH_DATABASE_URL", "dsn", redactBenchDSN(dsn))
+		slog.Info("using bench database override", "component", "bench-db", "source", "BENCH_DATABASE_URL")
 		return openBenchDatabaseAtDSN(ctx, dsn, false)
 	}
 	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
-		slog.Info("using bench database override", "component", "bench-db", "source", "DATABASE_URL", "dsn", redactBenchDSN(dsn))
+		slog.Info("using bench database override", "component", "bench-db", "source", "DATABASE_URL")
 		return openBenchDatabaseAtDSN(ctx, dsn, false)
 	}
 
@@ -110,7 +110,7 @@ func applyBenchMigrations(ctx context.Context, db *sql.DB) error {
 	}
 	sort.Strings(files)
 	for _, file := range files {
-		sqlBytes, err := os.ReadFile(file)
+		sqlBytes, err := os.ReadFile(file) //nolint:gosec // migration paths come from the repo migrations directory
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", file, err)
 		}
@@ -152,7 +152,7 @@ func writeBenchDSNFile(dsn string) (string, error) {
 	if path == "" {
 		path = filepath.Join(os.TempDir(), "bench-postgres.dsn")
 	}
-	if err := os.WriteFile(path, []byte(dsn+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(dsn+"\n"), 0o600); err != nil { //nolint:gosec // path is either fixed temp dir or caller-provided benchmark info file
 		return "", fmt.Errorf("write bench database info file: %w", err)
 	}
 	return path, nil

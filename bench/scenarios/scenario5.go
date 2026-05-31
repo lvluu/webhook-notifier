@@ -303,7 +303,7 @@ func runScenario5Phase(ctx context.Context, db *sql.DB, profile scenario5Profile
 	cancelDiscovery()
 	cancelWorkers()
 	workerWg.Wait()
-	_ = <-discoveryDone
+	<-discoveryDone
 
 	rs.Close()
 	time.Sleep(250 * time.Millisecond)
