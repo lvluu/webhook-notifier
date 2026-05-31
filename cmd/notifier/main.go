@@ -284,7 +284,11 @@ func trySendRuntimeError(errCh chan<- error, err error) {
 	}
 }
 
-func newBusinessHandler(logger *slog.Logger, ingestStore *ingest.Store) http.Handler {
+type ingestSubmitter interface {
+	Submit(context.Context, ingest.Event) (ingest.SubmittedEvent, error)
+}
+
+func newBusinessHandler(logger *slog.Logger, ingestStore ingestSubmitter) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -293,13 +297,30 @@ func newBusinessHandler(logger *slog.Logger, ingestStore *ingest.Store) http.Han
 			return
 		}
 
-		var req struct {
-			CustomerID string          `json:"customer_id"`
-			Type       string          `json:"type"`
-			Payload    json.RawMessage `json:"payload"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var raw map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		customerID, ok := jsonStringField(raw, "customer_id")
+		if !ok || customerID == "" {
+			http.Error(w, "customer_id is required", http.StatusBadRequest)
+			return
+		}
+		eventName, ok := jsonStringField(raw, "event_name")
+		if !ok || eventName == "" {
+			http.Error(w, "event_name is required", http.StatusBadRequest)
+			return
+		}
+		eventTime, ok := jsonStringField(raw, "event_time")
+		if !ok || eventTime == "" {
+			http.Error(w, "event_time is required", http.StatusBadRequest)
+			return
+		}
+		delete(raw, "customer_id")
+		payload, err := json.Marshal(raw)
+		if err != nil {
+			http.Error(w, "invalid event payload", http.StatusBadRequest)
 			return
 		}
 		if ingestStore == nil {
@@ -309,9 +330,9 @@ func newBusinessHandler(logger *slog.Logger, ingestStore *ingest.Store) http.Han
 		}
 
 		submitted, err := ingestStore.Submit(r.Context(), ingest.Event{
-			CustomerID: req.CustomerID,
-			Type:       req.Type,
-			Payload:    req.Payload,
+			CustomerID: customerID,
+			Type:       eventName,
+			Payload:    payload,
 		})
 		if err != nil {
 			logger.Warn("ingest submit failed", "error", err)
@@ -327,4 +348,16 @@ func newBusinessHandler(logger *slog.Logger, ingestStore *ingest.Store) http.Han
 		w.WriteHeader(http.StatusOK)
 	})
 	return mux
+}
+
+func jsonStringField(raw map[string]json.RawMessage, field string) (string, bool) {
+	rawValue, ok := raw[field]
+	if !ok {
+		return "", false
+	}
+	var value string
+	if err := json.Unmarshal(rawValue, &value); err != nil {
+		return "", false
+	}
+	return value, true
 }

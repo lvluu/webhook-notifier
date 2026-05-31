@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -25,6 +26,17 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+type stubIngestSubmitter struct {
+	submitFn func(context.Context, ingest.Event) (ingest.SubmittedEvent, error)
+}
+
+func (s stubIngestSubmitter) Submit(ctx context.Context, event ingest.Event) (ingest.SubmittedEvent, error) {
+	if s.submitFn == nil {
+		return ingest.SubmittedEvent{}, errors.New("submitFn not configured")
+	}
+	return s.submitFn(ctx, event)
+}
 
 func TestBusinessHandler_MethodNotAllowed(t *testing.T) {
 	t.Parallel()
@@ -64,7 +76,7 @@ func TestBusinessHandler_NilStoreReturnsSanitizedError(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/events",
-		strings.NewReader(`{"customer_id":"cus_1","type":"subscriber.created","payload":{"x":1}}`),
+		strings.NewReader(`{"customer_id":"cus_1","event_name":"subscriber.created","event_time":"2026-05-31T00:00:00Z","subscriber":{"id":"sub_1"}}`),
 	)
 	rr := httptest.NewRecorder()
 
@@ -75,6 +87,69 @@ func TestBusinessHandler_NilStoreReturnsSanitizedError(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(rr.Body.String()), "nil") {
 		t.Fatalf("response should be sanitized, got %q", rr.Body.String())
+	}
+}
+
+func TestBusinessHandler_RequiresFlodeskEventShape(t *testing.T) {
+	t.Parallel()
+
+	logger := slogDiscard()
+	handler := newBusinessHandler(logger, stubIngestSubmitter{
+		submitFn: func(_ context.Context, _ ingest.Event) (ingest.SubmittedEvent, error) {
+			return ingest.SubmittedEvent{}, nil
+		},
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/events",
+		strings.NewReader(`{"customer_id":"cus_1","type":"subscriber.created","payload":{"x":1}}`),
+	)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestBusinessHandler_SubmitsFlodeskEnvelope(t *testing.T) {
+	t.Parallel()
+
+	logger := slogDiscard()
+	var got ingest.Event
+	handler := newBusinessHandler(logger, stubIngestSubmitter{
+		submitFn: func(_ context.Context, event ingest.Event) (ingest.SubmittedEvent, error) {
+			got = event
+			return ingest.SubmittedEvent{EventID: "evt_1", DeliveryIDs: []string{"del_1"}}, nil
+		},
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/events",
+		strings.NewReader(`{"customer_id":"cus_1","event_name":"subscriber.created","event_time":"2026-05-31T00:00:00Z","subscriber":{"id":"sub_1"}}`),
+	)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d, want %d", rr.Code, http.StatusAccepted)
+	}
+	if got.CustomerID != "cus_1" {
+		t.Fatalf("CustomerID: got %q, want %q", got.CustomerID, "cus_1")
+	}
+	if got.Type != "subscriber.created" {
+		t.Fatalf("Type: got %q, want %q", got.Type, "subscriber.created")
+	}
+	if strings.Contains(string(got.Payload), "customer_id") {
+		t.Fatalf("payload should not include customer_id, got %s", string(got.Payload))
+	}
+	if !strings.Contains(string(got.Payload), `"event_name":"subscriber.created"`) {
+		t.Fatalf("payload missing event_name, got %s", string(got.Payload))
+	}
+	if !strings.Contains(string(got.Payload), `"event_time":"2026-05-31T00:00:00Z"`) {
+		t.Fatalf("payload missing event_time, got %s", string(got.Payload))
 	}
 }
 
