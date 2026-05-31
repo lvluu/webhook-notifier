@@ -18,6 +18,7 @@ import (
 
 	_ "github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 	"github.com/lvluu/webhook-notifier/internal/observe"
@@ -37,6 +38,9 @@ func main() {
 	concurrency := flag.Int("concurrency", 16, "Host Concurrency Cap")
 	discoveryInterval := flag.Duration("discovery-interval", time.Second, "claimable customer discovery interval")
 	maxConns := flag.Int("max-conns", 0, "max DB connections (0 = workerCount + 10)")
+	provider := flag.String("provider", "pg", "delivery queue provider: pg or redis")
+	redisAddr := flag.String("redis-addr", "localhost:6379", "Redis address")
+	redisPassword := flag.String("redis-password", "", "Redis password")
 	flag.Parse()
 
 	logger := observe.NewLogger(os.Stderr)
@@ -48,6 +52,7 @@ func main() {
 		"min_batch", *minBatch,
 		"concurrency", *concurrency,
 		"discovery_interval", *discoveryInterval,
+		"provider", *provider,
 	)
 
 	dsn := *db
@@ -97,14 +102,35 @@ func main() {
 	runtimeCfg.HostConcurrencyCap = *concurrency
 	runtimeCfg.Discovery.Interval = *discoveryInterval
 
-	deliveryRuntime, runtimeErrCh, err := startDeliveryRuntime(runCtx, logger, dbConn, runtimeCfg)
+	var redisClient *redis.Client
+	if *provider == "redis" {
+		redisClient = redis.NewClient(&redis.Options{
+			Addr:     *redisAddr,
+			Password: *redisPassword,
+			DB:       0,
+		})
+		if err := redisClient.Ping(runCtx).Err(); err != nil {
+			logger.Error("failed to connect to redis", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	deliveryRuntime, runtimeErrCh, err := startDeliveryRuntime(runCtx, logger, dbConn, runtimeCfg, *provider, redisClient)
 	if err != nil {
 		logger.Error("failed to start delivery runtime", "error", err)
 		os.Exit(1)
 	}
 	defer cancel()
 
-	ingestStore := ingest.New(dbConn, registry.New(dbConn), deliveryRuntime.scheduler)
+	var ingestEnqueuer ingest.DeliveryEnqueuer
+	if *provider == "redis" {
+		ingestEnqueuer = outbox.NewRedisEnqueuer(redisClient)
+	}
+	ingestOpts := []ingest.Option{}
+	if ingestEnqueuer != nil {
+		ingestOpts = append(ingestOpts, ingest.WithDeliveryEnqueuer(ingestEnqueuer))
+	}
+	ingestStore := ingest.New(dbConn, registry.New(dbConn), deliveryRuntime.scheduler, ingestOpts...)
 	business := &http.Server{
 		Addr:              *addr,
 		Handler:           newBusinessHandler(logger.With("component", "business-http"), ingestStore, dbConn),
@@ -350,6 +376,8 @@ func startDeliveryRuntime(
 	logger *slog.Logger,
 	db *sql.DB,
 	cfg workerRuntimeConfig,
+	provider string,
+	rdb *redis.Client,
 ) (*deliveryRuntime, <-chan error, error) {
 	if cfg.WorkerCount < 1 {
 		return nil, nil, fmt.Errorf("worker count must be >= 1")
@@ -360,39 +388,79 @@ func startDeliveryRuntime(
 	errCh := make(chan error, cfg.WorkerCount+1)
 
 	sched := roundrobin.New()
-	outboxStore := outbox.New(db)
 	limiter := worker.NewHostLimiter(worker.HostLimiterConfig{
 		MaxPerHost: cfg.HostConcurrencyCap,
 	})
 
 	var wg sync.WaitGroup
-	for i := 0; i < cfg.WorkerCount; i++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-			w := worker.New(
-				sched,
-				worker.WithHTTPClient(worker.NewHTTPClient(worker.DefaultHTTPConfig())),
-				worker.WithHostLimiter(limiter),
-				worker.WithMinBatchHint(cfg.MinBatchHint),
-				worker.WithRequestTimeout(cfg.RequestTimeout),
-				worker.WithLogger(logger.With("component", "worker", "worker_id", workerID)),
-			)
-			err := w.Run(runCtx, outboxStore)
-			if err != nil && !errors.Is(err, context.Canceled) {
-				trySendRuntimeError(logger, errCh, fmt.Errorf("worker %d: %w", workerID, err))
-			}
-		}(i + 1)
-	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		err := worker.RunClaimableCustomerDiscovery(runCtx, outboxStore, sched, cfg.Discovery)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			trySendRuntimeError(logger, errCh, fmt.Errorf("discovery: %w", err))
+	if provider == "redis" {
+		redisStore := outbox.NewRedisStore(rdb, db,
+			outbox.WithRedisConsumerID("discovery"),
+		)
+		redisStore.RunRetryScheduler(runCtx)
+
+		for i := 0; i < cfg.WorkerCount; i++ {
+			wg.Add(1)
+			go func(workerID int) {
+				defer wg.Done()
+				ws := outbox.NewRedisStore(rdb, db,
+					outbox.WithRedisConsumerID(fmt.Sprintf("worker-%d", workerID)),
+				)
+				w := worker.New(
+					sched,
+					worker.WithHTTPClient(worker.NewHTTPClient(worker.DefaultHTTPConfig())),
+					worker.WithHostLimiter(limiter),
+					worker.WithMinBatchHint(cfg.MinBatchHint),
+					worker.WithRequestTimeout(cfg.RequestTimeout),
+					worker.WithLogger(logger.With("component", "worker", "worker_id", workerID)),
+				)
+				err := w.Run(runCtx, ws)
+				if err != nil && !errors.Is(err, context.Canceled) {
+					trySendRuntimeError(logger, errCh, fmt.Errorf("worker %d: %w", workerID, err))
+				}
+			}(i + 1)
 		}
-	}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := worker.RunClaimableCustomerDiscovery(runCtx, redisStore, sched, cfg.Discovery)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				trySendRuntimeError(logger, errCh, fmt.Errorf("discovery: %w", err))
+			}
+		}()
+	} else {
+		outboxStore := outbox.New(db)
+
+		for i := 0; i < cfg.WorkerCount; i++ {
+			wg.Add(1)
+			go func(workerID int) {
+				defer wg.Done()
+				w := worker.New(
+					sched,
+					worker.WithHTTPClient(worker.NewHTTPClient(worker.DefaultHTTPConfig())),
+					worker.WithHostLimiter(limiter),
+					worker.WithMinBatchHint(cfg.MinBatchHint),
+					worker.WithRequestTimeout(cfg.RequestTimeout),
+					worker.WithLogger(logger.With("component", "worker", "worker_id", workerID)),
+				)
+				err := w.Run(runCtx, outboxStore)
+				if err != nil && !errors.Is(err, context.Canceled) {
+					trySendRuntimeError(logger, errCh, fmt.Errorf("worker %d: %w", workerID, err))
+				}
+			}(i + 1)
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := worker.RunClaimableCustomerDiscovery(runCtx, outboxStore, sched, cfg.Discovery)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				trySendRuntimeError(logger, errCh, fmt.Errorf("discovery: %w", err))
+			}
+		}()
+	}
 
 	go func() {
 		wg.Wait()

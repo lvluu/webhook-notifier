@@ -263,7 +263,7 @@ func TestStartDeliveryRuntime_ColdBootDiscoveryDrainsExistingDeliveries(t *testi
 			MaxBackoff:   50 * time.Millisecond,
 			Limit:        100,
 		},
-	})
+	}, "pg", nil)
 	if err != nil {
 		t.Fatalf("startDeliveryRuntime: %v", err)
 	}

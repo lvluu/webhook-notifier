@@ -87,3 +87,15 @@ scenarios:
       breaker_failure_threshold: 2
       breaker_initial_cooldown: 15s
       breaker_max_cooldown: 15s
+  # Scenario 6: Redis Streams horizontal scale + atomicity + idempotency.
+  scenario6:
+    dev:
+      worker_counts: [1, 2, 4]
+      throughput_deliveries: 1000
+      retry_deliveries: 10
+      breaker_failure_threshold: 0
+    stress:
+      worker_counts: [1, 4, 8, 32, 64]
+      throughput_deliveries: 10000
+      retry_deliveries: 100
+      breaker_failure_threshold: 0
