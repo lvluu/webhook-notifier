@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,6 +38,77 @@ func TestBusinessHandler_MethodNotAllowed(t *testing.T) {
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status: got %d, want %d", rr.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestBusinessHandler_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	logger := slogDiscard()
+	handler := newBusinessHandler(logger, nil)
+	req := httptest.NewRequest(http.MethodPost, "/events", strings.NewReader("{"))
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestBusinessHandler_NilStoreReturnsSanitizedError(t *testing.T) {
+	t.Parallel()
+
+	logger := slogDiscard()
+	handler := newBusinessHandler(logger, nil)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/events",
+		strings.NewReader(`{"customer_id":"cus_1","type":"subscriber.created","payload":{"x":1}}`),
+	)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d, want %d", rr.Code, http.StatusInternalServerError)
+	}
+	if strings.Contains(strings.ToLower(rr.Body.String()), "nil") {
+		t.Fatalf("response should be sanitized, got %q", rr.Body.String())
+	}
+}
+
+func TestLoadWorkerRuntimeConfig_FromEnv(t *testing.T) {
+	t.Setenv("WORKER_COUNT", "3")
+	t.Setenv("WORKER_REQUEST_TIMEOUT", "12s")
+	t.Setenv("DISCOVERY_INTERVAL", "200ms")
+	t.Setenv("DISCOVERY_EMPTY_BACKOFF", "300ms")
+	t.Setenv("DISCOVERY_ERROR_BACKOFF", "400ms")
+	t.Setenv("DISCOVERY_MAX_BACKOFF", "2s")
+	t.Setenv("DISCOVERY_LIMIT", "77")
+
+	cfg := loadWorkerRuntimeConfig()
+
+	if cfg.WorkerCount != 3 {
+		t.Fatalf("WorkerCount: got %d, want 3", cfg.WorkerCount)
+	}
+	if cfg.RequestTimeout != 12*time.Second {
+		t.Fatalf("RequestTimeout: got %s, want 12s", cfg.RequestTimeout)
+	}
+	if cfg.Discovery.Interval != 200*time.Millisecond {
+		t.Fatalf("Discovery.Interval: got %s, want 200ms", cfg.Discovery.Interval)
+	}
+	if cfg.Discovery.EmptyBackoff != 300*time.Millisecond {
+		t.Fatalf("Discovery.EmptyBackoff: got %s, want 300ms", cfg.Discovery.EmptyBackoff)
+	}
+	if cfg.Discovery.ErrorBackoff != 400*time.Millisecond {
+		t.Fatalf("Discovery.ErrorBackoff: got %s, want 400ms", cfg.Discovery.ErrorBackoff)
+	}
+	if cfg.Discovery.MaxBackoff != 2*time.Second {
+		t.Fatalf("Discovery.MaxBackoff: got %s, want 2s", cfg.Discovery.MaxBackoff)
+	}
+	if cfg.Discovery.Limit != 77 {
+		t.Fatalf("Discovery.Limit: got %d, want 77", cfg.Discovery.Limit)
 	}
 }
 

@@ -164,6 +164,18 @@ func envInt(key string, def int) int {
 	return parsed
 }
 
+func envDuration(key string, def time.Duration) time.Duration {
+	value := os.Getenv(key)
+	if value == "" {
+		return def
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return def
+	}
+	return parsed
+}
+
 type workerRuntimeConfig struct {
 	WorkerCount    int
 	RequestTimeout time.Duration
@@ -173,13 +185,13 @@ type workerRuntimeConfig struct {
 func loadWorkerRuntimeConfig() workerRuntimeConfig {
 	return workerRuntimeConfig{
 		WorkerCount:    envInt("WORKER_COUNT", 16),
-		RequestTimeout: 30 * time.Second,
+		RequestTimeout: envDuration("WORKER_REQUEST_TIMEOUT", 30*time.Second),
 		Discovery: worker.DiscoveryConfig{
-			Interval:     time.Second,
-			EmptyBackoff: 5 * time.Second,
-			ErrorBackoff: time.Second,
-			MaxBackoff:   30 * time.Second,
-			Limit:        1000,
+			Interval:     envDuration("DISCOVERY_INTERVAL", time.Second),
+			EmptyBackoff: envDuration("DISCOVERY_EMPTY_BACKOFF", 5*time.Second),
+			ErrorBackoff: envDuration("DISCOVERY_ERROR_BACKOFF", time.Second),
+			MaxBackoff:   envDuration("DISCOVERY_MAX_BACKOFF", 30*time.Second),
+			Limit:        envInt("DISCOVERY_LIMIT", 1000),
 		},
 	}
 }
@@ -238,7 +250,7 @@ func startDeliveryRuntime(
 			)
 			err := w.Run(runCtx, outboxStore)
 			if err != nil && !errors.Is(err, context.Canceled) {
-				errCh <- fmt.Errorf("worker %d: %w", workerID, err)
+				trySendRuntimeError(errCh, fmt.Errorf("worker %d: %w", workerID, err))
 			}
 		}(i + 1)
 	}
@@ -248,7 +260,7 @@ func startDeliveryRuntime(
 		defer wg.Done()
 		err := worker.RunClaimableCustomerDiscovery(runCtx, outboxStore, sched, cfg.Discovery)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			errCh <- fmt.Errorf("discovery: %w", err)
+			trySendRuntimeError(errCh, fmt.Errorf("discovery: %w", err))
 		}
 	}()
 
@@ -263,6 +275,13 @@ func startDeliveryRuntime(
 		cancel:    cancel,
 		done:      done,
 	}, errCh, nil
+}
+
+func trySendRuntimeError(errCh chan<- error, err error) {
+	select {
+	case errCh <- err:
+	default:
+	}
 }
 
 func newBusinessHandler(logger *slog.Logger, ingestStore *ingest.Store) http.Handler {
@@ -283,6 +302,11 @@ func newBusinessHandler(logger *slog.Logger, ingestStore *ingest.Store) http.Han
 			http.Error(w, "invalid json body", http.StatusBadRequest)
 			return
 		}
+		if ingestStore == nil {
+			logger.Error("ingest store is not configured")
+			http.Error(w, "service unavailable", http.StatusInternalServerError)
+			return
+		}
 
 		submitted, err := ingestStore.Submit(r.Context(), ingest.Event{
 			CustomerID: req.CustomerID,
@@ -291,7 +315,7 @@ func newBusinessHandler(logger *slog.Logger, ingestStore *ingest.Store) http.Han
 		})
 		if err != nil {
 			logger.Warn("ingest submit failed", "error", err)
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, "invalid event payload", http.StatusBadRequest)
 			return
 		}
 
