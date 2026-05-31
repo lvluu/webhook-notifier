@@ -112,6 +112,7 @@ flowchart LR
   4. Return to step 1.
 - **SubscriptionRegistry** — Read-only `customer_id → []Webhook`. In-memory LRU with short TTL; cache miss falls back to PG. Avoids hot lookup on every Delivery.
 - **DLQ** (`dead_letters` table) — Terminal Deliveries with reason (`exhausted`, `terminal_4xx`, `terminal_network`).
+  Terminal `deliveries` rows are retained in the live queue only for a bounded operational window, then archived to a time-partitioned history table and removed from `deliveries` so claim indexes do not accumulate unbounded terminal work.
 - **Per-host semaphore** — `map[host]chan struct{}`. Concurrency cap per partner hostname, default 20. Protects partner endpoints from self-inflicted DoS when many Deliveries target the same host.
 - **Webhook circuit breaker** — Persisted per-Webhook breaker state (`closed`, `open`, `half_open`) that keeps chronically failing Webhooks out of claim/discovery until a cooldown permits one probe. Complements RetryPolicy and the Host Concurrency Cap: RetryPolicy decides the outcome of an Attempt, HostLimiter limits local pressure on a hostname, and the breaker stops a broken Webhook from repeatedly occupying worker capacity across many Deliveries.
 
@@ -264,7 +265,7 @@ Dashboards and alerting are pair-session discussion: which p99 thresholds warran
 
 ### Benchmark scenarios
 
-Each scenario lives in `cmd/bench` and emits a markdown report under `bench/results/`. The four scenarios collectively cover all reliability/fairness/scalability claims.
+Each scenario lives in `cmd/bench` and emits a markdown report under `bench/results/`. The five scenarios collectively cover all reliability/fairness/scalability claims.
 
 | Scenario | Setup | Pass criteria | Claims exercised |
 | --- | --- | --- | --- |
@@ -272,6 +273,7 @@ Each scenario lives in `cmd/bench` and emits a markdown report under `bench/resu
 | **2. Transient + recovering partners** | 10 Customers; 100 Events per Customer by default; 3 Webhooks per Customer, one per fake partner hostname. Partner A is healthy, Partner B deterministically returns 5xx for 30% of Attempts, and Partner C returns 503 during a wall-clock outage window before recovering. | 100% terminal; Partner-C Deliveries whose first Attempt occurred during the outage succeed after recovery; Partner-A lifecycle p99 < 2s; no single post-recovery 1s retry bucket contains >25% of Partner-C retry Attempts. | Retry policy, decorrelated jitter (no thundering herd), per-host isolation, Event × Webhook fanout. |
 | **3. Terminal classification (fail-fast on 4xx)** | 1 Customer, 2 Webhooks: one good, one returning 404. 1000 Events. | Broken Webhook Deliveries: 1 Attempt each → `dead` with `reason=terminal_4xx`. Good Webhook: all `succeeded`. | Terminal classification, no retry waste on misconfig. |
 | **4. Horizontal scale + claim atomicity + idempotency** | 10k Deliveries at worker count {1, 4, 8}. Receiver records every `(delivery_id, attempt_number, X-Delivery-Id)` tuple. | Throughput at 8 ≥ 4× throughput at 1. Zero duplicate `(delivery_id, attempt_number)`. `X-Delivery-Id` stable across retries. | Scalability, claim atomicity, idempotency-header stability. |
+| **5. Dead partner circuit breaker + pool protection** | 10 Customers with one Webhook each. Customer 1 targets a hanging endpoint; Customers 2-10 target healthy 2xx endpoints. Compare against a control run with all healthy endpoints. | Dead Webhook opens breaker and later probes via half-open. Healthy Customers' p95 remains within 10% of control after breaker opening. Breaker trip metrics and goroutine return-to-baseline checks pass. | Breaker isolation, noisy-neighbor protection, worker pool resilience under dead partner conditions. |
 
 ## What is deliberately out
 

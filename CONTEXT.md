@@ -32,6 +32,10 @@ _Avoid_: subscription (collides with Subscriber), endpoint, hook config
 The unit of scheduled work: an `(Event × Webhook)` pair. One Event fans out to one Delivery per matching Webhook, so a Customer with many Subscribers and many Webhooks can produce a large Delivery backlog.
 _Avoid_: job, dispatch, notification
 
+**Delivery History**:
+A retained record of a terminal Delivery after it leaves the live scheduling path. Delivery History is for audit, debugging, and reporting; it is not schedulable work.
+_Avoid_: archive, log, old delivery
+
 **Attempt**:
 One HTTP POST against a Delivery's URL. A Delivery typically has 1 Attempt on the happy path and up to N Attempts when retries are needed. Attempts carry the timing, status code, and error class — they are the audit trail.
 _Avoid_: try, request, send
