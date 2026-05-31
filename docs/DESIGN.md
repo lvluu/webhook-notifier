@@ -141,6 +141,8 @@ id (uuid)
 customer_id
 url
 secret (encrypted)
+secret_previous (encrypted, nullable)
+secret_rotated_at (timestamptz, nullable)
 event_types (text[])
 active (bool)
 breaker_state (text)
@@ -178,6 +180,13 @@ stateDiagram-v2
 - **Claim atomicity**: `SELECT ... FOR UPDATE SKIP LOCKED` ensures no two workers ever claim the same Delivery, even across multiple instances of the service.
 - **Crash recovery**: a worker that crashes mid-Delivery leaves the row in `in_flight` with `claimed_at`. A background sweeper (or a `claimed_at < now() - lease_ttl` predicate in the claim query) re-claims abandoned rows. PoC uses the latter — no separate sweeper process.
 - **Idempotency contract**: every Attempt carries `X-Delivery-Id` (stable across retries of one Delivery) and `X-Event-Id` (stable across all Deliveries derived from one Event). Partners dedupe on these.
+
+## Security
+
+- **Replay protection**: partners should reject an Attempt when `abs(now() - X-Signature-Timestamp) > 5 minutes`. The HMAC already binds the timestamp to the body; the freshness window prevents captured requests from being replayed indefinitely.
+- **Secret rotation**: `webhooks.secret_previous` and `webhooks.secret_rotated_at` support a grace window during customer-driven secret rotation. While the rotation is in progress, partners should accept signatures computed with either the current secret or the previous secret. Once the grace window expires, `secret_previous` can be cleared.
+- **Rotation flow**: a Customer updates the Webhook secret through the management API, the notifier stores the new current secret and preserves the prior secret for the configured grace period, and partner verification accepts both values until the rotation window closes.
+- **Signer behavior**: the notifier always signs Attempts with the current secret. Dual-acceptance during rotation is a partner-side verification concern, not a second signing path in the notifier.
 
 ## Scalability mechanics
 
