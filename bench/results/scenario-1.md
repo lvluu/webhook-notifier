@@ -16,14 +16,14 @@ The acceptance criteria are that Small Customers have lifecycle p99 under 2s, th
 | Verdict | Small Customers stayed responsive while the Whale backlog drained |
 | Total duration | 1m41s |
 | Total deliveries | 50503 / 50503 |
-| End-to-end throughput (includes drip) | 501 deliveries/s |
+| End-to-end throughput (includes drip) | 502 deliveries/s |
 | Workers | 8 |
-| All Small lifecycle p99 | 427 ms |
-| Late Small first terminal lifecycle latency | 125 ms |
-| Whale backlog-drain p99 | 68181 ms |
-| Whale backlog-drain max | 68827 ms |
-| Implied whale drain throughput | 726 deliveries/s |
-| Projected 1000-whale drain on one node | 19h7m7s |
+| All Small lifecycle p99 | 391 ms |
+| Late Small first terminal lifecycle latency | 355 ms |
+| Whale backlog-drain p99 | 34408 ms |
+| Whale backlog-drain max | 34721 ms |
+| Implied whale drain throughput | 1440 deliveries/s |
+| Projected 1000-whale drain on one node | 9h38m41s |
 | HTTP attempt p99 | 301 ms |
 
 ## Acceptance Criteria
@@ -31,7 +31,7 @@ The acceptance criteria are that Small Customers have lifecycle p99 under 2s, th
 | Criterion | Observed | Limit | Result |
 |---|---:|---:|---|
 | Full workload created | 50503 deliveries | 50503 deliveries | **PASS** |
-| All Small lifecycle p99 | 427 ms | < 2000 ms | **PASS** |
+| All Small lifecycle p99 | 391 ms | < 2000 ms | **PASS** |
 | Late Small picked within one RR cycle | 3 picks | <= 3 active Customers | **PASS** |
 
 ## Backlog Drain Latency
@@ -41,15 +41,15 @@ The 1000-whale projection is a single-node capacity estimate from this run, not 
 
 | Class | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|
-| **Whale** | 37138 ms | 65720 ms | 68181 ms | 68827 ms |
-| **All Small** | 330 ms | 404 ms | 427 ms | 494 ms |
-| **Late Small** | 124 ms | 125 ms | 125 ms | 125 ms |
+| **Whale** | 18557 ms | 33137 ms | 34408 ms | 34721 ms |
+| **All Small** | 55 ms | 367 ms | 391 ms | 404 ms |
+| **Late Small** | 354 ms | 355 ms | 355 ms | 355 ms |
 
 ## HTTP Attempt Duration
 
 | Scope | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|
-| **All attempts** | 0 ms | 300 ms | 301 ms | 310 ms |
+| **All attempts** | 0 ms | 300 ms | 301 ms | 308 ms |
 
 
 ## Delivery Outcomes

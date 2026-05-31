@@ -2,7 +2,7 @@
 
 ## Description
 
-Profile **stress**: pure-success throughput runs use the same 10000 Delivery workload at worker counts [1 4 8] against a healthy receiver with 10ms per-Attempt latency. A separate retry probe forces 100 Deliveries to fail once with 503 before succeeding, so idempotency headers are validated across multiple Attempts without polluting the throughput measurement with retry backoff.
+Profile **stress**: pure-success throughput runs use the same 10000 Delivery workload at worker counts [1 4 8 32 64] against a healthy receiver with 10ms per-Attempt latency. A separate retry probe forces 100 Deliveries to fail once with 503 before succeeding, so idempotency headers are validated across multiple Attempts without polluting the throughput measurement with retry backoff.
 
 This repo uses just bench-4 as the canonical task command for the issue #15 benchmark.
 
@@ -11,9 +11,11 @@ This repo uses just bench-4 as the canonical task command for the issue #15 benc
 | Profile | stress |
 | Workers | Deliveries | Received Attempts | Duration | Throughput (Deliveries/sec) | Duplicate (delivery_id, attempt_number) tuples |
 |---:|---:|---:|---:|---:|---:|
-| 1 | 10000 | 10000 | 11.538s | 866.67 | 0 |
-| 4 | 10000 | 10000 | 3.658s | 2734.08 | 0 |
-| 8 | 10000 | 10000 | 2.465s | 4056.85 | 0 |
+| 1 | 10000 | 10000 | 12.361s | 809.01 | 0 |
+| 4 | 10000 | 10000 | 4.156s | 2405.88 | 0 |
+| 8 | 10000 | 10000 | 2.112s | 4735.88 | 0 |
+| 32 | 10000 | 10000 | 1.857s | 5384.88 | 0 |
+| 64 | 10000 | 10000 | 2.598s | 3848.92 | 0 |
 
 ## Retry Probe
 
@@ -34,7 +36,7 @@ This repo uses just bench-4 as the canonical task command for the issue #15 benc
 
 | Criterion | Observed | Limit | Result |
 |---|---:|---:|---|
-| Scaling: 8 workers vs 1 workers | 4.68x | >= 4.00x | **PASS** |
+| Scaling: 64 workers vs 1 workers | 4.76x | >= 4.00x | **PASS** |
 | Throughput duplicate tuples | 0 | 0 | **PASS** |
 | Retry probe duplicate tuples | 0 | 0 | **PASS** |
 | Retry probe idempotency header stability | true | true | **PASS** |

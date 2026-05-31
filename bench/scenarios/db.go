@@ -16,6 +16,8 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/lvluu/webhook-notifier/internal/pgdsn"
 )
 
 // openBenchDatabase returns an isolated Postgres database for benchmark runs.
@@ -82,6 +84,7 @@ func openBenchDatabase(ctx context.Context) (*sql.DB, func(), error) {
 }
 
 func openBenchDatabaseAtDSN(ctx context.Context, dsn string, migrate bool) (*sql.DB, func(), error) {
+	dsn = pgdsn.WithSessionSetting(dsn, "jit", "off")
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open postgres: %w", err)

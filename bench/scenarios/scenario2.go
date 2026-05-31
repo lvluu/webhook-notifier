@@ -246,7 +246,7 @@ func scenario2RetryPolicy() retry.RetryPolicy {
 
 func seedScenario2Customers(ctx context.Context, db *sql.DB, customerCount int) error {
 	var sb strings.Builder
-	sb.WriteString("INSERT INTO customers (id, weight) VALUES ")
+	sb.WriteString("INSERT INTO customers (id, class) VALUES ")
 	args := make([]any, 0, customerCount*2)
 	for i := 0; i < customerCount; i++ {
 		if i > 0 {

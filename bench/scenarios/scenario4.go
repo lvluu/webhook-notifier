@@ -256,7 +256,7 @@ func drainScenario4(ctx context.Context, db *sql.DB, numWorkers int, profile sce
 
 func seedScenario4Customer(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `
-		INSERT INTO customers (id, weight)
+		INSERT INTO customers (id, class)
 		VALUES ($1, 1)
 		ON CONFLICT (id) DO NOTHING
 	`, scenario4CustomerID)

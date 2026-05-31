@@ -42,28 +42,28 @@ func smallCustomerID(i int) string {
 
 func seedCustomers(ctx context.Context, db *sql.DB, smallCount int) error {
 	all := []struct {
-		id     string
-		weight int
+		id    string
+		class int
 	}{
 		{whaleCustomerID, 1},
 		{lateSmallID, 1},
 	}
 	for i := 0; i < smallCount; i++ {
 		all = append(all, struct {
-			id     string
-			weight int
+			id    string
+			class int
 		}{smallCustomerID(i), 1})
 	}
 
 	var sb strings.Builder
-	sb.WriteString("INSERT INTO customers (id, weight) VALUES ")
+	sb.WriteString("INSERT INTO customers (id, class) VALUES ")
 	args := make([]any, 0, len(all)*2)
 	for i, c := range all {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
 		_, _ = fmt.Fprintf(&sb, "($%d, $%d)", i*2+1, i*2+2)
-		args = append(args, c.id, c.weight)
+		args = append(args, c.id, c.class)
 	}
 	sb.WriteString(" ON CONFLICT (id) DO NOTHING")
 

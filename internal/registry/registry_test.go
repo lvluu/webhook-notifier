@@ -15,8 +15,8 @@ func TestListActiveForEvent_CacheMissThenHit(t *testing.T) {
 	db := newPostgresDB(t, ctx)
 
 	insertWebhook(t, ctx, db, "cus_1", true, "subscriber.created")
-	insertWebhook(t, ctx, db, "cus_1", true, "subscriber.deleted")
-	insertWebhook(t, ctx, db, "cus_1", false, "subscriber.created")
+	insertWebhookWithURL(t, ctx, db, "cus_1", "https://partner.example/deleted", true, "subscriber.deleted")
+	insertWebhookWithURL(t, ctx, db, "cus_1", "https://partner.example/inactive", false, "subscriber.created")
 	insertWebhook(t, ctx, db, "cus_2", true, "subscriber.created")
 
 	reg := registry.New(db, registry.WithTTL(5*time.Minute))
@@ -65,7 +65,7 @@ func TestListActiveForEvent_TTLExpiry(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)
 
-	id1 := insertWebhook(t, ctx, db, "cus_ttl", true, "subscriber.created")
+	id1 := insertWebhookWithURL(t, ctx, db, "cus_ttl", "https://partner.example/webhook1", true, "subscriber.created")
 
 	reg := registry.New(db, registry.WithTTL(1*time.Second))
 
@@ -82,7 +82,7 @@ func TestListActiveForEvent_TTLExpiry(t *testing.T) {
 	}
 
 	// Add a second webhook while the first is cached
-	id2 := insertWebhook(t, ctx, db, "cus_ttl", true, "subscriber.created")
+	id2 := insertWebhookWithURL(t, ctx, db, "cus_ttl", "https://partner.example/webhook2", true, "subscriber.created")
 
 	// Wait for TTL to expire
 	time.Sleep(1500 * time.Millisecond)
@@ -204,8 +204,8 @@ func TestListActiveForEvent_DifferentEventTypes(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)
 
-	insertWebhook(t, ctx, db, "cus_types", true, "subscriber.created", "subscriber.unsubscribed")
-	insertWebhook(t, ctx, db, "cus_types", true, "subscriber.added_to_segment")
+	insertWebhookWithURL(t, ctx, db, "cus_types", "https://partner.example/multi", true, "subscriber.created", "subscriber.unsubscribed")
+	insertWebhookWithURL(t, ctx, db, "cus_types", "https://partner.example/segment", true, "subscriber.added_to_segment")
 
 	reg := registry.New(db, registry.WithTTL(5*time.Minute))
 
