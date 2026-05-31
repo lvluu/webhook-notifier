@@ -1,4 +1,5 @@
 scenarios:
+  # Scenario 1: fairness under load with a late-arriving small customer.
   scenario1:
     dev:
       worker_count: 4
@@ -18,6 +19,7 @@ scenarios:
       small_drip_interval: 1s
       late_notify_delay: 30s
       breaker_failure_threshold: 0
+  # Scenario 2: transient partner failures plus a recoverable outage window.
   scenario2:
     dev:
       worker_count: 16
@@ -35,6 +37,7 @@ scenarios:
       outage_delay: 5s
       outage_duration: 30s
       breaker_failure_threshold: 0
+  # Scenario 3: terminal 4xx failures should fast-fail without retry churn.
   scenario3:
     dev:
       worker_count: 4
@@ -44,6 +47,7 @@ scenarios:
       worker_count: 32
       event_count: 1000
       breaker_failure_threshold: 0
+  # Scenario 4: horizontal scale, claim atomicity, and idempotency stability.
   scenario4:
     dev:
       worker_counts: [1, 2, 4]
@@ -55,6 +59,7 @@ scenarios:
       throughput_deliveries: 10000
       retry_deliveries: 100
       breaker_failure_threshold: 0
+  # Scenario 5: dead-partner circuit breaker plus healthy-customer pool protection.
   scenario5:
     dev:
       worker_count: 16
