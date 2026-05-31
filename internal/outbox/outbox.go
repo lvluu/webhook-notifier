@@ -309,15 +309,11 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 // ArchiveTerminalDeliveries copies old terminal Deliveries into Delivery History
 // and removes them from the live queue in one transaction.
 func (s *Store) ArchiveTerminalDeliveries(ctx context.Context, retention time.Duration, limit int) (int, error) {
-	if retention < 0 {
-		return 0, fmt.Errorf("retention must be non-negative")
+	if retention <= 0 {
+		return 0, fmt.Errorf("retention must be > 0")
 	}
 	if limit < 1 {
 		return 0, fmt.Errorf("limit must be >= 1")
-	}
-
-	if err := s.ensureDeliveryHistoryPartitions(ctx, retention, limit); err != nil {
-		return 0, err
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -421,54 +417,6 @@ func (s *Store) ArchiveTerminalDeliveries(ctx context.Context, retention time.Du
 	}
 
 	return archived, nil
-}
-
-func (s *Store) ensureDeliveryHistoryPartitions(ctx context.Context, retention time.Duration, limit int) error {
-	rows, err := s.db.QueryContext(ctx, `
-		WITH candidates AS (
-			SELECT COALESCE(dl.final_at, d.updated_at) AS final_at
-			FROM deliveries d
-			LEFT JOIN dead_letters dl ON dl.delivery_id = d.id
-			WHERE d.status IN ('succeeded', 'dead')
-			  AND COALESCE(dl.final_at, d.updated_at) < now() - ($1 * interval '1 millisecond')
-			ORDER BY COALESCE(dl.final_at, d.updated_at), d.id
-			LIMIT $2
-		)
-		SELECT DISTINCT date_trunc('month', final_at)::date
-		FROM candidates
-	`, retention.Milliseconds(), limit)
-	if err != nil {
-		return fmt.Errorf("select delivery history partition months: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var months []time.Time
-	for rows.Next() {
-		var month time.Time
-		if err := rows.Scan(&month); err != nil {
-			return fmt.Errorf("scan delivery history partition month: %w", err)
-		}
-		months = append(months, month)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate delivery history partition months: %w", err)
-	}
-
-	for _, month := range months {
-		start := time.Date(month.Year(), month.Month(), 1, 0, 0, 0, 0, time.UTC)
-		end := start.AddDate(0, 1, 0)
-		name := pq.QuoteIdentifier(fmt.Sprintf("delivery_history_%s", start.Format("200601")))
-		_, err := s.db.ExecContext(ctx, fmt.Sprintf(`
-			CREATE TABLE IF NOT EXISTS %s
-			PARTITION OF delivery_history
-			FOR VALUES FROM (%s) TO (%s)
-		`, name, pq.QuoteLiteral(start.Format(time.RFC3339)), pq.QuoteLiteral(end.Format(time.RFC3339))))
-		if err != nil {
-			return fmt.Errorf("ensure delivery history partition %s: %w", start.Format("2006-01"), err)
-		}
-	}
-
-	return nil
 }
 
 // MarkSucceeded records the successful Attempt and moves the Delivery to

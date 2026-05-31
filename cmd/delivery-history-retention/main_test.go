@@ -17,6 +17,7 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/registry"
 	"github.com/lvluu/webhook-notifier/internal/retry"
+	"github.com/lvluu/webhook-notifier/internal/testutil/retention"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -68,10 +69,10 @@ func TestRunArchivesOldTerminalDeliveriesAndLeavesRecentRows(t *testing.T) {
 		t.Fatalf("MarkSucceeded recent: %v", err)
 	}
 
-	ageTerminalDelivery(t, ctx, db, oldSucceededID, 48*time.Hour)
-	ageTerminalDelivery(t, ctx, db, oldDeadID, 48*time.Hour)
+	retention.AgeTerminalDelivery(t, ctx, db, oldSucceededID, 48*time.Hour)
+	retention.AgeTerminalDelivery(t, ctx, db, oldDeadID, 48*time.Hour)
 
-	archived, err := runArchiveDeliveries(ctx, config{
+	archived, err := runDeliveryHistoryRetention(ctx, config{
 		DatabaseURL: "",
 		Retention:   24 * time.Hour,
 		BatchSize:   1,
@@ -79,7 +80,7 @@ func TestRunArchivesOldTerminalDeliveriesAndLeavesRecentRows(t *testing.T) {
 		Out:         io.Discard,
 	})
 	if err != nil {
-		t.Fatalf("runArchiveDeliveries: %v", err)
+		t.Fatalf("runDeliveryHistoryRetention: %v", err)
 	}
 	if archived != 2 {
 		t.Fatalf("archived count: got %d, want 2", archived)
@@ -178,7 +179,7 @@ func submitOneDeliveryToURL(t *testing.T, ctx context.Context, db *sql.DB, custo
 	t.Helper()
 
 	insertWebhook(t, ctx, db, customerID, url, true, "subscriber.created")
-	submitted, err := ingest.New(db, registry.New(db), noopNotifier{}).Submit(ctx, ingest.Event{
+	submitted, err := ingest.New(db, registry.New(db), retention.NoopNotifier{}).Submit(ctx, ingest.Event{
 		CustomerID: customerID,
 		Type:       "subscriber.created",
 		Payload:    []byte(`{"subscriber_id":"sub_123"}`),
@@ -190,35 +191,6 @@ func submitOneDeliveryToURL(t *testing.T, ctx context.Context, db *sql.DB, custo
 		t.Fatalf("delivery count for %s: got %d, want 1", customerID, len(submitted.DeliveryIDs))
 	}
 	return submitted.DeliveryIDs[0]
-}
-
-func ageTerminalDelivery(t *testing.T, ctx context.Context, db *sql.DB, deliveryID string, age time.Duration) {
-	t.Helper()
-
-	_, err := db.ExecContext(ctx, `
-		UPDATE deliveries
-		SET updated_at = now() - ($2 * interval '1 millisecond')
-		WHERE id = $1
-	`, deliveryID, age.Milliseconds())
-	if err != nil {
-		t.Fatalf("age delivery: %v", err)
-	}
-	_, err = db.ExecContext(ctx, `
-		UPDATE delivery_attempts
-		SET sent_at = now() - ($2 * interval '1 millisecond')
-		WHERE delivery_id = $1
-	`, deliveryID, age.Milliseconds())
-	if err != nil {
-		t.Fatalf("age delivery attempts: %v", err)
-	}
-	_, err = db.ExecContext(ctx, `
-		UPDATE dead_letters
-		SET final_at = now() - ($2 * interval '1 millisecond')
-		WHERE delivery_id = $1
-	`, deliveryID, age.Milliseconds())
-	if err != nil {
-		t.Fatalf("age dead letter: %v", err)
-	}
 }
 
 func assertDeliveryMissing(t *testing.T, ctx context.Context, db *sql.DB, deliveryID string) {
@@ -275,7 +247,3 @@ func assertDeliveryHistory(t *testing.T, ctx context.Context, db *sql.DB, delive
 		t.Fatalf("history final_at not set")
 	}
 }
-
-type noopNotifier struct{}
-
-func (noopNotifier) Notify(customerID string) {}

@@ -1,4 +1,4 @@
-// Command archive-deliveries moves terminal Deliveries into Delivery History.
+// Command delivery-history-retention moves terminal Deliveries into Delivery History.
 package main
 
 import (
@@ -33,19 +33,22 @@ func main() {
 
 	flag.StringVar(&cfg.DatabaseURL, "database-url", cfg.DatabaseURL, "Postgres connection string")
 	flag.DurationVar(&cfg.Retention, "retention", cfg.Retention, "terminal delivery retention before archiving")
-	flag.IntVar(&cfg.BatchSize, "batch-size", cfg.BatchSize, "maximum deliveries to archive per pass")
+	flag.IntVar(&cfg.BatchSize, "batch-size", cfg.BatchSize, "maximum deliveries to retain into history per pass")
 	flag.Parse()
 
 	ctx := context.Background()
-	total, err := runArchiveDeliveries(ctx, cfg)
+	total, err := runDeliveryHistoryRetention(ctx, cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Fprintf(cfg.Out, "archived %d deliveries\n", total)
+	if _, err := fmt.Fprintf(cfg.Out, "archived %d deliveries\n", total); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 }
 
-func runArchiveDeliveries(ctx context.Context, cfg config) (int, error) {
+func runDeliveryHistoryRetention(ctx context.Context, cfg config) (int, error) {
 	if cfg.Out == nil {
 		cfg.Out = io.Discard
 	}

@@ -83,6 +83,6 @@ bench-4:
 bench-5:
     BENCH_PROFILE=stress go run ./cmd/bench scenario5
 
-# archive terminal deliveries into delivery_history
-archive-deliveries:
-    go run ./cmd/archive-deliveries
+# retain terminal deliveries into delivery_history
+delivery-history-retention:
+    go run ./cmd/delivery-history-retention

@@ -19,6 +19,13 @@ CREATE TABLE delivery_history (
     PRIMARY KEY (delivery_id, final_at)
 ) PARTITION BY RANGE (final_at);
 
+CREATE TABLE delivery_history_default
+    PARTITION OF delivery_history DEFAULT;
+
 CREATE INDEX idx_delivery_history_customer_final_at
     ON delivery_history (customer_id, final_at DESC);
 
+ALTER TABLE deliveries SET (
+    autovacuum_vacuum_scale_factor = 0.02,
+    autovacuum_analyze_scale_factor = 0.01
+);

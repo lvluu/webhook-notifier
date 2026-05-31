@@ -26,15 +26,12 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/retry"
 	"github.com/lvluu/webhook-notifier/internal/scheduler"
 	"github.com/lvluu/webhook-notifier/internal/scheduler/roundrobin"
+	"github.com/lvluu/webhook-notifier/internal/testutil/retention"
 	"github.com/lvluu/webhook-notifier/internal/worker"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
-
-type noopNotifier struct{}
-
-func (noopNotifier) Notify(customerID string) {}
 
 type integrationStubScheduler struct{}
 
@@ -49,7 +46,7 @@ func newIntegrationWorker(opts ...worker.Option) *worker.Worker {
 }
 
 func newIngestStore(db *sql.DB) *ingest.Store {
-	return ingest.New(db, registry.New(db), noopNotifier{})
+	return ingest.New(db, registry.New(db), retention.NoopNotifier{})
 }
 
 func TestIngestClaimDeliverHappyPath(t *testing.T) {
@@ -795,9 +792,16 @@ func TestStoreValidatesRequiredIDs(t *testing.T) {
 			},
 		},
 		{
-			name: "archive requires non-negative retention",
+			name: "archive requires positive retention",
 			run: func(ctx context.Context) error {
 				_, err := store.ArchiveTerminalDeliveries(ctx, -time.Millisecond, 10)
+				return err
+			},
+		},
+		{
+			name: "archive rejects zero retention",
+			run: func(ctx context.Context) error {
+				_, err := store.ArchiveTerminalDeliveries(ctx, 0, 10)
 				return err
 			},
 		},
@@ -867,8 +871,8 @@ func TestArchiveTerminalDeliveriesMovesOldTerminalRowsToHistory(t *testing.T) {
 		t.Fatalf("MarkSucceeded recent: %v", err)
 	}
 
-	ageTerminalDelivery(t, ctx, db, oldSucceededID, 48*time.Hour)
-	ageTerminalDelivery(t, ctx, db, oldDeadID, 48*time.Hour)
+	retention.AgeTerminalDelivery(t, ctx, db, oldSucceededID, 48*time.Hour)
+	retention.AgeTerminalDelivery(t, ctx, db, oldDeadID, 48*time.Hour)
 
 	archived, err := store.ArchiveTerminalDeliveries(ctx, 24*time.Hour, 10)
 	if err != nil {
@@ -1519,35 +1523,6 @@ func assertDeliveryHistory(t *testing.T, ctx context.Context, db *sql.DB, delive
 	}
 	if gotAttempts != wantAttempts {
 		t.Fatalf("history attempts: got %d, want %d", gotAttempts, wantAttempts)
-	}
-}
-
-func ageTerminalDelivery(t *testing.T, ctx context.Context, db *sql.DB, deliveryID string, age time.Duration) {
-	t.Helper()
-
-	_, err := db.ExecContext(ctx, `
-		UPDATE deliveries
-		SET updated_at = now() - ($2 * interval '1 millisecond')
-		WHERE id = $1
-	`, deliveryID, age.Milliseconds())
-	if err != nil {
-		t.Fatalf("age delivery: %v", err)
-	}
-	_, err = db.ExecContext(ctx, `
-		UPDATE delivery_attempts
-		SET sent_at = now() - ($2 * interval '1 millisecond')
-		WHERE delivery_id = $1
-	`, deliveryID, age.Milliseconds())
-	if err != nil {
-		t.Fatalf("age delivery attempts: %v", err)
-	}
-	_, err = db.ExecContext(ctx, `
-		UPDATE dead_letters
-		SET final_at = now() - ($2 * interval '1 millisecond')
-		WHERE delivery_id = $1
-	`, deliveryID, age.Milliseconds())
-	if err != nil {
-		t.Fatalf("age dead letter: %v", err)
 	}
 }
 
