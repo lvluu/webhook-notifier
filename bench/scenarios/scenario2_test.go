@@ -13,55 +13,55 @@ import (
 
 func TestScenario2ProfileFromEnvDefaults(t *testing.T) {
 	t.Setenv("BENCH_PROFILE", "")
-	t.Setenv("BENCH_REPORT_PATH", "")
-	t.Setenv("BENCH_SCENARIO2_CUSTOMERS", "")
-	t.Setenv("BENCH_EVENTS_PER_CUSTOMER", "")
-	t.Setenv("BENCH_SUBMIT_INTERVAL", "")
-	t.Setenv("BENCH_WORKERS", "")
 
-	profile := scenario2ProfileFromEnv()
-	if profile.Name != "baseline" {
-		t.Fatalf("name: got %q, want baseline", profile.Name)
+	profile, err := scenario2ProfileFromEnv()
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
 	}
-	if profile.CustomerCount != defaultScenario2CustomerCount {
-		t.Fatalf("customers: got %d, want %d", profile.CustomerCount, defaultScenario2CustomerCount)
+	if profile.Name != "dev" {
+		t.Fatalf("name: got %q, want dev", profile.Name)
 	}
-	if profile.EventsPerCustomer != defaultScenario2EventsPerCustomer {
-		t.Fatalf("events/customer: got %d, want %d", profile.EventsPerCustomer, defaultScenario2EventsPerCustomer)
+	if profile.CustomerCount != 5 {
+		t.Fatalf("customers: got %d, want 5", profile.CustomerCount)
 	}
-	if profile.SubmitInterval != defaultScenario2SubmitInterval {
-		t.Fatalf("submit interval: got %s, want %s", profile.SubmitInterval, defaultScenario2SubmitInterval)
+	if profile.EventsPerCustomer != 20 {
+		t.Fatalf("events/customer: got %d, want 20", profile.EventsPerCustomer)
+	}
+	if profile.SubmitInterval != 5*time.Millisecond {
+		t.Fatalf("submit interval: got %s, want 5ms", profile.SubmitInterval)
+	}
+	if profile.WorkerCount != 16 || profile.OutageDelay != time.Second || profile.OutageDuration != 5*time.Second || profile.BreakerFailureThreshold != 0 {
+		t.Fatalf("dev profile overrides not applied: %+v", profile)
 	}
 }
 
 func TestScenario2ProfileFromEnvOverrides(t *testing.T) {
-	t.Setenv("BENCH_PROFILE", "medium")
-	t.Setenv("BENCH_REPORT_PATH", "bench/results/scenario-2-medium.md")
-	t.Setenv("BENCH_SCENARIO2_CUSTOMERS", "25")
-	t.Setenv("BENCH_EVENTS_PER_CUSTOMER", "200")
-	t.Setenv("BENCH_SUBMIT_INTERVAL", "10ms")
-	t.Setenv("BENCH_WORKERS", "64")
+	t.Setenv("BENCH_PROFILE", "stress")
 
-	profile := scenario2ProfileFromEnv()
-	if profile.Name != "medium" {
-		t.Fatalf("name: got %q, want medium", profile.Name)
+	profile, err := scenario2ProfileFromEnv()
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
 	}
-	if profile.ReportPath != "bench/results/scenario-2-medium.md" {
-		t.Fatalf("report path: got %q", profile.ReportPath)
+	if profile.Name != "stress" {
+		t.Fatalf("name: got %q, want stress", profile.Name)
 	}
-	if profile.CustomerCount != 25 || profile.EventsPerCustomer != 200 || profile.SubmitInterval != 10*time.Millisecond || profile.WorkerCount != 64 {
-		t.Fatalf("profile overrides not applied: %+v", profile)
+	if profile.CustomerCount != 10 || profile.EventsPerCustomer != 100 || profile.SubmitInterval != 20*time.Millisecond || profile.WorkerCount != 64 || profile.OutageDelay != 5*time.Second || profile.OutageDuration != 30*time.Second || profile.BreakerFailureThreshold != 0 {
+		t.Fatalf("stress profile overrides not applied: %+v", profile)
 	}
 }
 
 func TestScenario2RetryPolicySurvivesPartnerCOutage(t *testing.T) {
 	t.Parallel()
 
+	profile, err := scenario2ProfileFromEnv()
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
 	policy := scenario2RetryPolicy()
 	for i := range 100 {
 		key := fmt.Sprintf("delivery-%03d", i)
 		elapsed, attempt, prevDelay := time.Duration(0), 1, time.Duration(0)
-		for elapsed < scenario2OutageDuration {
+		for elapsed < profile.OutageDuration {
 			resp := response(http.StatusServiceUnavailable)
 			delay, terminal, reason := policy.NextWithKey(attempt, prevDelay, resp, nil, key, elapsed)
 			_ = resp.Body.Close()

@@ -241,6 +241,27 @@ func TestLatencyInjection(t *testing.T) {
 	}
 }
 
+func TestRouteHangCancelsWithRequestContext(t *testing.T) {
+	t.Parallel()
+
+	srv := NewServer(WithRouteHang("/hang"))
+	defer srv.Close()
+
+	client := &http.Client{Timeout: 50 * time.Millisecond}
+	start := time.Now()
+	resp, err := client.Post(srv.URL()+"/hang", "application/json", strings.NewReader(`{}`))
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("expected request timeout, got nil error")
+	}
+	if time.Since(start) < 50*time.Millisecond {
+		t.Fatalf("request returned too quickly: %s", time.Since(start))
+	}
+	if got := len(srv.Recorded()); got != 0 {
+		t.Fatalf("recordings: got %d, want 0", got)
+	}
+}
+
 func TestRouteStatusOverridesServer(t *testing.T) {
 	t.Parallel()
 

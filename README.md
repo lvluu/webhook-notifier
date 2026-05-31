@@ -60,6 +60,9 @@ Defaults work out of the box for local development. Override via environment var
 | Var | Default | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | `postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable` | Used by `just migrate` and the service. |
+| `BENCH_DATABASE_URL` | unset | Optional benchmark override; skips the testcontainer bootstrap and uses the provided DSN as-is. |
+| `BENCH_KEEP_DATABASE` | unset | When set to `1` or `true`, keeps the benchmark Postgres container alive after the run. The current connection string is always written to `/tmp/bench-postgres.dsn` unless `BENCH_DATABASE_INFO_FILE` overrides the path. |
+| `BENCH_DATABASE_INFO_FILE` | unset | Optional path for the benchmark Postgres connection string; useful when you want the container left running and the DSN written somewhere explicit. |
 
 A `.env` example:
 

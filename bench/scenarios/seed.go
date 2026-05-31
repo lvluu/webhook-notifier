@@ -4,14 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-	"strconv"
 	"strings"
 
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 )
-
-const defaultDatabaseURL = "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable" // #nosec G101 -- local benchmark database credentials.
 
 // resetBenchData truncates all bench-managed tables so the scenario is
 // idempotent across aborted runs.  The order respects FK constraints:
@@ -38,31 +34,13 @@ const (
 	whaleCustomerID = "whale"
 	lateSmallID     = "small-late"
 	eventType       = "bench.test"
-	whaleDeliveries = 50000
-	smallCount      = 100
-	smallDeliveries = 5
-	lateDeliveries  = 3
-	workerCount     = 8
-	defaultWorkers  = 32
 )
-
-func scenarioWorkerCount() int {
-	raw := os.Getenv("BENCH_WORKERS")
-	if raw == "" {
-		return defaultWorkers
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 1 {
-		return defaultWorkers
-	}
-	return n
-}
 
 func smallCustomerID(i int) string {
 	return fmt.Sprintf("small-%03d", i)
 }
 
-func seedCustomers(ctx context.Context, db *sql.DB) error {
+func seedCustomers(ctx context.Context, db *sql.DB, smallCount int) error {
 	all := []struct {
 		id     string
 		weight int
@@ -96,7 +74,7 @@ func seedCustomers(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func seedWebhooks(ctx context.Context, db *sql.DB, receiverBaseURL string) error {
+func seedWebhooks(ctx context.Context, db *sql.DB, receiverBaseURL string, smallCount int) error {
 	customerIDs := []string{whaleCustomerID, lateSmallID}
 	for i := 0; i < smallCount; i++ {
 		customerIDs = append(customerIDs, smallCustomerID(i))
@@ -122,7 +100,7 @@ func seedWebhooks(ctx context.Context, db *sql.DB, receiverBaseURL string) error
 	return nil
 }
 
-func seedWhaleDeliveries(ctx context.Context, db *sql.DB) (string, error) {
+func seedWhaleDeliveries(ctx context.Context, db *sql.DB, whaleDeliveries int) (string, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", fmt.Errorf("begin tx: %w", err)

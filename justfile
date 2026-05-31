@@ -65,16 +65,20 @@ demo: up migrate
 
 # fairness under load + late-arrival reactivity (issue #12)
 bench-1:
-    go run ./cmd/bench scenario1
+    BENCH_PROFILE=stress go run ./cmd/bench scenario1
 
 # transient + recovering partners (issue #13)
 bench-2:
-    go run ./cmd/bench scenario2
+    BENCH_PROFILE=stress go run ./cmd/bench scenario2
 
 # terminal classification fast-fail (issue #14)
 bench-3:
-    go run ./cmd/bench scenario3
+    BENCH_PROFILE=stress go run ./cmd/bench scenario3
 
 # horizontal scale + atomicity + idempotency (issue #15)
 bench-4:
-    go run ./cmd/bench scenario4
+    BENCH_PROFILE=stress go run ./cmd/bench scenario4
+
+# dead partner circuit breaker + pool protection (issue #27)
+bench-5:
+    BENCH_PROFILE=stress go run ./cmd/bench scenario5
