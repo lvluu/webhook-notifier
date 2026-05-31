@@ -121,12 +121,12 @@ services:
       - whale
       - -customers
       - "50"
-      - -weight
-      - "3"
+      - -class
+      - "1"
       - -rate
       - "2500"
       - -burst
-      - "2500"
+      - "10000"
 
   chaos-small:
     <<: *chaos-common
@@ -140,12 +140,12 @@ services:
       - small
       - -customers
       - "5000"
-      - -weight
+      - -class
       - "1"
       - -rate
       - "500"
       - -burst
-      - "500"
+      - "1000"
 
   prometheus:
     image: prom/prometheus:latest

@@ -30,7 +30,7 @@ func main() {
 	receiverURL := flag.String("receiver", "http://localhost:8081", "receiver base URL")
 	customerBase := flag.String("customer-base", "chaos", "customer ID prefix")
 	customerCount := flag.Int("customers", 10, "number of customers")
-	customerWeight := flag.Int("weight", 1, "fairness weight for registered customers")
+	customerClass := flag.Int("class", 1, "customer class tier for metrics (3=whale, 1=small, 0=paused)")
 	rate := flag.Int("rate", 100, "events per second")
 	burst := flag.Int("burst", 10, "burst size per second")
 	duration := flag.Duration("duration", 0, "run duration (0 = forever)")
@@ -55,9 +55,9 @@ func main() {
 	logger.Info("registering customers", "count", *customerCount, "receiver", *receiverURL)
 	for _, cid := range customerIDs {
 		body, _ := json.Marshal(map[string]interface{}{
-			"id":     cid,
-			"weight": *customerWeight,
-			"url":    *receiverURL + "/hooks/" + cid,
+			"id":    cid,
+			"class": *customerClass,
+			"url":   *receiverURL + "/hooks/" + cid,
 		})
 		resp, err := client.Post(*notifierURL+"/api/customers", "application/json", bytes.NewReader(body))
 		if err != nil {
@@ -70,7 +70,7 @@ func main() {
 	}
 
 	logger.Info("customers registered, starting event emission",
-		"rate", rate, "burst", burst, "duration", duration, "weight", *customerWeight,
+		"rate", rate, "burst", burst, "duration", duration, "class", *customerClass,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())

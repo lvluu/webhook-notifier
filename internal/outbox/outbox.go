@@ -80,7 +80,7 @@ type Delivery struct {
 	EventID        string
 	WebhookID      string
 	CustomerID     string
-	CustomerWeight uint32
+	CustomerClass uint32
 	EventType      string
 	Payload        []byte
 	URL            string
@@ -209,7 +209,7 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 		)
 		SELECT
 		    c.id, c.event_id, c.webhook_id, c.customer_id,
-		    COALESCE(cust.weight, 1),
+		    COALESCE(cust.class, 1),
 		    e.type, e.payload, w.url, w.secret_encrypted,
 		    c.status, c.attempt_count, c.next_attempt_at, c.claimed_at,
 		    c.last_error, c.created_at, c.updated_at,
@@ -237,7 +237,7 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 		var previousDelayMillis sql.NullInt64
 		if err := rows.Scan(
 			&d.ID, &d.EventID, &d.WebhookID, &d.CustomerID,
-			&d.CustomerWeight,
+			&d.CustomerClass,
 			&d.EventType, &d.Payload, &d.URL, &d.Secret,
 			&d.Status, &d.AttemptNumber, &d.NextAttemptAt, &d.ClaimedAt,
 			&d.LastError, &d.CreatedAt, &d.UpdatedAt,

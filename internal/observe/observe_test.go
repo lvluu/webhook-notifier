@@ -195,10 +195,10 @@ func TestMetricsEndpoint_returns_nonzero_after_seed(t *testing.T) {
 	requireContains(`webhook_breaker_trips_total{reason="retryable_5xx"} 1`)
 }
 
-func TestCustomerClassFromWeight(t *testing.T) {
+func TestCustomerClassFromValue(t *testing.T) {
 	tests := []struct {
-		weight uint32
-		want   string
+		class uint32
+		want  string
 	}{
 		{5, "whale"},
 		{3, "whale"},
@@ -207,9 +207,9 @@ func TestCustomerClassFromWeight(t *testing.T) {
 		{0, "paused"},
 	}
 	for _, tt := range tests {
-		got := CustomerClassFromWeight(tt.weight)
+		got := CustomerClassFromValue(tt.class)
 		if got != tt.want {
-			t.Errorf("CustomerClassFromWeight(%d) = %q, want %q", tt.weight, got, tt.want)
+			t.Errorf("CustomerClassFromValue(%d) = %q, want %q", tt.class, got, tt.want)
 		}
 	}
 }

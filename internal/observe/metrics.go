@@ -186,12 +186,12 @@ func initMetrics(reg prometheus.Registerer) {
 	)
 }
 
-// CustomerClassFromWeight derives the customer_class label from a weight value.
-func CustomerClassFromWeight(weight uint32) string {
+// CustomerClassFromValue derives the customer_class label from a class value.
+func CustomerClassFromValue(class uint32) string {
 	switch {
-	case weight >= 3:
+	case class >= 3:
 		return "whale"
-	case weight == 0:
+	case class == 0:
 		return "paused"
 	default:
 		return "small"

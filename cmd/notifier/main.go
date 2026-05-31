@@ -228,7 +228,7 @@ func newBusinessHandler(logger *slog.Logger, ing ingestSubmitter, db *sql.DB) ht
 
 		var cmd struct {
 			ID     string `json:"id"`
-			Weight uint32 `json:"weight"`
+			Class uint32 `json:"class"`
 			URL    string `json:"url"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil {
@@ -257,10 +257,10 @@ func newBusinessHandler(logger *slog.Logger, ing ingestSubmitter, db *sql.DB) ht
 		defer func() { _ = tx.Rollback() }()
 
 		_, err = tx.ExecContext(r.Context(), `
-			INSERT INTO customers (id, weight)
+			INSERT INTO customers (id, class)
 			VALUES ($1, $2)
-			ON CONFLICT (id) DO UPDATE SET weight = EXCLUDED.weight
-		`, cmd.ID, cmd.Weight)
+			ON CONFLICT (id) DO UPDATE SET class = EXCLUDED.class
+		`, cmd.ID, cmd.Class)
 		if err != nil {
 			logger.Error("upsert customer", "customer_id", cmd.ID, "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -283,7 +283,7 @@ func newBusinessHandler(logger *slog.Logger, ing ingestSubmitter, db *sql.DB) ht
 			return
 		}
 
-		logger.Info("customer registered", "customer_id", cmd.ID, "weight", cmd.Weight, "url", cmd.URL)
+		logger.Info("customer registered", "customer_id", cmd.ID, "class", cmd.Class, "url", cmd.URL)
 		w.WriteHeader(http.StatusCreated)
 	})
 

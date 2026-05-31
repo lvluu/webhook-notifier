@@ -357,7 +357,7 @@ func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Deli
 		return ProcessResult{Status: StatusRequeued}
 	}
 
-	customerClass := observe.CustomerClassFromWeight(d.CustomerWeight)
+	customerClass := observe.CustomerClassFromValue(d.CustomerClass)
 	log := w.Logger.With(
 		slog.String("delivery_id", d.ID),
 		slog.String("event_id", d.EventID),
@@ -547,7 +547,7 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 				return fmt.Errorf("batch mark succeeded: %w", err)
 			}
 			for _, item := range succeeded {
-				customerClass := observe.CustomerClassFromWeight(findDeliveryWeight(item.DeliveryID, deliveries))
+				customerClass := observe.CustomerClassFromValue(findDeliveryClass(item.DeliveryID, deliveries))
 				observe.IncDelivery("succeeded")
 				observe.ObserveDeliveryLatency(customerClass, item.Lifetime.Seconds())
 				observe.ObserveAttempts(float64(item.AttemptNumber))
@@ -563,7 +563,7 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 				return fmt.Errorf("batch mark dead: %w", err)
 			}
 			for _, item := range dead {
-				customerClass := observe.CustomerClassFromWeight(findDeliveryWeight(item.DeliveryID, deliveries))
+				customerClass := observe.CustomerClassFromValue(findDeliveryClass(item.DeliveryID, deliveries))
 				observe.IncDelivery("dead")
 				observe.ObserveDeliveryLatency(customerClass, item.Lifetime.Seconds())
 				observe.ObserveAttempts(float64(item.AttemptNumber))
@@ -582,10 +582,10 @@ func (w *Worker) requeueDelay() time.Duration {
 	return 100 * time.Millisecond
 }
 
-func findDeliveryWeight(id string, deliveries []outbox.Delivery) uint32 {
+func findDeliveryClass(id string, deliveries []outbox.Delivery) uint32 {
 	for _, d := range deliveries {
 		if d.ID == id {
-			return d.CustomerWeight
+			return d.CustomerClass
 		}
 	}
 	return 1
