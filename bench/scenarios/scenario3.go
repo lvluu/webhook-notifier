@@ -160,7 +160,7 @@ func RunScenario3(ctx context.Context) error {
 
 func seedScenario3Customer(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `
-		INSERT INTO customers (id, weight)
+		INSERT INTO customers (id, class)
 		VALUES ($1, 1)
 		ON CONFLICT (id) DO NOTHING
 	`, scenario3CustomerID)

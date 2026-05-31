@@ -99,3 +99,22 @@ func insertWebhook(t *testing.T, ctx context.Context, db *sql.DB, customerID str
 	}
 	return id
 }
+
+func insertWebhookWithURL(t *testing.T, ctx context.Context, db *sql.DB, customerID, url string, active bool, eventTypes ...string) string {
+	t.Helper()
+
+	if len(eventTypes) == 0 {
+		t.Fatal("insertWebhook requires at least one event type")
+	}
+
+	var id string
+	err := db.QueryRowContext(ctx, `
+		INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active)
+		VALUES ($1, $2, 'test-secret', $3, $4)
+		RETURNING id
+	`, customerID, url, pq.Array(eventTypes), active).Scan(&id)
+	if err != nil {
+		t.Fatalf("insert webhook: %v", err)
+	}
+	return id
+}

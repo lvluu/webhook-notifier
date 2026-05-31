@@ -355,7 +355,7 @@ func scenario5WebhookPath(i int) string {
 func seedScenario5Customers(ctx context.Context, db *sql.DB, customerCount int) error {
 	ids := scenario5CustomerIDs(customerCount)
 	var sb strings.Builder
-	sb.WriteString("INSERT INTO customers (id, weight) VALUES ")
+	sb.WriteString("INSERT INTO customers (id, class) VALUES ")
 	args := make([]any, 0, len(ids)*2)
 	for i, id := range ids {
 		if i > 0 {

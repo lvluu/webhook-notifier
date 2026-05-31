@@ -22,7 +22,8 @@ const (
 
 	// StatusPending means the Delivery has not been attempted yet.
 	StatusPending DeliveryStatus = "pending"
-	// StatusInFlight means a worker has claimed the Delivery.
+	// StatusInFlight means a worker has claimed the Delivery (logical status
+	// returned to Go code; the delivery row itself never stores 'in_flight').
 	StatusInFlight DeliveryStatus = "in_flight"
 	// StatusFailedRetry means the Delivery is waiting for a retry.
 	StatusFailedRetry DeliveryStatus = "failed_retry"
@@ -150,8 +151,9 @@ func (s *Store) ClaimNext(ctx context.Context, customerID string) (delivery Deli
 }
 
 // ClaimNextN claims up to limit ready Deliveries for customerID using a single
-// CTE that atomically marks rows in_flight and returns them with their joined
-// data. Eliminates the N+1 loop overhead of the original per-row update+select.
+// CTE that atomically inserts a delivery_claims row and returns the claimed
+// deliveries with their joined data. Eliminates the N+1 loop overhead and the
+// dead-tuple bloat from the old UPDATE status='in_flight' approach.
 func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([]Delivery, error) {
 	if customerID == "" {
 		return nil, fmt.Errorf("customer_id is required")
@@ -169,8 +171,9 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 			JOIN webhooks w ON w.id = d.webhook_id
 			WHERE d.customer_id = $1
 			  AND (
-			      (d.status IN ('pending', 'failed_retry') AND d.next_attempt_at <= now())
-			      OR (d.status = 'in_flight' AND d.claimed_at < now() - ($2 * interval '1 millisecond'))
+			      (d.status IN ('pending', 'failed_retry') AND d.next_attempt_at <= now()
+			       AND NOT EXISTS (SELECT 1 FROM delivery_claims dc WHERE dc.delivery_id = d.id))
+			      OR EXISTS (SELECT 1 FROM delivery_claims dc WHERE dc.delivery_id = d.id AND dc.claimed_at < now() - ($2 * interval '1 millisecond'))
 			  )
 			  AND (
 			      w.breaker_state = 'closed'
@@ -192,39 +195,44 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 			RETURNING c.id
 		),
 		claimed AS (
-			UPDATE deliveries
-			SET status = 'in_flight',
-			    attempt_count = attempt_count + 1,
-			    claimed_at = now(),
-			    updated_at = now()
-			WHERE id IN (
-				SELECT c.id
-				FROM candidate c
-				JOIN webhooks w ON w.id = c.webhook_id
-				WHERE w.breaker_state = 'closed'
-				   OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = c.id)
-				   OR c.id IN (SELECT id FROM probe)
-			)
-			RETURNING *
+			INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
+			SELECT c.id,
+			    COALESCE(
+			        (SELECT MAX(da.attempt_number) FROM delivery_attempts da WHERE da.delivery_id = c.id),
+			        0
+			    ) + 1,
+			    now()
+			FROM candidate c
+			JOIN webhooks w ON w.id = c.webhook_id
+			WHERE w.breaker_state = 'closed'
+			   OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = c.id)
+			   OR c.id IN (SELECT id FROM probe)
+			ON CONFLICT (delivery_id) DO UPDATE
+			    SET attempt_number = EXCLUDED.attempt_number,
+			        claimed_at = now()
+			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
+			RETURNING delivery_id, attempt_number, claimed_at
 		)
 		SELECT
-		    c.id, c.event_id, c.webhook_id, c.customer_id,
+		    d.id, d.event_id, d.webhook_id, d.customer_id,
 		    COALESCE(cust.class, 1),
 		    e.type, e.payload, w.url, w.secret_encrypted,
-		    c.status, c.attempt_count, c.next_attempt_at, c.claimed_at,
-		    c.last_error, c.created_at, c.updated_at,
+		    'in_flight' AS status,
+		    dc.attempt_number, d.next_attempt_at, dc.claimed_at,
+		    d.last_error, d.created_at, d.updated_at,
 		    (
-		        SELECT GREATEST(EXTRACT(EPOCH FROM (c.next_attempt_at - da.sent_at)) * 1000, 0)::bigint
+		        SELECT GREATEST(EXTRACT(EPOCH FROM (d.next_attempt_at - da.sent_at)) * 1000, 0)::bigint
 		        FROM delivery_attempts da
-		        WHERE da.delivery_id = c.id
+		        WHERE da.delivery_id = d.id
 		        ORDER BY da.attempt_number DESC
 		        LIMIT 1
 		    ) AS previous_delay_millis
-		FROM claimed c
-		JOIN events e ON e.id = c.event_id
-		JOIN webhooks w ON w.id = c.webhook_id
-		LEFT JOIN customers cust ON cust.id = c.customer_id
-		ORDER BY c.next_attempt_at, c.created_at, c.id
+		FROM claimed dc
+		JOIN deliveries d ON d.id = dc.delivery_id
+		JOIN events e ON e.id = d.event_id
+		JOIN webhooks w ON w.id = d.webhook_id
+		LEFT JOIN customers cust ON cust.id = d.customer_id
+		ORDER BY d.next_attempt_at, d.created_at, d.id
 	`, customerID, s.claimLease.Milliseconds(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("cte claim: %w", err)
@@ -281,8 +289,9 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 				JOIN webhooks w ON w.id = d.webhook_id
 				WHERE d.customer_id > $1
 				  AND (
-				      (d.status IN ('pending', 'failed_retry') AND d.next_attempt_at <= now())
-				      OR (d.status = 'in_flight' AND d.claimed_at < now() - ($2 * interval '1 millisecond'))
+				      (d.status IN ('pending', 'failed_retry') AND d.next_attempt_at <= now()
+				       AND NOT EXISTS (SELECT 1 FROM delivery_claims dc WHERE dc.delivery_id = d.id))
+				      OR EXISTS (SELECT 1 FROM delivery_claims dc WHERE dc.delivery_id = d.id AND dc.claimed_at < now() - ($2 * interval '1 millisecond'))
 				  )
 				  AND (
 				      w.breaker_state = 'closed'
@@ -300,8 +309,9 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 				JOIN webhooks w ON w.id = d.webhook_id
 				WHERE d.customer_id > dc.customer_id
 				  AND (
-				      (d.status IN ('pending', 'failed_retry') AND d.next_attempt_at <= now())
-				      OR (d.status = 'in_flight' AND d.claimed_at < now() - ($2 * interval '1 millisecond'))
+				      (d.status IN ('pending', 'failed_retry') AND d.next_attempt_at <= now()
+				       AND NOT EXISTS (SELECT 1 FROM delivery_claims dc2 WHERE dc2.delivery_id = d.id))
+				      OR EXISTS (SELECT 1 FROM delivery_claims dc2 WHERE dc2.delivery_id = d.id AND dc2.claimed_at < now() - ($2 * interval '1 millisecond'))
 				  )
 				  AND (
 				      w.breaker_state = 'closed'
@@ -459,6 +469,10 @@ func (s *Store) MarkSucceeded(ctx context.Context, deliveryID string, statusCode
 	var breakerClosed bool
 	err := s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int, wid string) error {
 		webhookID = wid
+		if _, err := tx.ExecContext(ctx, `DELETE FROM delivery_claims WHERE delivery_id = $1`, deliveryID); err != nil {
+			return fmt.Errorf("delete claim: %w", err)
+		}
+
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO delivery_attempts (delivery_id, attempt_number, status_code, duration_ms, sent_at)
 			VALUES ($1, $2, $3, $4, now())
@@ -470,10 +484,11 @@ func (s *Store) MarkSucceeded(ctx context.Context, deliveryID string, statusCode
 		_, err = tx.ExecContext(ctx, `
 			UPDATE deliveries
 			SET status = 'succeeded',
+			    attempt_count = $2,
 			    updated_at = now(),
 			    last_error = NULL
 			WHERE id = $1
-		`, deliveryID)
+		`, deliveryID, attemptNumber)
 		if err != nil {
 			return fmt.Errorf("mark delivery succeeded: %w", err)
 		}
@@ -508,6 +523,10 @@ func (s *Store) MarkRetry(ctx context.Context, deliveryID string, statusCode int
 	err := s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int, wid string) error {
 		webhookID = wid
 		tripReason = errorClass
+		if _, err := tx.ExecContext(ctx, `DELETE FROM delivery_claims WHERE delivery_id = $1`, deliveryID); err != nil {
+			return fmt.Errorf("delete claim: %w", err)
+		}
+
 		if err := insertAttempt(ctx, tx, deliveryID, attemptNumber, statusCode, errorClass, duration); err != nil {
 			return err
 		}
@@ -516,7 +535,6 @@ func (s *Store) MarkRetry(ctx context.Context, deliveryID string, statusCode int
 			UPDATE deliveries
 			SET status = 'failed_retry',
 			    next_attempt_at = now() + ($2 * interval '1 millisecond'),
-			    claimed_at = NULL,
 			    last_error = $3,
 			    updated_at = now()
 			WHERE id = $1
@@ -558,6 +576,10 @@ func (s *Store) MarkDead(ctx context.Context, deliveryID string, statusCode int,
 	err := s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int, wid string) error {
 		webhookID = wid
 		tripReason = reason
+		if _, err := tx.ExecContext(ctx, `DELETE FROM delivery_claims WHERE delivery_id = $1`, deliveryID); err != nil {
+			return fmt.Errorf("delete claim: %w", err)
+		}
+
 		if err := insertAttempt(ctx, tx, deliveryID, attemptNumber, statusCode, errorClass, duration); err != nil {
 			return err
 		}
@@ -565,11 +587,11 @@ func (s *Store) MarkDead(ctx context.Context, deliveryID string, statusCode int,
 		_, err := tx.ExecContext(ctx, `
 		UPDATE deliveries
 		SET status = 'dead',
-		    claimed_at = NULL,
-		    last_error = $2,
+		    attempt_count = $2,
+		    last_error = $3,
 		    updated_at = now()
 		WHERE id = $1
-	`, deliveryID, nullIfEmpty(errorClass))
+	`, deliveryID, attemptNumber, nullIfEmpty(errorClass))
 		if err != nil {
 			return fmt.Errorf("mark delivery dead: %w", err)
 		}
@@ -650,19 +672,25 @@ func (s *Store) MarkSucceededBatch(ctx context.Context, items []BatchMarkItem) e
 				$1::text[], $2::int[], $3::bigint[]
 			) AS t(id, status_code, duration_ms)
 		),
+		deleted_claims AS (
+			DELETE FROM delivery_claims dc
+			USING batch b
+			WHERE dc.delivery_id = b.id::uuid
+			RETURNING dc.delivery_id, dc.attempt_number, b.status_code, b.duration_ms
+		),
 		updated AS (
 			UPDATE deliveries d
 			SET status = 'succeeded',
+			    attempt_count = dc.attempt_number,
 			    updated_at = now(),
 			    last_error = NULL
-			FROM batch b
-			WHERE d.id = b.id::uuid
-			  AND d.status = 'in_flight'
-			RETURNING d.id, d.attempt_count, b.status_code, b.duration_ms
-		)
-		, inserted AS (
+			FROM deleted_claims dc
+			WHERE d.id = dc.delivery_id
+			RETURNING d.id, dc.attempt_number, dc.status_code, dc.duration_ms
+		),
+		inserted AS (
 			INSERT INTO delivery_attempts (delivery_id, attempt_number, status_code, duration_ms, sent_at)
-			SELECT id, attempt_count, status_code, duration_ms, now() FROM updated
+			SELECT id, attempt_number, status_code, duration_ms, now() FROM updated
 			RETURNING delivery_id
 		)
 		SELECT COUNT(*) FROM inserted
@@ -735,21 +763,25 @@ func (s *Store) MarkRetryBatch(ctx context.Context, items []BatchMarkItem) error
 				$1::text[], $2::int[], $3::bigint[], $4::text[], $5::bigint[]
 			) AS t(id, status_code, duration_ms, error_class, delay_ms)
 		),
+		deleted_claims AS (
+			DELETE FROM delivery_claims dc
+			USING batch b
+			WHERE dc.delivery_id = b.id::uuid
+			RETURNING dc.delivery_id, dc.attempt_number, b.status_code, b.duration_ms, b.error_class, b.delay_ms
+		),
 		updated AS (
 			UPDATE deliveries d
 			SET status = 'failed_retry',
-			    next_attempt_at = now() + (b.delay_ms * interval '1 millisecond'),
-			    claimed_at = NULL,
-			    last_error = NULLIF(b.error_class, ''),
+			    next_attempt_at = now() + (dc.delay_ms * interval '1 millisecond'),
+			    last_error = NULLIF(dc.error_class, ''),
 			    updated_at = now()
-			FROM batch b
-			WHERE d.id = b.id::uuid
-			  AND d.status = 'in_flight'
-			RETURNING d.id, d.attempt_count, b.status_code, b.duration_ms, b.error_class
-		)
-		, inserted AS (
+			FROM deleted_claims dc
+			WHERE d.id = dc.delivery_id
+			RETURNING d.id, dc.attempt_number, dc.status_code, dc.duration_ms, dc.error_class
+		),
+		inserted AS (
 			INSERT INTO delivery_attempts (delivery_id, attempt_number, status_code, error_class, duration_ms, sent_at)
-			SELECT id, attempt_count, status_code, NULLIF(error_class, ''), duration_ms, now() FROM updated
+			SELECT id, attempt_number, status_code, NULLIF(error_class, ''), duration_ms, now() FROM updated
 			RETURNING delivery_id
 		)
 		SELECT COUNT(*) FROM inserted
@@ -834,25 +866,30 @@ func (s *Store) MarkDeadBatch(ctx context.Context, items []BatchMarkItem) error 
 				$1::text[], $2::int[], $3::bigint[], $4::text[], $5::text[]
 			) AS t(id, status_code, duration_ms, error_class, reason)
 		),
+		deleted_claims AS (
+			DELETE FROM delivery_claims dc
+			USING batch b
+			WHERE dc.delivery_id = b.id::uuid
+			RETURNING dc.delivery_id, dc.attempt_number, b.status_code, b.duration_ms, b.error_class, b.reason
+		),
 		updated AS (
 			UPDATE deliveries d
 			SET status = 'dead',
-			    claimed_at = NULL,
-			    last_error = NULLIF(b.error_class, ''),
+			    attempt_count = dc.attempt_number,
+			    last_error = NULLIF(dc.error_class, ''),
 			    updated_at = now()
-			FROM batch b
-			WHERE d.id = b.id::uuid
-			  AND d.status = 'in_flight'
-			RETURNING d.id, d.attempt_count, b.status_code, b.duration_ms, b.error_class, b.reason
+			FROM deleted_claims dc
+			WHERE d.id = dc.delivery_id
+			RETURNING d.id, dc.attempt_number, dc.status_code, dc.duration_ms, dc.error_class, dc.reason
 		),
 		attempts_inserted AS (
 			INSERT INTO delivery_attempts (delivery_id, attempt_number, status_code, error_class, duration_ms, sent_at)
-			SELECT id, attempt_count, status_code, NULLIF(error_class, ''), duration_ms, now() FROM updated
+			SELECT id, attempt_number, status_code, NULLIF(error_class, ''), duration_ms, now() FROM updated
 			RETURNING delivery_id
 		),
 		dead_letters_inserted AS (
 			INSERT INTO dead_letters (delivery_id, last_error, attempts, reason, final_at)
-			SELECT id, NULLIF(error_class, ''), attempt_count, reason, now() FROM updated
+			SELECT id, NULLIF(error_class, ''), attempt_number, reason, now() FROM updated
 			RETURNING delivery_id
 		)
 		SELECT
@@ -910,8 +947,9 @@ func (s *Store) HasClaimableWork(ctx context.Context, customerID string) (bool, 
 			FROM deliveries d
 			WHERE d.customer_id = $1
 			  AND (
-			      (d.status IN ('pending', 'failed_retry') AND d.next_attempt_at <= now())
-			      OR (d.status = 'in_flight' AND d.claimed_at < now() - ($2 * interval '1 millisecond'))
+			      (d.status IN ('pending', 'failed_retry') AND d.next_attempt_at <= now()
+			       AND NOT EXISTS (SELECT 1 FROM delivery_claims dc WHERE dc.delivery_id = d.id))
+			      OR EXISTS (SELECT 1 FROM delivery_claims dc WHERE dc.delivery_id = d.id AND dc.claimed_at < now() - ($2 * interval '1 millisecond'))
 			  )
 			  AND EXISTS (
 			      SELECT 1
@@ -928,10 +966,10 @@ func (s *Store) HasClaimableWork(ctx context.Context, customerID string) (bool, 
 	return exists, err
 }
 
-// Requeue returns a claimed (in_flight) Delivery to the retry pool without
-// recording a delivery_attempt row. The attempt_count is decremented to cancel
-// the claim-time increment, preserving the invariant that attempt_count
-// reflects real HTTP POSTs against the partner endpoint (ADR-0004).
+// Requeue returns a claimed Delivery to the retry pool without recording a
+// delivery_attempt row. Unlike the old approach, attempt_count is not
+// decremented because it was never incremented at claim time — the
+// attempt_number lives in the delivery_claims row until terminal status.
 func (s *Store) Requeue(ctx context.Context, deliveryID string, delay time.Duration) error {
 	if deliveryID == "" {
 		return fmt.Errorf("delivery_id is required")
@@ -940,13 +978,18 @@ func (s *Store) Requeue(ctx context.Context, deliveryID string, delay time.Durat
 		return fmt.Errorf("delay must be non-negative")
 	}
 
-	return s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, _ int, _ string) error {
+	return s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int, _ string) error {
 		_, err := tx.ExecContext(ctx, `
+			DELETE FROM delivery_claims WHERE delivery_id = $1
+		`, deliveryID)
+		if err != nil {
+			return fmt.Errorf("delete claim: %w", err)
+		}
+
+		_, err = tx.ExecContext(ctx, `
 			UPDATE deliveries
 			SET status = 'failed_retry',
-			    attempt_count = attempt_count - 1,
 			    next_attempt_at = now() + ($2 * interval '1 millisecond'),
-			    claimed_at = NULL,
 			    updated_at = now()
 			WHERE id = $1
 		`, deliveryID, delay.Milliseconds())
@@ -969,11 +1012,11 @@ func (s *Store) withInFlightDelivery(ctx context.Context, deliveryID string, mut
 	var attemptNumber int
 	var webhookID string
 	err = tx.QueryRowContext(ctx, `
-		SELECT attempt_count, webhook_id::text
-		FROM deliveries
-		WHERE id = $1
-		  AND status = 'in_flight'
-		FOR UPDATE
+		SELECT dc.attempt_number, d.webhook_id::text
+		FROM delivery_claims dc
+		JOIN deliveries d ON d.id = dc.delivery_id
+		WHERE dc.delivery_id = $1
+		FOR UPDATE OF dc, d
 	`, deliveryID).Scan(&attemptNumber, &webhookID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("delivery %s is not in flight", deliveryID)

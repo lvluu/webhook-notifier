@@ -145,7 +145,7 @@ func TestClaimNextConcurrentWorkersDoNotDoubleClaim(t *testing.T) {
 	const workerCount = 12
 
 	for i := 0; i < deliveryCount; i++ {
-		insertWebhook(t, ctx, db, "cus_race", "https://partner.example/webhook", true, "subscriber.created")
+		insertWebhook(t, ctx, db, "cus_race", fmt.Sprintf("https://partner-%d.example/webhook", i), true, "subscriber.created")
 	}
 	submitted, err := newIngestStore(db).Submit(ctx, ingest.Event{
 		CustomerID: "cus_race",
@@ -207,8 +207,14 @@ func TestClaimNextConcurrentWorkersDoNotDoubleClaim(t *testing.T) {
 		t.Fatalf("double-claimed deliveries: %v", duplicates)
 	}
 
-	assertStatusCount(t, ctx, db, string(outbox.StatusInFlight), deliveryCount)
-	assertStatusCount(t, ctx, db, string(outbox.StatusPending), 0)
+	var claimCount int
+	err = db.QueryRowContext(ctx, `SELECT count(*) FROM delivery_claims`).Scan(&claimCount)
+	if err != nil {
+		t.Fatalf("count delivery_claims: %v", err)
+	}
+	if claimCount != deliveryCount {
+		t.Fatalf("delivery_claims count: got %d, want %d", claimCount, deliveryCount)
+	}
 }
 
 func TestClaimNextRecoversStaleInFlightDelivery(t *testing.T) {
@@ -246,12 +252,12 @@ func TestClaimNextRecoversStaleInFlightDelivery(t *testing.T) {
 	}
 
 	_, err = db.ExecContext(ctx, `
-		UPDATE deliveries
+		UPDATE delivery_claims
 		SET claimed_at = now() - interval '2 hours'
-		WHERE id = $1
+		WHERE delivery_id = $1
 	`, first.ID)
 	if err != nil {
-		t.Fatalf("age in-flight claim: %v", err)
+		t.Fatalf("age claim: %v", err)
 	}
 
 	recovered, ok, err := store.ClaimNext(ctx, "cus_recover")
@@ -264,8 +270,8 @@ func TestClaimNextRecoversStaleInFlightDelivery(t *testing.T) {
 	if recovered.ID != first.ID {
 		t.Fatalf("recovered delivery: got %s, want %s", recovered.ID, first.ID)
 	}
-	if recovered.AttemptNumber != 2 {
-		t.Fatalf("recovered attempt number: got %d, want 2", recovered.AttemptNumber)
+	if recovered.AttemptNumber != 1 {
+		t.Fatalf("recovered attempt number: got %d, want 1 (no POST was made on the first claim, so attempt_number resets to 1)", recovered.AttemptNumber)
 	}
 }
 
@@ -298,20 +304,18 @@ func TestDiscoverClaimableCustomersMatchesClaimEligibility(t *testing.T) {
 		t.Fatalf("make retry future: %v", err)
 	}
 	_, err = db.ExecContext(ctx, `
-		UPDATE deliveries
-		SET status = 'in_flight', claimed_at = now() - interval '2 hours'
-		WHERE id = $1
+		INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
+		VALUES ($1, 1, now() - interval '2 hours')
 	`, staleInFlight)
 	if err != nil {
-		t.Fatalf("make stale in-flight: %v", err)
+		t.Fatalf("make stale claim: %v", err)
 	}
 	_, err = db.ExecContext(ctx, `
-		UPDATE deliveries
-		SET status = 'in_flight', claimed_at = now()
-		WHERE id = $1
+		INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
+		VALUES ($1, 1, now())
 	`, freshInFlight)
 	if err != nil {
-		t.Fatalf("make fresh in-flight: %v", err)
+		t.Fatalf("make fresh claim: %v", err)
 	}
 
 	got, err := store.DiscoverClaimableCustomers(ctx, "", 10)
@@ -365,12 +369,11 @@ func TestHasClaimableWorkMatchesClaimEligibility(t *testing.T) {
 		t.Fatalf("set future retry: %v", err)
 	}
 	_, err = db.ExecContext(ctx, `
-		UPDATE deliveries
-		SET status = 'in_flight', claimed_at = now()
-		WHERE id = $1
+		INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
+		VALUES ($1, 1, now())
 	`, freshInFlight)
 	if err != nil {
-		t.Fatalf("set fresh in-flight: %v", err)
+		t.Fatalf("set fresh claim: %v", err)
 	}
 	_, err = db.ExecContext(ctx, `
 		UPDATE deliveries
@@ -611,11 +614,8 @@ func TestHalfOpenNonProbeSuccessDoesNotCloseWebhookBreaker(t *testing.T) {
 	}
 	makeWebhookHalfOpen(t, ctx, db, probeDeliveryID)
 	_, err = db.ExecContext(ctx, `
-		UPDATE deliveries
-		SET status = 'in_flight',
-		    attempt_count = 1,
-		    claimed_at = now()
-		WHERE id = $1
+		INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
+		VALUES ($1, 1, now())
 	`, otherDeliveryID)
 	if err != nil {
 		t.Fatalf("force non-probe in-flight: %v", err)
@@ -770,7 +770,7 @@ func TestProcessFlakyReceiverEventuallySucceedsAllDeliveries(t *testing.T) {
 
 	const deliveryCount = 40
 	for i := 0; i < deliveryCount; i++ {
-		insertWebhook(t, ctx, db, "cus_flaky", srv.URL, true, "subscriber.created")
+		insertWebhook(t, ctx, db, "cus_flaky", fmt.Sprintf("%s/%d", srv.URL, i), true, "subscriber.created")
 	}
 	submitted, err := newIngestStore(db).Submit(ctx, ingest.Event{
 		CustomerID: "cus_flaky",
@@ -1032,8 +1032,8 @@ func TestWorkerRun_SchedulerFairnessAcrossCustomers(t *testing.T) {
 	// Whale: 10 deliveries, Small: 10 deliveries.
 	const deliveriesPerCustomer = 10
 	for i := 0; i < deliveriesPerCustomer; i++ {
-		insertWebhook(t, ctx, db, "whale", srv.URL, true, "subscriber.created")
-		insertWebhook(t, ctx, db, "small", srv.URL, true, "subscriber.created")
+		insertWebhook(t, ctx, db, "whale", fmt.Sprintf("%s/whale/%d", srv.URL, i), true, "subscriber.created")
+		insertWebhook(t, ctx, db, "small", fmt.Sprintf("%s/small/%d", srv.URL, i), true, "subscriber.created")
 	}
 
 	whaleSubmitted, err := newIngestStore(db).Submit(ctx, ingest.Event{
@@ -1123,8 +1123,8 @@ func TestWorkerRun_DBDiscoveryFeedsIndependentSchedulers(t *testing.T) {
 	defer srv.Close()
 
 	for i := 0; i < deliveriesPerCustomer; i++ {
-		insertWebhook(t, ctx, db, "cus_a", srv.URL, true, "subscriber.created")
-		insertWebhook(t, ctx, db, "cus_b", srv.URL, true, "subscriber.created")
+		insertWebhook(t, ctx, db, "cus_a", fmt.Sprintf("%s/cus_a/%d", srv.URL, i), true, "subscriber.created")
+		insertWebhook(t, ctx, db, "cus_b", fmt.Sprintf("%s/cus_b/%d", srv.URL, i), true, "subscriber.created")
 	}
 
 	submit := func(customerID string) {
@@ -1233,7 +1233,14 @@ func TestRequeue_ReturnsInFlightToFailedRetryWithoutAttemptRow(t *testing.T) {
 		t.Fatal("ClaimNext: no delivery")
 	}
 
-	assertDeliveryStatus(t, ctx, db, claimed.ID, "in_flight")
+	var claimExists bool
+	err = db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM delivery_claims WHERE delivery_id = $1)`, claimed.ID).Scan(&claimExists)
+	if err != nil {
+		t.Fatalf("check claim exists: %v", err)
+	}
+	if !claimExists {
+		t.Fatal("delivery_claims row not found after claim")
+	}
 	if claimed.AttemptNumber != 1 {
 		t.Fatalf("attempt_number after claim: got %d, want 1", claimed.AttemptNumber)
 	}
@@ -1632,10 +1639,10 @@ func assertDeadLetter(t *testing.T, ctx context.Context, db *sql.DB, deliveryID,
 func scheduledRetryDelay(t *testing.T, ctx context.Context, db *sql.DB, deliveryID string) time.Duration {
 	t.Helper()
 
-	var delayMillis int64
+	var delaySeconds float64
 	err := db.QueryRowContext(ctx, `
 		SELECT COALESCE(
-		    GREATEST(EXTRACT(EPOCH FROM (deliveries.next_attempt_at - delivery_attempts.sent_at)) * 1000, 0)::bigint,
+		    GREATEST(EXTRACT(EPOCH FROM (deliveries.next_attempt_at - delivery_attempts.sent_at)), 0),
 		    0
 		)
 		FROM deliveries
@@ -1643,12 +1650,12 @@ func scheduledRetryDelay(t *testing.T, ctx context.Context, db *sql.DB, delivery
 		WHERE deliveries.id = $1
 		ORDER BY delivery_attempts.attempt_number DESC
 		LIMIT 1
-	`, deliveryID).Scan(&delayMillis)
+	`, deliveryID).Scan(&delaySeconds)
 	if err != nil {
 		t.Fatalf("select scheduled retry delay: %v", err)
 	}
 
-	return time.Duration(delayMillis) * time.Millisecond
+	return time.Duration(delaySeconds * float64(time.Second))
 }
 
 func waitForClaim(t *testing.T, ctx context.Context, store *outbox.Store, customerID string, timeout time.Duration) outbox.Delivery {
