@@ -94,7 +94,7 @@ func TestBusinessHandler_NilStoreReturnsSanitizedError(t *testing.T) {
 	}
 }
 
-func TestBusinessHandler_RequiresFlodeskEventShape(t *testing.T) {
+func TestBusinessHandler_RequiresExpectedEventShape(t *testing.T) {
 	t.Parallel()
 
 	logger := slogDiscard()
@@ -163,7 +163,7 @@ func TestBusinessHandler_RejectsMissingEventTime(t *testing.T) {
 	}
 }
 
-func TestBusinessHandler_SubmitsFlodeskEnvelope(t *testing.T) {
+func TestBusinessHandler_SubmitsExpectedEnvelope(t *testing.T) {
 	t.Parallel()
 
 	logger := slogDiscard()
@@ -200,6 +200,30 @@ func TestBusinessHandler_SubmitsFlodeskEnvelope(t *testing.T) {
 	}
 	if !strings.Contains(string(got.Payload), `"event_time":"2026-05-31T00:00:00Z"`) {
 		t.Fatalf("payload missing event_time, got %s", string(got.Payload))
+	}
+}
+
+func TestCustomerRegistration_IsIdempotentForWebhookRows(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	handler := newBusinessHandler(slogDiscard(), stubIngestSubmitter{
+		submitFn: func(_ context.Context, _ ingest.Event) (ingest.SubmittedEvent, error) {
+			return ingest.SubmittedEvent{}, nil
+		},
+	}, db)
+
+	body := `{"id":"cus_repeat","class":1,"url":"https://partner.example/webhook"}`
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/customers", strings.NewReader(body))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("request %d status: got %d, want %d", i+1, rr.Code, http.StatusCreated)
+		}
+	}
+
+	if got := countWebhooksForCustomerURL(t, ctx, db, "cus_repeat", "https://partner.example/webhook"); got != 1 {
+		t.Fatalf("webhook rows for customer/url: got %d, want 1", got)
 	}
 }
 
@@ -278,6 +302,20 @@ func countSucceededForCustomer(t *testing.T, ctx context.Context, db *sql.DB, cu
 	`, customerID, outbox.StatusSucceeded).Scan(&n)
 	if err != nil {
 		t.Fatalf("count succeeded for %s: %v", customerID, err)
+	}
+	return n
+}
+
+func countWebhooksForCustomerURL(t *testing.T, ctx context.Context, db *sql.DB, customerID, webhookURL string) int {
+	t.Helper()
+	var n int
+	err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM webhooks
+		WHERE customer_id = $1 AND url = $2
+	`, customerID, webhookURL).Scan(&n)
+	if err != nil {
+		t.Fatalf("count webhooks for %s/%s: %v", customerID, webhookURL, err)
 	}
 	return n
 }

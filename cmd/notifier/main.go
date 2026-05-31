@@ -227,9 +227,9 @@ func newBusinessHandler(logger *slog.Logger, ing ingestSubmitter, db *sql.DB) ht
 		}
 
 		var cmd struct {
-			ID     string `json:"id"`
+			ID    string `json:"id"`
 			Class uint32 `json:"class"`
-			URL    string `json:"url"`
+			URL   string `json:"url"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil {
 			http.Error(w, "invalid json body", http.StatusBadRequest)
@@ -270,6 +270,9 @@ func newBusinessHandler(logger *slog.Logger, ing ingestSubmitter, db *sql.DB) ht
 		_, err = tx.ExecContext(r.Context(), `
 			INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active)
 			VALUES ($1, $2, '', ARRAY['subscriber.created', 'order.created', 'payment.received'], true)
+			ON CONFLICT (customer_id, url) DO UPDATE
+			SET active = true,
+			    event_types = EXCLUDED.event_types
 		`, cmd.ID, cmd.URL)
 		if err != nil {
 			logger.Error("upsert webhook", "customer_id", cmd.ID, "error", err)

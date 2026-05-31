@@ -76,23 +76,23 @@ func normalizeBreakerConfig(config BreakerConfig) BreakerConfig {
 
 // Delivery is a claimed outbox row with enough data for the worker to POST it.
 type Delivery struct {
-	ID             string
-	EventID        string
-	WebhookID      string
-	CustomerID     string
+	ID            string
+	EventID       string
+	WebhookID     string
+	CustomerID    string
 	CustomerClass uint32
-	EventType      string
-	Payload        []byte
-	URL            string
-	Secret         string
-	Status         DeliveryStatus
-	AttemptNumber  int
-	PreviousDelay  time.Duration
-	NextAttemptAt  time.Time
-	ClaimedAt      time.Time
-	LastError      sql.NullString
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	EventType     string
+	Payload       []byte
+	URL           string
+	Secret        string
+	Status        DeliveryStatus
+	AttemptNumber int
+	PreviousDelay time.Duration
+	NextAttemptAt time.Time
+	ClaimedAt     time.Time
+	LastError     sql.NullString
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 // Store claims and mutates Delivery rows in Postgres.

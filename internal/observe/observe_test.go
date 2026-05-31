@@ -137,7 +137,6 @@ func TestRegisterPoolGauges_registers_six_families(t *testing.T) {
 	}
 }
 
-
 func TestMetricsEndpoint_returns_nonzero_after_seed(t *testing.T) {
 	ResetMetricsForTest()
 	reg := prometheus.NewRegistry()
