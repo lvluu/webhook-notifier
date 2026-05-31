@@ -19,19 +19,54 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/worker"
 )
 
+type scenario1Profile struct {
+	Name                    string
+	WorkerCount             int
+	WhaleDeliveries         int
+	SmallCount              int
+	SmallDeliveries         int
+	LateDeliveries          int
+	SmallDripInterval       time.Duration
+	LateNotifyDelay         time.Duration
+	BreakerFailureThreshold int
+}
+
+func scenario1ProfileFromEnv() (scenario1Profile, error) {
+	raw, name, err := loadBenchProfileConfig("scenario1")
+	if err != nil {
+		return scenario1Profile{}, err
+	}
+	if raw.WorkerCount < 1 || raw.WhaleDeliveries < 1 || raw.SmallCount < 1 || raw.SmallDeliveries < 1 || raw.LateDeliveries < 1 {
+		return scenario1Profile{}, fmt.Errorf("scenario1 profile %q has invalid positive counts", name)
+	}
+	if raw.SmallDripInterval.Duration() <= 0 || raw.LateNotifyDelay.Duration() <= 0 {
+		return scenario1Profile{}, fmt.Errorf("scenario1 profile %q has invalid positive durations", name)
+	}
+	if raw.BreakerFailureThreshold < 0 {
+		return scenario1Profile{}, fmt.Errorf("scenario1 profile %q has invalid breaker threshold", name)
+	}
+
+	return scenario1Profile{
+		Name:                    name,
+		WorkerCount:             raw.WorkerCount,
+		WhaleDeliveries:         raw.WhaleDeliveries,
+		SmallCount:              raw.SmallCount,
+		SmallDeliveries:         raw.SmallDeliveries,
+		LateDeliveries:          raw.LateDeliveries,
+		SmallDripInterval:       raw.SmallDripInterval.Duration(),
+		LateNotifyDelay:         raw.LateNotifyDelay.Duration(),
+		BreakerFailureThreshold: raw.BreakerFailureThreshold,
+	}, nil
+}
+
 // RunScenario1 executes Scenario 1: fairness under load with a late-arriving
 // Small Customer.
 func RunScenario1(ctx context.Context) error {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		dsn = defaultDatabaseURL
-	}
-	db, err := sql.Open("postgres", dsn)
+	db, cleanup, err := openBenchDatabase(ctx)
 	if err != nil {
-		return fmt.Errorf("open db: %w", err)
+		return fmt.Errorf("open bench db: %w", err)
 	}
-	defer func() { _ = db.Close() }()
-
+	defer cleanup()
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping db: %w", err)
 	}
@@ -40,6 +75,11 @@ func RunScenario1(ctx context.Context) error {
 		return fmt.Errorf("reset bench data: %w", err)
 	}
 	slog.Info("reset bench data from previous runs")
+
+	profile, err := scenario1ProfileFromEnv()
+	if err != nil {
+		return fmt.Errorf("load profile: %w", err)
+	}
 
 	rs := receiver.NewServer(
 		// Baseline network latency: 15% of requests experience 200–500ms delay,
@@ -53,19 +93,21 @@ func RunScenario1(ctx context.Context) error {
 	plainSched := roundrobin.New()
 	instrSched := newInstrumentedScheduler(plainSched)
 	ingestStore := ingest.New(db, reg, instrSched)
-	outboxStore := outbox.New(db)
+	outboxStore := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
+		FailureThreshold: profile.BreakerFailureThreshold,
+	}))
 
-	if err := seedCustomers(ctx, db); err != nil {
+	if err := seedCustomers(ctx, db, profile.SmallCount); err != nil {
 		return fmt.Errorf("seed customers: %w", err)
 	}
 	slog.Info("seeded customers")
 
-	if err := seedWebhooks(ctx, db, rs.URL()); err != nil {
+	if err := seedWebhooks(ctx, db, rs.URL(), profile.SmallCount); err != nil {
 		return fmt.Errorf("seed webhooks: %w", err)
 	}
 	slog.Info("seeded webhooks", "receiver_url", rs.URL())
 
-	if _, err := seedWhaleDeliveries(ctx, db); err != nil {
+	if _, err := seedWhaleDeliveries(ctx, db, profile.WhaleDeliveries); err != nil {
 		return fmt.Errorf("seed whale deliveries: %w", err)
 	}
 	slog.Info("seeded whale deliveries")
@@ -75,7 +117,7 @@ func RunScenario1(ctx context.Context) error {
 
 	var workerWg sync.WaitGroup
 	workerLog := slog.New(slog.NewTextHandler(io.Discard, nil))
-	workers := scenarioWorkerCount()
+	workers := profile.WorkerCount
 	for i := range workers {
 		workerWg.Add(1)
 		go func(id int) {
@@ -93,9 +135,9 @@ func RunScenario1(ctx context.Context) error {
 
 	dripDone := make(chan error, 1)
 	go func() {
-		ticker := time.NewTicker(time.Second)
+		ticker := time.NewTicker(profile.SmallDripInterval)
 		defer ticker.Stop()
-		for i := range smallCount {
+		for i := range profile.SmallCount {
 			select {
 			case <-workerCtx.Done():
 				dripDone <- workerCtx.Err()
@@ -103,14 +145,14 @@ func RunScenario1(ctx context.Context) error {
 			case <-ticker.C:
 			}
 			cid := smallCustomerID(i)
-			if err := ingestSmallDeliveries(workerCtx, ingestStore, cid, smallDeliveries); err != nil {
+			if err := ingestSmallDeliveries(workerCtx, ingestStore, cid, profile.SmallDeliveries); err != nil {
 				dripDone <- fmt.Errorf("drip small customer %s: %w", cid, err)
 				return
 			}
 		}
 		dripDone <- nil
 	}()
-	slog.Info("started small drip", "count", smallCount, "interval", "1s")
+	slog.Info("started small drip", "count", profile.SmallCount, "interval", profile.SmallDripInterval)
 
 	activeAtNotifyCh := make(chan int, 1)
 	lateDone := make(chan error, 1)
@@ -123,9 +165,9 @@ func RunScenario1(ctx context.Context) error {
 		case <-workerCtx.Done():
 			lateDone <- workerCtx.Err()
 			return
-		case <-time.After(30 * time.Second):
+		case <-time.After(profile.LateNotifyDelay):
 		}
-		if err := ingestSmallDeliveries(workerCtx, ingestStore, lateSmallID, lateDeliveries); err != nil {
+		if err := ingestSmallDeliveries(workerCtx, ingestStore, lateSmallID, profile.LateDeliveries); err != nil {
 			lateDone <- fmt.Errorf("late inject: %w", err)
 			return
 		}
@@ -152,7 +194,7 @@ func RunScenario1(ctx context.Context) error {
 
 	dripComplete := false
 	lateComplete := false
-	expectedDeliveries := whaleDeliveries + smallCount*smallDeliveries + lateDeliveries
+	expectedDeliveries := profile.WhaleDeliveries + profile.SmallCount*profile.SmallDeliveries + profile.LateDeliveries
 
 	for {
 		if !dripComplete {
@@ -214,14 +256,21 @@ func RunScenario1(ctx context.Context) error {
 
 	reportPath := "bench/results/scenario-1.md"
 	if err := writeScenario1Report(ctx, db, reportPath, scenario1ReportParams{
-		totalDuration:   totalDuration,
-		totalDeliveries: totalDeliveries,
-		expectedTotal:   expectedDeliveries,
-		lateFirstMs:     lateFirstLatencyMs,
-		lateCyclePicks:  lateCyclePicks,
-		picksUntilFirst: lateCyclePicks,
-		activeAtNotify:  activeAtLateNotify,
-		workerCount:     workers,
+		profileName:       profile.Name,
+		whaleDeliveries:   profile.WhaleDeliveries,
+		smallCount:        profile.SmallCount,
+		smallDeliveries:   profile.SmallDeliveries,
+		lateDeliveries:    profile.LateDeliveries,
+		smallDripInterval: profile.SmallDripInterval,
+		lateNotifyDelay:   profile.LateNotifyDelay,
+		totalDuration:     totalDuration,
+		totalDeliveries:   totalDeliveries,
+		expectedTotal:     expectedDeliveries,
+		lateFirstMs:       lateFirstLatencyMs,
+		lateCyclePicks:    lateCyclePicks,
+		picksUntilFirst:   lateCyclePicks,
+		activeAtNotify:    activeAtLateNotify,
+		workerCount:       workers,
 	}); err != nil {
 		return fmt.Errorf("write report: %w", err)
 	}
@@ -241,14 +290,21 @@ func countActiveCustomers(ctx context.Context, db *sql.DB) (int, error) {
 }
 
 type scenario1ReportParams struct {
-	totalDuration   time.Duration
-	totalDeliveries int
-	expectedTotal   int
-	lateFirstMs     float64
-	lateCyclePicks  int64 // picks from BeginTracking to first service of late customer
-	picksUntilFirst int64 // same value, clearer name for the report
-	activeAtNotify  int
-	workerCount     int
+	profileName       string
+	whaleDeliveries   int
+	smallCount        int
+	smallDeliveries   int
+	lateDeliveries    int
+	smallDripInterval time.Duration
+	lateNotifyDelay   time.Duration
+	totalDuration     time.Duration
+	totalDeliveries   int
+	expectedTotal     int
+	lateFirstMs       float64
+	lateCyclePicks    int64 // picks from BeginTracking to first service of late customer
+	picksUntilFirst   int64 // same value, clearer name for the report
+	activeAtNotify    int
+	workerCount       int
 }
 
 func writeScenario1Report(
@@ -282,8 +338,8 @@ func writeScenario1Report(
 	smallP99OK := allSmallP99 < 2000
 	cycleOK := p.picksUntilFirst <= int64(p.activeAtNotify)
 	throughput := float64(p.totalDeliveries) / p.totalDuration.Seconds()
-	whaleThroughput := float64(whaleDeliveries) / (whaleMax / 1000)
-	projectedThousandWhales := time.Duration((float64(whaleDeliveries*1000) / whaleThroughput) * float64(time.Second))
+	whaleThroughput := float64(p.whaleDeliveries) / (whaleMax / 1000)
+	projectedThousandWhales := time.Duration((float64(p.whaleDeliveries*1000) / whaleThroughput) * float64(time.Second))
 
 	f, err := os.Create(path) // #nosec G304 -- benchmark report path is a fixed scenario-owned file.
 	if err != nil {
@@ -295,7 +351,7 @@ func writeScenario1Report(
 
 ## Description
 
-One **Whale** (50k deliveries, burst at T=0) + **100 Small Customers** (5 deliveries each, dripped one per second starting at T=1) + **1 Late Small Customer** (3 deliveries, injected at T=30).
+Profile **%s**: one **Whale** (%d deliveries, burst at T=0) + **%d Small Customers** (%d deliveries each, dripped every %s starting at T=1) + **1 Late Small Customer** (%d deliveries, injected at T=%s).
 
 **Chaos conditions**: 15%% of requests experience 300ms latency (simulating network round-trips). No status-code failures are injected; Scenario 1 isolates fairness under burst load from retry-policy behavior.
 
@@ -305,10 +361,11 @@ The acceptance criteria are that Small Customers have lifecycle p99 under 2s, th
 
 | Metric | Value |
 |---|---|
+| Profile | %s |
 | Verdict | Small Customers stayed responsive while the Whale backlog drained |
 | Total duration | %s |
 | Total deliveries | %d / %d |
-| End-to-end throughput (includes 100s drip) | %.0f deliveries/s |
+| End-to-end throughput (includes drip) | %.0f deliveries/s |
 | Workers | %d |
 | All Small lifecycle p99 | %.0f ms |
 | Late Small first terminal lifecycle latency | %.0f ms |
@@ -328,12 +385,13 @@ The acceptance criteria are that Small Customers have lifecycle p99 under 2s, th
 
 ## Backlog Drain Latency
 
-This is enqueue-to-terminal time, not HTTP request time. For the Whale, high values mostly mean the intentional 50k burst is waiting in queue while Small Customers continue to receive turns.
+This is enqueue-to-terminal time, not HTTP request time. For the Whale, high values mostly mean the intentional burst backlog is waiting in queue while Small Customers continue to receive turns.
 The 1000-whale projection is a single-node capacity estimate from this run, not an acceptance criterion; it shows that production-scale whale load needs horizontal capacity or partitioned whale pools.
 
 | Class | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|
-`, p.totalDuration.Round(time.Second), p.totalDeliveries, p.expectedTotal, throughput,
+`, p.profileName, p.whaleDeliveries, p.smallCount, p.smallDeliveries, p.smallDripInterval, p.lateDeliveries, p.lateNotifyDelay,
+		p.profileName, p.totalDuration.Round(time.Second), p.totalDeliveries, p.expectedTotal, throughput,
 		p.workerCount, allSmallP99, p.lateFirstMs, whaleP99, whaleMax,
 		whaleThroughput, projectedThousandWhales.Round(time.Second), httpP99,
 		p.totalDeliveries, p.expectedTotal, passFail(totalOK),

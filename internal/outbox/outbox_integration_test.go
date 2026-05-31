@@ -425,6 +425,39 @@ func TestProcessRetryableFailuresOpenWebhookBreaker(t *testing.T) {
 	assertWebhookBreaker(t, ctx, db, submitted.DeliveryIDs[0], "open", 2)
 }
 
+func TestProcessRetryableFailuresCanDisableWebhookBreaker(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	insertWebhook(t, ctx, db, "cus_breaker_disabled", srv.URL, true, "subscriber.created")
+	_, err := newIngestStore(db).Submit(ctx, ingest.Event{
+		CustomerID: "cus_breaker_disabled",
+		Type:       "subscriber.created",
+		Payload:    []byte(`{"subscriber_id":"sub_breaker_disabled"}`),
+	})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	store := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
+		FailureThreshold: 0,
+	}))
+	w := newIntegrationWorker()
+	w.RetryPolicy = retry.New(retry.Config{BaseDelay: time.Millisecond, CapDelay: time.Millisecond})
+
+	claimed := waitForClaim(t, ctx, store, "cus_breaker_disabled", time.Second)
+	if result := w.Process(ctx, store, claimed); result.Err != nil {
+		t.Fatalf("Process: %v", result.Err)
+	}
+
+	assertWebhookBreaker(t, ctx, db, claimed.ID, "closed", 0)
+}
+
 func TestClaimNextSkipsOpenWebhookUntilHalfOpenProbe(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)

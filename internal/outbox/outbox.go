@@ -42,6 +42,7 @@ const (
 )
 
 // BreakerConfig controls persisted per-Webhook circuit breaker transitions.
+// A FailureThreshold of 0 disables breaker tripping entirely.
 type BreakerConfig struct {
 	FailureThreshold int
 	InitialCooldown  time.Duration
@@ -58,7 +59,7 @@ func defaultBreakerConfig() BreakerConfig {
 
 func normalizeBreakerConfig(config BreakerConfig) BreakerConfig {
 	defaults := defaultBreakerConfig()
-	if config.FailureThreshold <= 0 {
+	if config.FailureThreshold < 0 {
 		config.FailureThreshold = defaults.FailureThreshold
 	}
 	if config.InitialCooldown <= 0 {
@@ -866,6 +867,10 @@ func insertAttempt(ctx context.Context, tx *sql.Tx, deliveryID string, attemptNu
 // recordBreakerSuccess updates the breaker to closed. Returns true if the
 // breaker state actually changed (the UPDATE matched a row).
 func (s *Store) recordBreakerSuccess(ctx context.Context, tx *sql.Tx, webhookID string, deliveryID string) (bool, error) {
+	if s.breakerConfig.FailureThreshold == 0 {
+		return false, nil
+	}
+
 	var updated string
 	err := tx.QueryRowContext(ctx, `
 		UPDATE webhooks
@@ -897,6 +902,10 @@ func (s *Store) recordBreakerSuccess(ctx context.Context, tx *sql.Tx, webhookID 
 // opens the breaker if the consecutive-failure threshold is met. Returns true
 // if the breaker was opened as a result of this call.
 func (s *Store) recordBreakerFailure(ctx context.Context, tx *sql.Tx, webhookID string, reason string) (bool, error) {
+	if s.breakerConfig.FailureThreshold == 0 {
+		return false, nil
+	}
+
 	var state string
 	var failureCount int
 	var cooldownMillis int64

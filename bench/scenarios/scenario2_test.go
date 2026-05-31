@@ -13,55 +13,48 @@ import (
 
 func TestScenario2ProfileFromEnvDefaults(t *testing.T) {
 	t.Setenv("BENCH_PROFILE", "")
-	t.Setenv("BENCH_REPORT_PATH", "")
-	t.Setenv("BENCH_SCENARIO2_CUSTOMERS", "")
-	t.Setenv("BENCH_EVENTS_PER_CUSTOMER", "")
-	t.Setenv("BENCH_SUBMIT_INTERVAL", "")
-	t.Setenv("BENCH_WORKERS", "")
 
-	profile := scenario2ProfileFromEnv()
-	if profile.Name != "baseline" {
-		t.Fatalf("name: got %q, want baseline", profile.Name)
+	profile, err := scenario2ProfileFromEnv()
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
 	}
-	if profile.CustomerCount != defaultScenario2CustomerCount {
-		t.Fatalf("customers: got %d, want %d", profile.CustomerCount, defaultScenario2CustomerCount)
+	if profile.Name != "dev" {
+		t.Fatalf("name: got %q, want dev", profile.Name)
 	}
-	if profile.EventsPerCustomer != defaultScenario2EventsPerCustomer {
-		t.Fatalf("events/customer: got %d, want %d", profile.EventsPerCustomer, defaultScenario2EventsPerCustomer)
-	}
-	if profile.SubmitInterval != defaultScenario2SubmitInterval {
-		t.Fatalf("submit interval: got %s, want %s", profile.SubmitInterval, defaultScenario2SubmitInterval)
+	want := mustBenchProfileConfig(t, "scenario2", "dev")
+	if profile.WorkerCount != want.WorkerCount || profile.CustomerCount != want.CustomerCount || profile.EventsPerCustomer != want.EventsPerCustomer || profile.SubmitInterval != want.SubmitInterval.Duration() || profile.OutageDelay != want.OutageDelay.Duration() || profile.OutageDuration != want.OutageDuration.Duration() || profile.BreakerFailureThreshold != want.BreakerFailureThreshold {
+		t.Fatalf("dev profile overrides not applied: %+v want %+v", profile, want)
 	}
 }
 
 func TestScenario2ProfileFromEnvOverrides(t *testing.T) {
-	t.Setenv("BENCH_PROFILE", "medium")
-	t.Setenv("BENCH_REPORT_PATH", "bench/results/scenario-2-medium.md")
-	t.Setenv("BENCH_SCENARIO2_CUSTOMERS", "25")
-	t.Setenv("BENCH_EVENTS_PER_CUSTOMER", "200")
-	t.Setenv("BENCH_SUBMIT_INTERVAL", "10ms")
-	t.Setenv("BENCH_WORKERS", "64")
+	t.Setenv("BENCH_PROFILE", "stress")
 
-	profile := scenario2ProfileFromEnv()
-	if profile.Name != "medium" {
-		t.Fatalf("name: got %q, want medium", profile.Name)
+	profile, err := scenario2ProfileFromEnv()
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
 	}
-	if profile.ReportPath != "bench/results/scenario-2-medium.md" {
-		t.Fatalf("report path: got %q", profile.ReportPath)
+	if profile.Name != "stress" {
+		t.Fatalf("name: got %q, want stress", profile.Name)
 	}
-	if profile.CustomerCount != 25 || profile.EventsPerCustomer != 200 || profile.SubmitInterval != 10*time.Millisecond || profile.WorkerCount != 64 {
-		t.Fatalf("profile overrides not applied: %+v", profile)
+	want := mustBenchProfileConfig(t, "scenario2", "stress")
+	if profile.WorkerCount != want.WorkerCount || profile.CustomerCount != want.CustomerCount || profile.EventsPerCustomer != want.EventsPerCustomer || profile.SubmitInterval != want.SubmitInterval.Duration() || profile.OutageDelay != want.OutageDelay.Duration() || profile.OutageDuration != want.OutageDuration.Duration() || profile.BreakerFailureThreshold != want.BreakerFailureThreshold {
+		t.Fatalf("stress profile overrides not applied: %+v want %+v", profile, want)
 	}
 }
 
 func TestScenario2RetryPolicySurvivesPartnerCOutage(t *testing.T) {
 	t.Parallel()
 
+	profile, err := scenario2ProfileFromEnv()
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
 	policy := scenario2RetryPolicy()
 	for i := range 100 {
 		key := fmt.Sprintf("delivery-%03d", i)
 		elapsed, attempt, prevDelay := time.Duration(0), 1, time.Duration(0)
-		for elapsed < scenario2OutageDuration {
+		for elapsed < profile.OutageDuration {
 			resp := response(http.StatusServiceUnavailable)
 			delay, terminal, reason := policy.NextWithKey(attempt, prevDelay, resp, nil, key, elapsed)
 			_ = resp.Body.Close()
@@ -111,4 +104,22 @@ func response(statusCode int) *http.Response {
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader("")),
 	}
+}
+
+func mustBenchProfileConfig(t *testing.T, scenario, profile string) benchProfileConfig {
+	t.Helper()
+
+	profiles, err := readBenchProfiles()
+	if err != nil {
+		t.Fatalf("read bench profiles: %v", err)
+	}
+	scenarioProfiles, ok := profiles.Scenarios[scenario]
+	if !ok {
+		t.Fatalf("missing scenario %q in bench profiles", scenario)
+	}
+	got, ok := scenarioProfiles[profile]
+	if !ok {
+		t.Fatalf("missing profile %q for scenario %q", profile, scenario)
+	}
+	return got
 }

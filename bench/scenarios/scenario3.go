@@ -22,11 +22,9 @@ import (
 )
 
 const (
-	scenario3CustomerID         = "scenario-3-customer"
-	scenario3EventCount         = 1000
-	scenario3WebhookCount       = 2
-	scenario3ExpectedDeliveries = scenario3EventCount * scenario3WebhookCount
-	scenario3ReportPath         = "bench/results/scenario-3.md"
+	scenario3CustomerID   = "scenario-3-customer"
+	scenario3WebhookCount = 2
+	scenario3ReportPath   = "bench/results/scenario-3.md"
 )
 
 var scenario3Webhooks = []struct {
@@ -37,23 +35,50 @@ var scenario3Webhooks = []struct {
 	{Label: "misconfigured-404", Path: "/hooks/misconfigured-404"},
 }
 
+type scenario3Profile struct {
+	Name                    string
+	WorkerCount             int
+	EventCount              int
+	BreakerFailureThreshold int
+}
+
+func scenario3ProfileFromEnv() (scenario3Profile, error) {
+	raw, name, err := loadBenchProfileConfig("scenario3")
+	if err != nil {
+		return scenario3Profile{}, err
+	}
+	if raw.WorkerCount < 1 || raw.EventCount < 1 {
+		return scenario3Profile{}, fmt.Errorf("scenario3 profile %q has invalid positive counts", name)
+	}
+	if raw.BreakerFailureThreshold < 0 {
+		return scenario3Profile{}, fmt.Errorf("scenario3 profile %q has invalid breaker threshold", name)
+	}
+	return scenario3Profile{
+		Name:                    name,
+		WorkerCount:             raw.WorkerCount,
+		EventCount:              raw.EventCount,
+		BreakerFailureThreshold: raw.BreakerFailureThreshold,
+	}, nil
+}
+
 // RunScenario3 executes Scenario 3: terminal classification fast-fail.
 func RunScenario3(ctx context.Context) error {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		dsn = defaultDatabaseURL
-	}
-	db, err := sql.Open("postgres", dsn)
+	db, cleanup, err := openBenchDatabase(ctx)
 	if err != nil {
-		return fmt.Errorf("open db: %w", err)
+		return fmt.Errorf("open bench db: %w", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer cleanup()
 
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping db: %w", err)
 	}
 	if err := resetBenchData(ctx, db); err != nil {
 		return fmt.Errorf("reset bench data: %w", err)
+	}
+
+	profile, err := scenario3ProfileFromEnv()
+	if err != nil {
+		return fmt.Errorf("load profile: %w", err)
 	}
 
 	rs := receiver.NewServer(
@@ -72,10 +97,12 @@ func RunScenario3(ctx context.Context) error {
 	plainSched := roundrobin.New()
 	reg := registry.New(db)
 	ingestStore := ingest.New(db, reg, plainSched)
-	outboxStore := outbox.New(db)
+	outboxStore := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
+		FailureThreshold: profile.BreakerFailureThreshold,
+	}))
 
 	startTime := time.Now()
-	if err := submitScenario3Events(ctx, ingestStore); err != nil {
+	if err := submitScenario3Events(ctx, ingestStore, profile.EventCount); err != nil {
 		return fmt.Errorf("submit events: %w", err)
 	}
 
@@ -84,7 +111,7 @@ func RunScenario3(ctx context.Context) error {
 
 	var workerWg sync.WaitGroup
 	workerLog := slog.New(slog.NewTextHandler(io.Discard, nil))
-	workers := scenarioWorkerCount()
+	workers := profile.WorkerCount
 	for i := range workers {
 		workerWg.Add(1)
 		go func(id int) {
@@ -118,8 +145,11 @@ func RunScenario3(ctx context.Context) error {
 	workerWg.Wait()
 
 	if err := writeScenario3Report(ctx, db, scenario3ReportPath, scenario3ReportParams{
-		totalDuration: time.Since(startTime),
-		workerCount:   workers,
+		profileName:        profile.Name,
+		eventCount:         profile.EventCount,
+		expectedDeliveries: profile.EventCount * scenario3WebhookCount,
+		totalDuration:      time.Since(startTime),
+		workerCount:        workers,
 	}); err != nil {
 		return fmt.Errorf("write report: %w", err)
 	}
@@ -165,8 +195,8 @@ func seedScenario3Webhooks(ctx context.Context, db *sql.DB, receiverBaseURL stri
 	return nil
 }
 
-func submitScenario3Events(ctx context.Context, store *ingest.Store) error {
-	for range scenario3EventCount {
+func submitScenario3Events(ctx context.Context, store *ingest.Store, eventCount int) error {
+	for range eventCount {
 		if _, err := store.Submit(ctx, ingest.Event{
 			CustomerID: scenario3CustomerID,
 			Type:       eventType,
@@ -179,8 +209,11 @@ func submitScenario3Events(ctx context.Context, store *ingest.Store) error {
 }
 
 type scenario3ReportParams struct {
-	totalDuration time.Duration
-	workerCount   int
+	profileName        string
+	eventCount         int
+	expectedDeliveries int
+	totalDuration      time.Duration
+	workerCount        int
 }
 
 func writeScenario3Report(ctx context.Context, db *sql.DB, path string, p scenario3ReportParams) error {
@@ -213,12 +246,12 @@ func writeScenario3Report(ctx context.Context, db *sql.DB, path string, p scenar
 		return fmt.Errorf("query outcomes: %w", err)
 	}
 
-	totalOK := totalDeliveries == scenario3ExpectedDeliveries && terminal == scenario3ExpectedDeliveries
-	goodOK := good.Total == scenario3EventCount && good.Succeeded == scenario3EventCount
-	misconfiguredOK := misconfigured.Total == scenario3EventCount &&
-		misconfigured.Dead == scenario3EventCount &&
-		misconfigured.Terminal4xxDLQ == scenario3EventCount &&
-		misconfigured.OneAttempt == scenario3EventCount &&
+	totalOK := totalDeliveries == p.expectedDeliveries && terminal == p.expectedDeliveries
+	goodOK := good.Total == p.eventCount && good.Succeeded == p.eventCount
+	misconfiguredOK := misconfigured.Total == p.eventCount &&
+		misconfigured.Dead == p.eventCount &&
+		misconfigured.Terminal4xxDLQ == p.eventCount &&
+		misconfigured.OneAttempt == p.eventCount &&
 		misconfigured.RetryWaste == 0
 
 	f, err := os.Create(path) // #nosec G304 -- benchmark report path is a fixed scenario-owned file.
@@ -231,12 +264,13 @@ func writeScenario3Report(ctx context.Context, db *sql.DB, path string, p scenar
 
 ## Description
 
-1 Customer with 2 Webhooks: one healthy URL returning 2xx and one misconfigured URL returning 404. 1000 Events fan out to **2000 expected Deliveries**.
+Profile **%s**: 1 Customer with 2 Webhooks: one healthy URL returning 2xx and one misconfigured URL returning 404. %d Events fan out to **%d expected Deliveries**.
 
 ## Performance Summary
 
 | Metric | Value |
 |---|---:|
+| Profile | %s |
 | Total duration | %s |
 | Events submitted | %d |
 | Deliveries created | %d / %d |
@@ -256,15 +290,15 @@ func writeScenario3Report(ctx context.Context, db *sql.DB, path string, p scenar
 
 | Webhook | Attempts | Deliveries |
 |---|---:|---:|
-`,
-		p.totalDuration.Round(time.Second),
-		scenario3EventCount,
-		totalDeliveries, scenario3ExpectedDeliveries,
+`, p.profileName, p.eventCount, p.expectedDeliveries,
+		p.profileName, p.totalDuration.Round(time.Second),
+		p.eventCount,
+		totalDeliveries, p.expectedDeliveries,
 		p.workerCount,
 		terminal, totalDeliveries,
-		terminal, totalDeliveries, scenario3ExpectedDeliveries, scenario3ExpectedDeliveries, passFail(totalOK),
-		good.Succeeded, good.Total, scenario3EventCount, scenario3EventCount, passFail(goodOK),
-		misconfigured.Terminal4xxDLQ, misconfigured.Total, scenario3EventCount, scenario3EventCount, passFail(misconfiguredOK),
+		terminal, totalDeliveries, p.expectedDeliveries, p.expectedDeliveries, passFail(totalOK),
+		good.Succeeded, good.Total, p.eventCount, p.eventCount, passFail(goodOK),
+		misconfigured.Terminal4xxDLQ, misconfigured.Total, p.eventCount, p.eventCount, passFail(misconfiguredOK),
 		misconfigured.RetryWaste, passFail(misconfigured.RetryWaste == 0),
 	)
 

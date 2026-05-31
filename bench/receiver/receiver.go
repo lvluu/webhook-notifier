@@ -94,6 +94,7 @@ type routeConfig struct {
 	statusCode        int
 	statusConfigured  bool
 	statusFunc        func(*http.Request, time.Time) int
+	hang              bool
 }
 
 // Recording holds the request data recorded by the ReceiverServer.
@@ -164,6 +165,15 @@ func WithRouteLatency(route string, prob float64, d time.Duration) Option {
 	})
 }
 
+// WithRouteHang configures a route to wait until the request context is
+// canceled instead of returning a response.
+func WithRouteHang(route string) Option {
+	return optionFunc(func(rs *ReceiverServer) {
+		rc := rs.routeConfig(route)
+		rc.hang = true
+	})
+}
+
 func (rs *ReceiverServer) routeConfig(route string) *routeConfig {
 	if rs.routes == nil {
 		rs.routes = make(map[string]*routeConfig)
@@ -226,6 +236,9 @@ func (rs *ReceiverServer) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	code := rs.serveCode(r)
+	if r.Context().Err() != nil {
+		return
+	}
 
 	rs.mu.Lock()
 	rs.recordings = append(rs.recordings, Recording{
@@ -267,6 +280,11 @@ func (rs *ReceiverServer) serveCode(r *http.Request) int {
 		if code := rc.statusFunc(r, rs.nowFunc()); code != 0 {
 			return code
 		}
+	}
+
+	if rc != nil && rc.hang {
+		<-r.Context().Done()
+		return 0
 	}
 
 	if latencyProb > 0 && rs.probabilityHit(r, "latency", latencyProb) {

@@ -1,0 +1,89 @@
+scenarios:
+  # Scenario 1: fairness under load with a late-arriving small customer.
+  scenario1:
+    dev:
+      worker_count: 4
+      whale_deliveries: 5000
+      small_count: 10
+      small_deliveries: 2
+      late_deliveries: 1
+      small_drip_interval: 100ms
+      late_notify_delay: 5s
+      breaker_failure_threshold: 0
+    stress:
+      worker_count: 8
+      whale_deliveries: 50000
+      small_count: 100
+      small_deliveries: 5
+      late_deliveries: 3
+      small_drip_interval: 1s
+      late_notify_delay: 30s
+      breaker_failure_threshold: 0
+  # Scenario 2: transient partner failures plus a recoverable outage window.
+  scenario2:
+    dev:
+      worker_count: 16
+      customer_count: 5
+      events_per_customer: 20
+      submit_interval: 5ms
+      outage_delay: 1s
+      outage_duration: 5s
+      breaker_failure_threshold: 0
+    stress:
+      worker_count: 64
+      customer_count: 10
+      events_per_customer: 100
+      submit_interval: 20ms
+      outage_delay: 5s
+      outage_duration: 30s
+      breaker_failure_threshold: 0
+  # Scenario 3: terminal 4xx failures should fast-fail without retry churn.
+  scenario3:
+    dev:
+      worker_count: 4
+      event_count: 100
+      breaker_failure_threshold: 0
+    stress:
+      worker_count: 32
+      event_count: 1000
+      breaker_failure_threshold: 0
+  # Scenario 4: horizontal scale, claim atomicity, and idempotency stability.
+  scenario4:
+    dev:
+      worker_counts: [1, 2, 4]
+      throughput_deliveries: 1000
+      retry_deliveries: 10
+      breaker_failure_threshold: 0
+    stress:
+      worker_counts: [1, 4, 8]
+      throughput_deliveries: 10000
+      retry_deliveries: 100
+      breaker_failure_threshold: 0
+  # Scenario 5: dead-partner circuit breaker plus healthy-customer pool protection.
+  scenario5:
+    dev:
+      worker_count: 16
+      customer_count: 5
+      deliveries_per_customer: 1000
+      request_timeout: 250ms
+      discovery_interval: 50ms
+      discovery_empty_backoff: 50ms
+      discovery_error_backoff: 50ms
+      discovery_max_backoff: 250ms
+      discovery_limit: 100
+      breaker_failure_threshold: 2
+      breaker_initial_cooldown: 2s
+      breaker_max_cooldown: 2s
+    stress:
+      worker_count: 64
+      customer_count: 10
+      deliveries_per_customer: 5000
+      request_timeout: 250ms
+      discovery_interval: 50ms
+      discovery_empty_backoff: 50ms
+      discovery_error_backoff: 50ms
+      discovery_max_backoff: 250ms
+      discovery_limit: 100
+      breaker_failure_threshold: 2
+      breaker_initial_cooldown: 15s
+      breaker_max_cooldown: 15s

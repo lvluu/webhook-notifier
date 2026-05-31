@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,14 +23,7 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/worker"
 )
 
-const (
-	defaultScenario2CustomerCount     = 10
-	defaultScenario2EventsPerCustomer = 100
-	defaultScenario2SubmitInterval    = 20 * time.Millisecond
-	scenario2OutageDelay              = 5 * time.Second
-	scenario2OutageDuration           = 30 * time.Second
-	partnerAP99Limit                  = 2 * time.Second
-)
+const partnerAP99Limit = 2 * time.Second
 
 var scenario2Partners = []struct {
 	name string
@@ -48,26 +40,24 @@ func scenario2CustomerID(i int) string {
 }
 
 type scenario2Profile struct {
-	Name              string
-	CustomerCount     int
-	EventsPerCustomer int
-	SubmitInterval    time.Duration
-	WorkerCount       int
-	ReportPath        string
+	Name                    string
+	CustomerCount           int
+	EventsPerCustomer       int
+	SubmitInterval          time.Duration
+	WorkerCount             int
+	OutageDelay             time.Duration
+	OutageDuration          time.Duration
+	BreakerFailureThreshold int
 }
 
 // RunScenario2 executes Scenario 2: transient and recovering Integration
 // Partners under Event x Webhook fanout.
 func RunScenario2(ctx context.Context) error {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		dsn = defaultDatabaseURL
-	}
-	db, err := sql.Open("postgres", dsn)
+	db, cleanup, err := openBenchDatabase(ctx)
 	if err != nil {
-		return fmt.Errorf("open db: %w", err)
+		return fmt.Errorf("open bench db: %w", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer cleanup()
 
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping db: %w", err)
@@ -76,9 +66,14 @@ func RunScenario2(ctx context.Context) error {
 		return fmt.Errorf("reset bench data: %w", err)
 	}
 
+	profile, err := scenario2ProfileFromEnv()
+	if err != nil {
+		return fmt.Errorf("load profile: %w", err)
+	}
+
 	scenarioStart := time.Now()
-	outageStart := scenarioStart.Add(scenario2OutageDelay)
-	outageEnd := outageStart.Add(scenario2OutageDuration)
+	outageStart := scenarioStart.Add(profile.OutageDelay)
+	outageEnd := outageStart.Add(profile.OutageDuration)
 
 	rs := receiver.NewServer(
 		receiver.WithStableDecisions("scenario-2"),
@@ -92,7 +87,6 @@ func RunScenario2(ctx context.Context) error {
 	)
 	defer rs.Close()
 
-	profile := scenario2ProfileFromEnv()
 	totalEvents := profile.CustomerCount * profile.EventsPerCustomer
 	expectedDeliveries := totalEvents * len(scenario2Partners)
 
@@ -106,7 +100,9 @@ func RunScenario2(ctx context.Context) error {
 	plainSched := roundrobin.New()
 	reg := registry.New(db)
 	ingestStore := ingest.New(db, reg, plainSched)
-	outboxStore := outbox.New(db)
+	outboxStore := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
+		FailureThreshold: profile.BreakerFailureThreshold,
+	}))
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()
@@ -168,7 +164,8 @@ func RunScenario2(ctx context.Context) error {
 	workerWg.Wait()
 
 	totalDuration := time.Since(scenarioStart)
-	if err := writeScenario2Report(ctx, db, profile.ReportPath, scenario2ReportParams{
+	reportPath := "bench/results/scenario-2.md"
+	if err := writeScenario2Report(ctx, db, reportPath, scenario2ReportParams{
 		profileName:         profile.Name,
 		totalDuration:       totalDuration,
 		totalEvents:         totalEvents,
@@ -184,63 +181,35 @@ func RunScenario2(ctx context.Context) error {
 		return fmt.Errorf("write report: %w", err)
 	}
 
-	slog.Info("scenario 2 complete", "profile", profile.Name, "report", profile.ReportPath)
+	slog.Info("scenario 2 complete", "profile", profile.Name, "report", reportPath)
 	return nil
 }
 
-func scenario2ProfileFromEnv() scenario2Profile {
-	name := os.Getenv("BENCH_PROFILE")
-	if name == "" {
-		name = "baseline"
+func scenario2ProfileFromEnv() (scenario2Profile, error) {
+	raw, name, err := loadBenchProfileConfig("scenario2")
+	if err != nil {
+		return scenario2Profile{}, err
 	}
-	reportPath := os.Getenv("BENCH_REPORT_PATH")
-	if reportPath == "" {
-		reportPath = "bench/results/scenario-2.md"
+	if raw.CustomerCount < 1 || raw.EventsPerCustomer < 1 || raw.WorkerCount < 1 {
+		return scenario2Profile{}, fmt.Errorf("scenario2 profile %q has invalid positive counts", name)
 	}
+	if raw.SubmitInterval.Duration() < 0 || raw.OutageDelay.Duration() < 0 || raw.OutageDuration.Duration() < 0 {
+		return scenario2Profile{}, fmt.Errorf("scenario2 profile %q has invalid durations", name)
+	}
+	if raw.BreakerFailureThreshold < 0 {
+		return scenario2Profile{}, fmt.Errorf("scenario2 profile %q has invalid breaker threshold", name)
+	}
+
 	return scenario2Profile{
-		Name:              name,
-		CustomerCount:     scenario2CustomerCount(),
-		EventsPerCustomer: scenario2EventsPerCustomer(),
-		SubmitInterval:    scenario2SubmitInterval(),
-		WorkerCount:       scenarioWorkerCount(),
-		ReportPath:        reportPath,
-	}
-}
-
-func scenario2CustomerCount() int {
-	raw := os.Getenv("BENCH_SCENARIO2_CUSTOMERS")
-	if raw == "" {
-		return defaultScenario2CustomerCount
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 1 {
-		return defaultScenario2CustomerCount
-	}
-	return n
-}
-
-func scenario2EventsPerCustomer() int {
-	raw := os.Getenv("BENCH_EVENTS_PER_CUSTOMER")
-	if raw == "" {
-		return defaultScenario2EventsPerCustomer
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 1 {
-		return defaultScenario2EventsPerCustomer
-	}
-	return n
-}
-
-func scenario2SubmitInterval() time.Duration {
-	raw := os.Getenv("BENCH_SUBMIT_INTERVAL")
-	if raw == "" {
-		return defaultScenario2SubmitInterval
-	}
-	d, err := time.ParseDuration(raw)
-	if err != nil || d < 0 {
-		return defaultScenario2SubmitInterval
-	}
-	return d
+		Name:                    name,
+		CustomerCount:           raw.CustomerCount,
+		EventsPerCustomer:       raw.EventsPerCustomer,
+		SubmitInterval:          raw.SubmitInterval.Duration(),
+		WorkerCount:             raw.WorkerCount,
+		OutageDelay:             raw.OutageDelay.Duration(),
+		OutageDuration:          raw.OutageDuration.Duration(),
+		BreakerFailureThreshold: raw.BreakerFailureThreshold,
+	}, nil
 }
 
 func scenario2HTTPClient(receiverURL string) (*http.Client, error) {

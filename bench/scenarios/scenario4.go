@@ -21,15 +21,42 @@ import (
 )
 
 const (
-	scenario4CustomerID           = "scenario-4-customer"
-	scenario4ThroughputDeliveries = 10000
-	scenario4RetryDeliveries      = 100
-	scenario4PartnerLatency       = 10 * time.Millisecond
-	scenario4ReportPath           = "bench/results/scenario-4.md"
-	scenario4Route                = "/hooks/scenario-4"
+	scenario4CustomerID     = "scenario-4-customer"
+	scenario4PartnerLatency = 10 * time.Millisecond
+	scenario4ReportPath     = "bench/results/scenario-4.md"
+	scenario4Route          = "/hooks/scenario-4"
 )
 
-var scenario4WorkerCounts = []int{1, 4, 8}
+type scenario4Profile struct {
+	Name                    string
+	WorkerCounts            []int
+	ThroughputDeliveries    int
+	RetryDeliveries         int
+	BreakerFailureThreshold int
+}
+
+func scenario4ProfileFromEnv() (scenario4Profile, error) {
+	raw, name, err := loadBenchProfileConfig("scenario4")
+	if err != nil {
+		return scenario4Profile{}, err
+	}
+	if len(raw.WorkerCounts) == 0 {
+		return scenario4Profile{}, fmt.Errorf("scenario4 profile %q is missing worker counts", name)
+	}
+	if raw.ThroughputDeliveries < 1 || raw.RetryDeliveries < 1 {
+		return scenario4Profile{}, fmt.Errorf("scenario4 profile %q has invalid positive counts", name)
+	}
+	if raw.BreakerFailureThreshold < 0 {
+		return scenario4Profile{}, fmt.Errorf("scenario4 profile %q has invalid breaker threshold", name)
+	}
+	return scenario4Profile{
+		Name:                    name,
+		WorkerCounts:            raw.WorkerCounts,
+		ThroughputDeliveries:    raw.ThroughputDeliveries,
+		RetryDeliveries:         raw.RetryDeliveries,
+		BreakerFailureThreshold: raw.BreakerFailureThreshold,
+	}, nil
+}
 
 type scenario4ThroughputResult struct {
 	WorkerCount     int
@@ -55,24 +82,25 @@ type scenario4RetryProbeResult struct {
 // RunScenario4 executes Scenario 4: horizontal scale, claim atomicity, and
 // idempotency header stability.
 func RunScenario4(ctx context.Context) error {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		dsn = defaultDatabaseURL
-	}
-	db, err := sql.Open("postgres", dsn)
+	db, cleanup, err := openBenchDatabase(ctx)
 	if err != nil {
-		return fmt.Errorf("open db: %w", err)
+		return fmt.Errorf("open bench db: %w", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer cleanup()
 
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping db: %w", err)
 	}
 
-	throughput := make([]scenario4ThroughputResult, 0, len(scenario4WorkerCounts))
-	for _, count := range scenario4WorkerCounts {
+	profile, err := scenario4ProfileFromEnv()
+	if err != nil {
+		return fmt.Errorf("load profile: %w", err)
+	}
+
+	throughput := make([]scenario4ThroughputResult, 0, len(profile.WorkerCounts))
+	for _, count := range profile.WorkerCounts {
 		slog.Info("running scenario 4 throughput workload", "worker_count", count)
-		res, err := runScenario4Throughput(ctx, db, count)
+		res, err := runScenario4Throughput(ctx, db, count, profile)
 		if err != nil {
 			return fmt.Errorf("run throughput with %d workers: %w", count, err)
 		}
@@ -80,31 +108,31 @@ func RunScenario4(ctx context.Context) error {
 	}
 
 	slog.Info("running scenario 4 retry probe")
-	retryProbe, err := runScenario4RetryProbe(ctx, db)
+	retryProbe, err := runScenario4RetryProbe(ctx, db, profile)
 	if err != nil {
 		return fmt.Errorf("run retry probe: %w", err)
 	}
 
-	if err := writeScenario4Report(scenario4ReportPath, throughput, retryProbe); err != nil {
+	if err := writeScenario4Report(scenario4ReportPath, profile.Name, profile.ThroughputDeliveries, profile.RetryDeliveries, throughput, retryProbe); err != nil {
 		return fmt.Errorf("write report: %w", err)
 	}
 
-	slog.Info("scenario 4 complete", "report", scenario4ReportPath)
+	slog.Info("scenario 4 complete", "profile", profile.Name, "report", scenario4ReportPath)
 	return nil
 }
 
-func runScenario4Throughput(ctx context.Context, db *sql.DB, numWorkers int) (scenario4ThroughputResult, error) {
+func runScenario4Throughput(ctx context.Context, db *sql.DB, numWorkers int, profile scenario4Profile) (scenario4ThroughputResult, error) {
 	rs := receiver.NewServer(
 		receiver.WithStableDecisions(fmt.Sprintf("scenario-4-%d", numWorkers)),
 		receiver.WithRouteLatency(scenario4Route, 1.0, scenario4PartnerLatency),
 	)
 	defer rs.Close()
 
-	if err := prepareScenario4Workload(ctx, db, rs.URL(), scenario4ThroughputDeliveries); err != nil {
+	if err := prepareScenario4Workload(ctx, db, rs.URL(), profile.ThroughputDeliveries); err != nil {
 		return scenario4ThroughputResult{}, err
 	}
 
-	duration, err := drainScenario4(ctx, db, numWorkers, retry.New(retry.Config{}))
+	duration, err := drainScenario4(ctx, db, numWorkers, profile, retry.New(retry.Config{}))
 	if err != nil {
 		return scenario4ThroughputResult{}, err
 	}
@@ -115,13 +143,13 @@ func runScenario4Throughput(ctx context.Context, db *sql.DB, numWorkers int) (sc
 	return scenario4ThroughputResult{
 		WorkerCount:     numWorkers,
 		Duration:        duration,
-		Throughput:      float64(scenario4ThroughputDeliveries) / duration.Seconds(),
+		Throughput:      float64(profile.ThroughputDeliveries) / duration.Seconds(),
 		Received:        len(recordings),
 		DuplicateTuples: duplicates,
 	}, nil
 }
 
-func runScenario4RetryProbe(ctx context.Context, db *sql.DB) (scenario4RetryProbeResult, error) {
+func runScenario4RetryProbe(ctx context.Context, db *sql.DB, profile scenario4Profile) (scenario4RetryProbeResult, error) {
 	rs := receiver.NewServer(
 		receiver.WithStableDecisions("scenario-4-retry-probe"),
 		receiver.WithRouteStatusFunc(scenario4Route, func(r *http.Request, _ time.Time) int {
@@ -133,7 +161,7 @@ func runScenario4RetryProbe(ctx context.Context, db *sql.DB) (scenario4RetryProb
 	)
 	defer rs.Close()
 
-	if err := prepareScenario4Workload(ctx, db, rs.URL(), scenario4RetryDeliveries); err != nil {
+	if err := prepareScenario4Workload(ctx, db, rs.URL(), profile.RetryDeliveries); err != nil {
 		return scenario4RetryProbeResult{}, err
 	}
 
@@ -142,7 +170,7 @@ func runScenario4RetryProbe(ctx context.Context, db *sql.DB) (scenario4RetryProb
 		BaseDelay:   10 * time.Millisecond,
 		CapDelay:    10 * time.Millisecond,
 	})
-	if _, err := drainScenario4(ctx, db, scenario4WorkerCounts[len(scenario4WorkerCounts)-1], policy); err != nil {
+	if _, err := drainScenario4(ctx, db, profile.WorkerCounts[len(profile.WorkerCounts)-1], profile, policy); err != nil {
 		return scenario4RetryProbeResult{}, err
 	}
 
@@ -166,9 +194,11 @@ func prepareScenario4Workload(ctx context.Context, db *sql.DB, receiverBaseURL s
 	return nil
 }
 
-func drainScenario4(ctx context.Context, db *sql.DB, numWorkers int, policy retry.RetryPolicy) (time.Duration, error) {
+func drainScenario4(ctx context.Context, db *sql.DB, numWorkers int, profile scenario4Profile, policy retry.RetryPolicy) (time.Duration, error) {
 	plainSched := roundrobin.New()
-	outboxStore := outbox.New(db)
+	outboxStore := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
+		FailureThreshold: profile.BreakerFailureThreshold,
+	}))
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()
@@ -369,7 +399,7 @@ func analyzeScenario4RetryProbe(recordings []receiver.Recording) scenario4RetryP
 	return result
 }
 
-func writeScenario4Report(path string, throughput []scenario4ThroughputResult, retryProbe scenario4RetryProbeResult) error {
+func writeScenario4Report(path, profileName string, throughputDeliveries, retryDeliveries int, throughput []scenario4ThroughputResult, retryProbe scenario4RetryProbeResult) error {
 	f, err := os.Create(path) // #nosec G304 -- benchmark report path is a fixed scenario-owned file.
 	if err != nil {
 		return fmt.Errorf("create report: %w", err)
@@ -378,6 +408,8 @@ func writeScenario4Report(path string, throughput []scenario4ThroughputResult, r
 
 	t1 := throughput[0].Throughput
 	t8 := throughput[len(throughput)-1].Throughput
+	w1 := throughput[0].WorkerCount
+	wN := throughput[len(throughput)-1].WorkerCount
 	scalingOK := t8 >= 4*t1
 
 	allZeroDuplicates := true
@@ -401,19 +433,20 @@ func writeScenario4Report(path string, throughput []scenario4ThroughputResult, r
 
 ## Description
 
-Pure-success throughput runs use the same 10k Delivery workload at worker counts {1, 4, 8} against a healthy receiver with 10ms per-Attempt latency. A separate retry probe forces 100 Deliveries to fail once with 503 before succeeding, so idempotency headers are validated across multiple Attempts without polluting the throughput measurement with retry backoff.
+Profile **%s**: pure-success throughput runs use the same %d Delivery workload at worker counts %v against a healthy receiver with 10ms per-Attempt latency. A separate retry probe forces %d Deliveries to fail once with 503 before succeeding, so idempotency headers are validated across multiple Attempts without polluting the throughput measurement with retry backoff.
 
 This repo uses just bench-4 as the canonical task command for the issue #15 benchmark.
 
 ## Performance Summary
 
+| Profile | %s |
 | Workers | Deliveries | Received Attempts | Duration | Throughput (Deliveries/sec) | Duplicate (delivery_id, attempt_number) tuples |
 |---:|---:|---:|---:|---:|---:|
-`)
+`, profileName, throughputDeliveries, scenario4WorkerCounts(throughput), retryDeliveries, profileName)
 	for _, r := range throughput {
 		_, _ = fmt.Fprintf(f, "| %d | %d | %d | %s | %.2f | %d |\n",
 			r.WorkerCount,
-			scenario4ThroughputDeliveries,
+			throughputDeliveries,
 			r.Received,
 			r.Duration.Round(time.Millisecond),
 			r.Throughput,
@@ -441,7 +474,7 @@ This repo uses just bench-4 as the canonical task command for the issue #15 benc
 
 | Criterion | Observed | Limit | Result |
 |---|---:|---:|---|
-| Scaling: 8 workers vs 1 worker | %.2fx | >= 4.00x | %s |
+| Scaling: %d workers vs %d workers | %.2fx | >= 4.00x | %s |
 | Throughput duplicate tuples | %d | 0 | %s |
 | Retry probe duplicate tuples | %d | 0 | %s |
 | Retry probe idempotency header stability | %s | true | %s |
@@ -456,6 +489,7 @@ This repo uses just bench-4 as the canonical task command for the issue #15 benc
 		passFail(retryProbe.EventIDPresent),
 		passFail(retryProbe.AttemptNumbersUnique),
 		passFail(retryProbe.AttemptNumbersConsecutive),
+		wN, w1,
 		t8/t1,
 		passFail(scalingOK),
 		totalScenario4DuplicateTuples(throughput),
@@ -475,4 +509,12 @@ func totalScenario4DuplicateTuples(results []scenario4ThroughputResult) int {
 		total += r.DuplicateTuples
 	}
 	return total
+}
+
+func scenario4WorkerCounts(results []scenario4ThroughputResult) []int {
+	counts := make([]int, 0, len(results))
+	for _, r := range results {
+		counts = append(counts, r.WorkerCount)
+	}
+	return counts
 }
