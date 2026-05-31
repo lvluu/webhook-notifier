@@ -61,6 +61,40 @@ func (r *recordingScheduler) Notified() []string {
 	return out
 }
 
+type oneShotScheduler struct {
+	mu      sync.Mutex
+	picked  bool
+	removed []string
+}
+
+func (s *oneShotScheduler) Pick(ctx context.Context) (string, uint32, bool, error) {
+	s.mu.Lock()
+	if !s.picked {
+		s.picked = true
+		s.mu.Unlock()
+		return "cus_future_only", 1, true, nil
+	}
+	s.mu.Unlock()
+	<-ctx.Done()
+	return "", 0, false, ctx.Err()
+}
+
+func (s *oneShotScheduler) Notify(string) {}
+
+func (s *oneShotScheduler) Remove(customerID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.removed = append(s.removed, customerID)
+}
+
+func (s *oneShotScheduler) Removed() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.removed))
+	copy(out, s.removed)
+	return out
+}
+
 type recordingClaimableCustomerStore struct {
 	mu        sync.Mutex
 	responses []claimableCustomerResponse
@@ -104,7 +138,7 @@ func (r *recordingDeliveryStore) ClaimNextN(context.Context, string, int) ([]out
 	return nil, nil
 }
 
-func (r *recordingDeliveryStore) HasPendingWork(context.Context, string) (bool, error) {
+func (r *recordingDeliveryStore) HasClaimableWork(context.Context, string) (bool, error) {
 	return false, nil
 }
 
@@ -137,6 +171,69 @@ func (r *recordingDeliveryStore) MarkRetryBatch(context.Context, []outbox.BatchM
 
 func (r *recordingDeliveryStore) MarkDeadBatch(context.Context, []outbox.BatchMarkItem) error {
 	return nil
+}
+
+type removeOnEmptyClaimStore struct {
+	cancel          context.CancelFunc
+	claimCalls      int
+	claimableChecks int
+}
+
+func (s *removeOnEmptyClaimStore) ClaimNextN(context.Context, string, int) ([]outbox.Delivery, error) {
+	s.claimCalls++
+	return nil, nil
+}
+
+func (s *removeOnEmptyClaimStore) HasClaimableWork(context.Context, string) (bool, error) {
+	s.claimableChecks++
+	s.cancel()
+	return false, nil
+}
+
+func (s *removeOnEmptyClaimStore) MarkSucceeded(context.Context, string, int, time.Duration) error {
+	return nil
+}
+func (s *removeOnEmptyClaimStore) MarkRetry(context.Context, string, int, string, time.Duration, time.Duration) error {
+	return nil
+}
+func (s *removeOnEmptyClaimStore) MarkDead(context.Context, string, int, string, string, time.Duration) error {
+	return nil
+}
+func (s *removeOnEmptyClaimStore) Requeue(context.Context, string, time.Duration) error { return nil }
+func (s *removeOnEmptyClaimStore) MarkSucceededBatch(context.Context, []outbox.BatchMarkItem) error {
+	return nil
+}
+func (s *removeOnEmptyClaimStore) MarkRetryBatch(context.Context, []outbox.BatchMarkItem) error {
+	return nil
+}
+func (s *removeOnEmptyClaimStore) MarkDeadBatch(context.Context, []outbox.BatchMarkItem) error {
+	return nil
+}
+
+func TestRun_RemovesCustomerWhenEmptyClaimHasNoClaimableWork(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sched := &oneShotScheduler{}
+	store := &removeOnEmptyClaimStore{cancel: cancel}
+	w := worker.New(sched)
+
+	err := w.Run(ctx, store)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error: got %v, want context.Canceled", err)
+	}
+	if store.claimCalls != 1 {
+		t.Fatalf("ClaimNextN calls: got %d, want 1", store.claimCalls)
+	}
+	if store.claimableChecks != 1 {
+		t.Fatalf("HasClaimableWork calls: got %d, want 1", store.claimableChecks)
+	}
+	removed := sched.Removed()
+	if !slices.Equal(removed, []string{"cus_future_only"}) {
+		t.Fatalf("Scheduler.Remove calls: got %v, want [cus_future_only]", removed)
+	}
 }
 
 func TestNew_DefaultHTTPClientUsesTunedTransport(t *testing.T) {

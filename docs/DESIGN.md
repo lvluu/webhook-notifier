@@ -9,6 +9,7 @@ Vocabulary used here is defined in [CONTEXT.md](../CONTEXT.md). Architectural co
 - **Reliability**: no Event lost between business commit and final terminal state. Transient failures are retried with bounded backoff; persistent failures land in the DLQ for inspection.
 - **Scalability**: workers are stateless and horizontally scalable. Adding workers increases throughput without changing claim semantics.
 - **Fairness**: a Whale Customer cannot starve Small Customers. Scheduling latency for a Small Customer is bounded regardless of any other Customer's backlog. Fairness is **weighted per Customer**, with a default weight of `1` for every Customer — i.e. equal share today, with a forward-compatible path to differentiated shares (e.g. plan-tier or Whale throttling) without touching the WorkerPool or Outbox.
+- **Runnable service composition**: the notifier entrypoint wires ingest, Registry, Scheduler, Outbox, HostLimiter, WorkerPool, DB-backed discovery, observability, and graceful shutdown. Package-level tests and benchmark drivers exercise mechanics, but do not replace a runnable service.
 
 ## Non-goals (PoC)
 
@@ -77,9 +78,9 @@ flowchart LR
 - **Scheduler** — Given the set of Customers with pending Deliveries, returns the next Customer to serve. Smooth Weighted Round Robin (SWRR, Nginx-style) with `weight=1` default for every Customer (ADR-0001) — degenerates to plain RR until weights diverge. The interface is the load-bearing contract; the implementation (RR / SWRR / DRR) is the trade-off.
   ```go
   type Scheduler interface {
-      // Pick returns the next Customer to serve and a batch hint equal to that
-      // Customer's weight: the worker MAY claim up to batchHint Deliveries
-      // before yielding back. batchHint == 0 means "no work".
+      // Pick returns the next Customer to serve and an implementation-specific
+      // batch hint. The worker MAY claim up to batchHint Deliveries before
+      // yielding back. batchHint == 0 means "no work".
       Pick(ctx context.Context) (id CustomerID, batchHint uint32, ok bool, err error)
       Notify(CustomerID) // wake the scheduler when work arrives
   }
@@ -91,17 +92,19 @@ flowchart LR
       Weight(CustomerID) uint32 // 0 = paused; >=1 = share multiplier
   }
   ```
-  SWRR interleaves picks so a `[3,1]` weight set yields `AABAAABA` rather than classic contiguous `AAAB AAAB` cycles — same share, with the low-weight Customer pulled forward as much as the 3:1 ratio permits. With all weights=1, behaviour is identical to plain RR. A Whale tier with `weight=3` gets 3× share *and* a `batchHint=3` so its worker amortizes one Pick over up to 3 PG claims, improving throughput on its index range without breaking the share invariant. A throttled Customer with `weight=0` is skipped entirely (useful for incident response).
+  SWRR interleaves picks so a `[3,1]` weight set yields `AABAAABA` rather than classic contiguous `AAAB AAAB` cycles — same share, with the low-weight Customer pulled forward as much as the 3:1 ratio permits. With all weights=1, behaviour is identical to plain RR. Weight controls how often a Customer is picked. Claim batch size is a separate database-amortization knob. A throttled Customer with `weight=0` is skipped entirely (useful for incident response).
 - **RetryPolicy** — `Next(attempt int, prevDelay time.Duration, resp *http.Response, err error) (delay time.Duration, terminal bool, reason string)`. Pure function. Encodes decorrelated jitter, 4xx fast-fail, 429 `Retry-After` honouring, and exhaustion (ADR-0003).
 - **Signer** — `Sign(secret, body []byte, ts time.Time) (sig string)`. HMAC-SHA256 over `timestamp.body`. Deterministic.
 
 ### Service modules
 
 - **EventIngest** — Accepts an Event and synchronously fans out one Delivery row per matching Webhook in a single transaction. Same transaction = no Delivery is ever orphaned from its Event.
-- **Outbox** (the `deliveries` table) — The durable work queue. Workers claim with `SELECT ... FROM deliveries WHERE customer_id = $1 AND status IN ('pending') AND next_attempt_at <= now() FOR UPDATE SKIP LOCKED LIMIT $2` once the Scheduler has named a Customer; the `LIMIT` is the `batchHint` returned by `Pick` (1 by default; higher for weighted tiers).
+  Keep synchronous fanout for the PoC: the expected Webhook count per Customer is small, and the transaction freezes routing at Event acceptance time. If ingest-latency measurements later justify asynchronous fanout, persist an immutable routing snapshot or equivalent durable fanout intent with the Event before returning success. A background fanout worker must not resolve a mutable Webhook set later and silently change which Integration Partners receive the Event.
+  Track Event ingest latency by fanout size. Until a product API SLO is defined, use provisional `p99 < 200ms` under realistic Webhook fanout as the threshold for reconsidering asynchronous fanout.
+- **Outbox** (the `deliveries` table) — The durable work queue. Workers claim with `SELECT ... FROM deliveries WHERE customer_id = $1 AND status IN ('pending') AND next_attempt_at <= now() FOR UPDATE SKIP LOCKED LIMIT $2` once the Scheduler has named a Customer; the `LIMIT` is a claim batch size used to amortize database work.
 - **WorkerPool** — N goroutines per process. Each loop:
   1. `id, batchHint, ok := Scheduler.Pick()` — get next Customer and how many Deliveries the worker may serve before yielding.
-  2. Claim up to `batchHint` Deliveries for that Customer (single SQL statement, `LIMIT $batchHint`). With default `weight=1`, this is one Delivery.
+  2. Claim up to the configured batch size for that Customer (single SQL statement). The PoC uses a default minimum batch of 32 Deliveries per pick and validates that throughput tuning against the Small Customer scheduling-latency SLO.
   3. For each claimed Delivery, in order:
      - Look up Webhook (cached).
      - Acquire per-host semaphore (skip and requeue with short backoff if blocked > short timeout; yield back to Scheduler so a saturated partner does not stall fairness).
@@ -112,8 +115,8 @@ flowchart LR
   4. Return to step 1.
 - **SubscriptionRegistry** — Read-only `customer_id → []Webhook`. In-memory LRU with short TTL; cache miss falls back to PG. Avoids hot lookup on every Delivery.
 - **DLQ** (`dead_letters` table) — Terminal Deliveries with reason (`exhausted`, `terminal_4xx`, `terminal_network`).
-  Terminal `deliveries` rows are retained in the live queue only for a bounded operational window, then archived to a time-partitioned history table and removed from `deliveries` so claim indexes do not accumulate unbounded terminal work.
-- **Per-host semaphore** — `map[host]chan struct{}`. Concurrency cap per partner hostname, default 20. Protects partner endpoints from self-inflicted DoS when many Deliveries target the same host.
+  Terminal `deliveries` rows are retained in the live queue for a configurable operational window, initially 24 hours, then archived to a time-partitioned history table and removed from `deliveries` so claim indexes do not accumulate unbounded terminal work.
+- **Process-local HostLimiter** — `map[host]chan struct{}`. Enforces a per-process limit per Integration Partner hostname, default 20. This is the PoC's partial enforcement of the Host Concurrency Cap; a horizontally scaled production deployment needs fleet-wide coordination to preserve the partner-protection invariant.
 - **Webhook circuit breaker** — Persisted per-Webhook breaker state (`closed`, `open`, `half_open`) that keeps chronically failing Webhooks out of claim/discovery until a cooldown permits one probe. Complements RetryPolicy and the Host Concurrency Cap: RetryPolicy decides the outcome of an Attempt, HostLimiter limits local pressure on a hostname, and the breaker stops a broken Webhook from repeatedly occupying worker capacity across many Deliveries.
 
 ## Data model
@@ -188,10 +191,14 @@ stateDiagram-v2
 The single technical claim that drives most of the design: **the unit of fairness is the Customer, not the Delivery, not the worker, not the partner host**.
 
 - The Scheduler iterates over **the set of Customers with pending Deliveries**, not over the Deliveries themselves. This is the key insight. If we iterated over Deliveries, a Whale's 50k-Delivery burst would dominate. Iterating over Customers gives each one a share per cycle proportional to its weight, regardless of backlog depth.
+- A Customer with more Webhooks produces more Deliveries but does not receive more scheduling capacity automatically. Webhook fanout increases backlog, not share. Explicit Customer weight is the only mechanism for differentiated scheduling capacity.
+- **Per-Customer concurrency cap is a complementary future safeguard.** Round-robin controls admission order, but slow Attempts from one Customer can still accumulate in flight and occupy worker capacity. Customer weight controls scheduling share; a concurrency cap would bound simultaneous resource use. It does not replace Customer-based scheduling.
+- A production per-Customer concurrency cap should be fleet-wide. A process-local layer may reduce coordination load, but cannot preserve the deployment-wide bound alone. It can reuse a lease-based distributed semaphore pattern keyed by Customer, independently of the Host Concurrency Cap keyed by Integration Partner.
 - **Weighted by default, equal by default.** Every Customer carries a `weight` (default `1`). The Scheduler is Smooth Weighted Round Robin (SWRR): with uniform weights it is plain RR; with diverging weights it allocates proportional, interleaved slots (no contiguous bursts for high-weight Customers). This makes the equal-share PoC and a future tiered policy the same code path — no rewrite when product introduces plan tiers, Whale throttling, or paid priority.
-- **Weight doubles as a throughput knob.** `Pick` returns a `batchHint == weight` so a worker serving a high-weight Customer may claim multiple Deliveries per Pick, amortizing the scheduler hop and the per-Customer PG index lookup. With `weight=1` (the PoC default) batch is 1, maximally fair and maximally chatty; raising weight raises both share *and* per-Pick throughput without disturbing the share invariant.
-- Per-host concurrency cap is **orthogonal** to per-Customer fairness. It protects partners. Without it, a Whale's per-cycle Delivery slots still get through, but in close succession against the same hostname — partners 429. On cap timeout the worker requeues with a short `next_attempt_at` bump and returns to the Scheduler, so a saturated partner never blocks Pick.
+- **Claim batch size is independent from Customer weight.** Weight controls how often a Customer is picked. Claim batch size controls database amortization per pick. The PoC uses a default minimum batch size of 32 and should tune it against the `< 2s` Small Customer scheduling-latency SLO rather than changing fairness policy to gain throughput.
+- The Host Concurrency Cap is **orthogonal** to per-Customer fairness. It protects partners. Without it, a Whale's per-cycle Delivery slots still get through, but in close succession against the same hostname — partners 429. The PoC's process-local HostLimiter requeues with a short `next_attempt_at` bump on local cap timeout and returns to the Scheduler, so a locally saturated partner never blocks Pick.
 - SWRR is sufficient because Deliveries have uniform cost (one HTTP POST each) and weights are per-Customer, not per-Delivery. DRR exists for variable-cost work units; if Deliveries ever become heterogeneous (e.g. payload-size-weighted), the Scheduler implementation swaps without touching the WorkerPool (ADR-0001).
+- SWRR is the PoC algorithm, not a permanent production commitment. Preserve the Customer-weight fairness contract and profile Scheduler CPU. If active-Customer growth makes SWRR material, replace it with an `O(1)` or `O(log n)` implementation while keeping the same scheduling-latency SLO.
 
 ### Weight source
 
@@ -217,7 +224,60 @@ type HostLimiter struct {
 func (h *HostLimiter) Acquire(ctx context.Context, host string) (release func(), err error) { ... }
 ```
 
-Workers acquire before POSTing. On acquisition timeout the Delivery is requeued with a short `next_attempt_at` bump — the worker frees up to serve another Customer. This keeps fairness intact even when one partner is saturated.
+Workers acquire before POSTing. On acquisition timeout the Delivery is requeued with a short `next_attempt_at` bump — the worker frees up to serve another Customer. This keeps fairness intact when one process saturates its local allowance.
+
+The Host Concurrency Cap is a fleet-wide partner-protection invariant. The PoC's
+in-memory HostLimiter enforces only the local portion of that allowance. A
+horizontally scaled production deployment needs distributed coordination, such
+as a lease-based distributed semaphore. The mechanism is deferred until
+deployment scale and failure semantics are known. A request-rate policy, such
+as a token bucket, would be a separate control with separate configuration; it
+does not enforce the Host Concurrency Cap.
+
+If distributed coordination is configured but unavailable, new Attempts for
+affected hostnames fail closed: Requeue them with a short delay rather than
+falling back to the local HostLimiter alone. Existing in-flight Attempts
+continue. This avoids multiplying Integration Partner load during a limiter
+incident. The production implementation should expose coordination-failure
+metrics so operators can distinguish limiter outages from partner saturation.
+
+Production coordination should key the cap by normalized `hostname:port`.
+Equivalent URLs using a scheme's default port share one key, while distinct
+ports may carry independent allowances. The PoC currently keys its local
+HostLimiter with `url.Hostname()` only. Webhook paths and Customer identity do
+not belong in the key.
+
+Production configuration should provide a conservative default cap plus
+per-key overrides for Integration Partners with known capacity. Customer-level
+overrides do not belong in this policy because the Host Concurrency Cap protects
+Integration Partners, not Customers.
+
+Distributed semaphore slots should be renewable leases. Acquire a slot before
+POSTing, renew it while the Attempt remains in flight, release it when the
+Attempt finishes, and allow it to expire after missed renewals. The lease TTL
+must exceed the renewal interval and be bounded relative to the configured
+request timeout so a crashed notifier instance cannot strand partner capacity
+indefinitely.
+
+If lease renewal fails while an Attempt is still in flight, cancel the HTTP
+request before the lease expires and classify the outcome as retryable
+coordination loss. Allowing the request to continue after its slot can be
+reissued would violate the cap. A later retry keeps the stable `X-Delivery-Id`
+so the Integration Partner can deduplicate an Attempt that reached it before
+cancellation took effect.
+
+Coordination loss before POSTing is a Requeue: it does not record an Attempt or
+consume the Delivery retry budget because the Integration Partner saw no
+request. Renewal loss after POSTing begins records an Attempt and uses normal
+retry accounting because the Integration Partner may have observed the request.
+Coordination loss does not contribute to opening the Webhook Circuit Breaker:
+it indicates notifier infrastructure failure, not Integration Partner
+destination health. Expose it through separate metrics.
+
+Repeated pre-dispatch Requeues caused by coordination unavailability should use
+jittered exponential backoff with a cap, then reset after a slot is acquired
+successfully. A fixed short delay would create avoidable database churn during
+a limiter outage.
 
 ## Webhook circuit breaker
 
@@ -290,6 +350,12 @@ Each scenario lives in `cmd/bench` and emits a markdown report under `bench/resu
 
 - **No strict per-Customer FIFO.** Documented; partners are expected to handle out-of-order Events on their side using `X-Event-Id` and `created_at`.
 - **In-process Scheduler means per-instance round-robin.** Cross-instance duplicate prevention comes from Postgres claim semantics; cross-instance fairness is only approximate until workers periodically discover claimable Customers from shared storage. Under imbalance, one instance can have a stale or partial claimable Customer view. Bounded by claim batch size once discovery is in place.
+- **Fleet-wide fairness targets bounded Small Customer scheduling latency, not an exact global order.** DB-backed discovery should converge each process toward the shared claimable Customer set and prevent starvation. If multi-instance benchmarks show the scheduling-latency SLO is violated, escalate to Customer leasing or broker-backed per-Customer queues rather than globally serializing every Scheduler pick by default.
+- **Fairness SLO uses Small Customer scheduling latency.** Measure the time from a Delivery becoming claimable to its first claim and evaluate p99 for Small Customers under Whale load. This isolates scheduling behavior from Integration Partner response time and retries. End-to-end Delivery latency remains a separate reliability metric.
+- **Initial Small Customer scheduling-latency SLO: p99 < 2 seconds under Whale load.** This matches Bench Scenario 1 and is a provisional product target to validate against production traffic assumptions. It is not a guarantee during dependency outages.
+- **Retry-due Deliveries use the same fairness SLO once claimable.** Their scheduling-latency clock starts when `next_attempt_at` is reached, not while they are intentionally in backoff. Once due, they compete normally by Customer so recovering Integration Partners are not starved behind fresh Whale traffic.
+- **Reclaimable stale `in_flight` Deliveries use the same fairness SLO after claim-lease expiry.** Before lease expiry they remain owned by the original worker. After expiry they compete normally by Customer. Track reclaimed Deliveries separately so crash-recovery latency remains visible.
+- **Customers with only future work leave local Scheduler rotation.** A Customer whose remaining Deliveries are all waiting for `next_attempt_at` or claim-lease expiry is not claimable yet. Remove it from local rotation after an empty claim; DB-backed discovery re-adds it when work becomes claimable. This avoids hot Postgres polling during backoff.
 - **Postgres as queue has a throughput ceiling.** Bench scenario 4 measures it; the scale-out path is in ADR-0002.
 
 ## Repo layout (planned)

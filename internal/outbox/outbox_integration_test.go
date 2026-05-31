@@ -347,6 +347,62 @@ func TestDiscoverClaimableCustomersMatchesClaimEligibility(t *testing.T) {
 	}
 }
 
+func TestHasClaimableWorkMatchesClaimEligibility(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	store := outbox.New(db, outbox.WithClaimLease(time.Hour))
+
+	futureRetry := submitOneDelivery(t, ctx, db, "cus_future_retry")
+	freshInFlight := submitOneDelivery(t, ctx, db, "cus_fresh_inflight")
+	dueRetry := submitOneDelivery(t, ctx, db, "cus_due_retry")
+
+	_, err := db.ExecContext(ctx, `
+		UPDATE deliveries
+		SET status = 'failed_retry', next_attempt_at = now() + interval '1 hour'
+		WHERE id = $1
+	`, futureRetry)
+	if err != nil {
+		t.Fatalf("set future retry: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `
+		UPDATE deliveries
+		SET status = 'in_flight', claimed_at = now()
+		WHERE id = $1
+	`, freshInFlight)
+	if err != nil {
+		t.Fatalf("set fresh in-flight: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `
+		UPDATE deliveries
+		SET status = 'failed_retry', next_attempt_at = now() - interval '1 second'
+		WHERE id = $1
+	`, dueRetry)
+	if err != nil {
+		t.Fatalf("set due retry: %v", err)
+	}
+
+	tests := []struct {
+		customerID string
+		want       bool
+	}{
+		{customerID: "cus_future_retry", want: false},
+		{customerID: "cus_fresh_inflight", want: false},
+		{customerID: "cus_due_retry", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.customerID, func(t *testing.T) {
+			got, err := store.HasClaimableWork(ctx, tt.customerID)
+			if err != nil {
+				t.Fatalf("HasClaimableWork: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("HasClaimableWork(%s): got %v, want %v", tt.customerID, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestProcessRetryableFailureSchedulesRetry(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)
