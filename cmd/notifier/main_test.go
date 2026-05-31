@@ -42,7 +42,7 @@ func TestBusinessHandler_MethodNotAllowed(t *testing.T) {
 	t.Parallel()
 
 	logger := slogDiscard()
-	handler := newBusinessHandler(logger, nil)
+	handler := newBusinessHandler(logger, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/events", nil)
 	rr := httptest.NewRecorder()
 
@@ -61,7 +61,7 @@ func TestBusinessHandler_InvalidJSON(t *testing.T) {
 		submitFn: func(_ context.Context, _ ingest.Event) (ingest.SubmittedEvent, error) {
 			return ingest.SubmittedEvent{}, nil
 		},
-	})
+	}, nil)
 	req := httptest.NewRequest(http.MethodPost, "/events", strings.NewReader("{"))
 	rr := httptest.NewRecorder()
 
@@ -76,7 +76,7 @@ func TestBusinessHandler_NilStoreReturnsSanitizedError(t *testing.T) {
 	t.Parallel()
 
 	logger := slogDiscard()
-	handler := newBusinessHandler(logger, nil)
+	handler := newBusinessHandler(logger, nil, nil)
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/events",
@@ -102,7 +102,7 @@ func TestBusinessHandler_RequiresFlodeskEventShape(t *testing.T) {
 		submitFn: func(_ context.Context, _ ingest.Event) (ingest.SubmittedEvent, error) {
 			return ingest.SubmittedEvent{}, nil
 		},
-	})
+	}, nil)
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/events",
@@ -125,7 +125,7 @@ func TestBusinessHandler_RejectsMissingEventName(t *testing.T) {
 		submitFn: func(_ context.Context, _ ingest.Event) (ingest.SubmittedEvent, error) {
 			return ingest.SubmittedEvent{}, nil
 		},
-	})
+	}, nil)
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/events",
@@ -148,7 +148,7 @@ func TestBusinessHandler_RejectsMissingEventTime(t *testing.T) {
 		submitFn: func(_ context.Context, _ ingest.Event) (ingest.SubmittedEvent, error) {
 			return ingest.SubmittedEvent{}, nil
 		},
-	})
+	}, nil)
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/events",
@@ -173,7 +173,7 @@ func TestBusinessHandler_SubmitsFlodeskEnvelope(t *testing.T) {
 			got = event
 			return ingest.SubmittedEvent{EventID: "evt_1", DeliveryIDs: []string{"del_1"}}, nil
 		},
-	})
+	}, nil)
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/events",
@@ -200,40 +200,6 @@ func TestBusinessHandler_SubmitsFlodeskEnvelope(t *testing.T) {
 	}
 	if !strings.Contains(string(got.Payload), `"event_time":"2026-05-31T00:00:00Z"`) {
 		t.Fatalf("payload missing event_time, got %s", string(got.Payload))
-	}
-}
-
-func TestLoadWorkerRuntimeConfig_FromEnv(t *testing.T) {
-	t.Setenv("WORKER_COUNT", "3")
-	t.Setenv("WORKER_REQUEST_TIMEOUT", "12s")
-	t.Setenv("DISCOVERY_INTERVAL", "200ms")
-	t.Setenv("DISCOVERY_EMPTY_BACKOFF", "300ms")
-	t.Setenv("DISCOVERY_ERROR_BACKOFF", "400ms")
-	t.Setenv("DISCOVERY_MAX_BACKOFF", "2s")
-	t.Setenv("DISCOVERY_LIMIT", "77")
-
-	cfg := loadWorkerRuntimeConfig()
-
-	if cfg.WorkerCount != 3 {
-		t.Fatalf("WorkerCount: got %d, want 3", cfg.WorkerCount)
-	}
-	if cfg.RequestTimeout != 12*time.Second {
-		t.Fatalf("RequestTimeout: got %s, want 12s", cfg.RequestTimeout)
-	}
-	if cfg.Discovery.Interval != 200*time.Millisecond {
-		t.Fatalf("Discovery.Interval: got %s, want 200ms", cfg.Discovery.Interval)
-	}
-	if cfg.Discovery.EmptyBackoff != 300*time.Millisecond {
-		t.Fatalf("Discovery.EmptyBackoff: got %s, want 300ms", cfg.Discovery.EmptyBackoff)
-	}
-	if cfg.Discovery.ErrorBackoff != 400*time.Millisecond {
-		t.Fatalf("Discovery.ErrorBackoff: got %s, want 400ms", cfg.Discovery.ErrorBackoff)
-	}
-	if cfg.Discovery.MaxBackoff != 2*time.Second {
-		t.Fatalf("Discovery.MaxBackoff: got %s, want 2s", cfg.Discovery.MaxBackoff)
-	}
-	if cfg.Discovery.Limit != 77 {
-		t.Fatalf("Discovery.Limit: got %d, want 77", cfg.Discovery.Limit)
 	}
 }
 

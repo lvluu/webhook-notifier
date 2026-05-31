@@ -1,20 +1,135 @@
 services:
   postgres:
     image: postgres:17-alpine
-    container_name: webhook-notifier-pg
     environment:
       POSTGRES_USER: notifier
       POSTGRES_PASSWORD: notifier
       POSTGRES_DB: notifier
     ports:
       - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U notifier -d notifier"]
+      test: ["CMD-SHELL", "pg_isready -U notifier"]
       interval: 2s
       timeout: 2s
-      retries: 20
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    command:
+      - postgres
+      - -c
+      - max_connections=100
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - wal_level=minimal
+      - -c
+      - fsync=off
+      - -c
+      - full_page_writes=off
+      - -c
+      - synchronous_commit=off
+
+  pgbouncer:
+    image: bitnami/pgbouncer:latest
+    ports:
+      - "6432:6432"
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  notifier:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - notifier
+      - -db
+      - postgres://notifier:notifier@pgbouncer:6432/notifier?sslmode=disable
+      - -addr
+      - :8080
+      - -metrics-addr
+      - :9090
+      - -workers
+      - "64"
+      - -batch-size
+      - "64"
+      - -min-batch
+      - "32"
+      - -concurrency
+      - "16"
+      - -discovery-interval
+      - 5s
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    depends_on:
+      pgbouncer:
+        condition: service_started
+
+  webhook-receiver:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - webhook-receiver
+      - -addr
+      - :8080
+      - -metrics-addr
+      - :9091
+      - -latency-min
+      - 5ms
+      - -latency-max
+      - 15ms
+    ports:
+      - "8081:8080"
+      - "9092:9091"
+
+  chaos:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - chaos
+      - -notifier
+      - http://notifier:8080
+      - -receiver
+      - http://webhook-receiver:8080
+      - -customer-base
+      - chaos
+      - -customers
+      - "100"
+      - -rate
+      - "500"
+      - -burst
+      - "100"
+      - -duration
+      - 60s
+    depends_on:
+      - notifier
+      - webhook-receiver
+    profiles:
+      - chaos
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    depends_on:
+      - prometheus
 
 volumes:
   pgdata:

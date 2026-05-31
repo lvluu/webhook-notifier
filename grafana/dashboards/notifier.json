@@ -1,0 +1,173 @@
+{
+  "title": "Webhook Notifier",
+  "uid": "notifier",
+  "version": 1,
+  "schemaVersion": 39,
+  "timezone": "browser",
+  "refresh": "5s",
+  "panels": [
+    {
+      "title": "Pending Deliveries",
+      "type": "grafana-singlestat",
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0},
+      "targets": [
+        {
+          "expr": "webhook_pending_deliveries_total",
+          "legendFormat": "pending"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "title": "Delivery Throughput (1m rate)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 10, "x": 6, "y": 0},
+      "targets": [
+        {
+          "expr": "rate(webhook_claims_total[1m])",
+          "legendFormat": "claims"
+        },
+        {
+          "expr": "rate(webhook_success_total[1m])",
+          "legendFormat": "success"
+        },
+        {
+          "expr": "rate(webhook_retry_total[1m])",
+          "legendFormat": "retry"
+        },
+        {
+          "expr": "rate(webhook_dead_total[1m])",
+          "legendFormat": "dead"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      },
+      "options": {
+        "legend": {
+          "show": true
+        }
+      }
+    },
+    {
+      "title": "Claim Batch Size",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+      "targets": [
+        {
+          "expr": "avg(webhook_claim_batch_size)",
+          "legendFormat": "avg"
+        },
+        {
+          "expr": "max(webhook_claim_batch_size)",
+          "legendFormat": "max"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "options": {
+        "legend": {
+          "show": true
+        }
+      }
+    },
+    {
+      "title": "Claim Duration (p50/p95/p99)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, rate(webhook_claim_duration_seconds_bucket[1m]))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(webhook_claim_duration_seconds_bucket[1m]))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(webhook_claim_duration_seconds_bucket[1m]))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "options": {
+        "legend": {
+          "show": true
+        }
+      }
+    },
+    {
+      "title": "DB Connections (pool gauges)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [
+        {
+          "expr": "go_sql_open_connections",
+          "legendFormat": "open"
+        },
+        {
+          "expr": "go_sql_in_use_connections",
+          "legendFormat": "in_use"
+        },
+        {
+          "expr": "go_sql_idle_connections",
+          "legendFormat": "idle"
+        }
+      ],
+      "options": {
+        "legend": {
+          "show": true
+        }
+      }
+    },
+    {
+      "title": "Fan-Out: Active Customers",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "targets": [
+        {
+          "expr": "webhook_active_customers",
+          "legendFormat": "active"
+        }
+      ],
+      "options": {
+        "legend": {
+          "show": true
+        }
+      }
+    },
+    {
+      "title": "Breaker States",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "targets": [
+        {
+          "expr": "webhook_breaker_open",
+          "legendFormat": "open"
+        },
+        {
+          "expr": "webhook_breaker_trips_total",
+          "legendFormat": "trips"
+        }
+      ],
+      "options": {
+        "legend": {
+          "show": true
+        }
+      }
+    }
+  ]
+}

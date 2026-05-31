@@ -1,4 +1,3 @@
-// Command notifier runs the Webhook Notifier service.
 package main
 
 import (
@@ -28,56 +27,71 @@ import (
 )
 
 func main() {
-	addr := envDefault("ADDR", ":8080")
-	infraAddr := envDefault("INFRA_ADDR", ":9090")
-	pprof := envBool("PPROF_ENABLED", false)
-
-	flag.StringVar(&addr, "addr", addr, "business HTTP server address")
-	flag.StringVar(&infraAddr, "infra-addr", infraAddr, "infra HTTP server address (metrics, health, pprof)")
-	flag.BoolVar(&pprof, "pprof", pprof, "enable /debug/pprof endpoints on infra server")
+	db := flag.String("db", "", "DATABASE_URL")
+	addr := flag.String("addr", ":8080", "business HTTP server address")
+	metricsAddr := flag.String("metrics-addr", ":9090", "metrics HTTP server address")
+	workerCount := flag.Int("workers", 16, "number of delivery workers")
+	batchSize := flag.Int("batch-size", 64, "claim batch size")
+	minBatch := flag.Int("min-batch", 32, "minimum batch hint")
+	concurrency := flag.Int("concurrency", 16, "host-level concurrency limit")
+	discoveryInterval := flag.Duration("discovery-interval", time.Second, "claimable customer discovery interval")
 	flag.Parse()
 
 	logger := observe.NewLogger(os.Stderr)
 	logger = logger.With("service", "webhook-notifier")
-	logger.Info("starting webhook-notifier", "addr", addr, "infra_addr", infraAddr, "pprof", pprof)
+	logger.Info("starting webhook-notifier",
+		"addr", *addr,
+		"metrics_addr", *metricsAddr,
+		"workers", *workerCount,
+		"batch_size", *batchSize,
+		"min_batch", *minBatch,
+		"concurrency", *concurrency,
+		"discovery_interval", *discoveryInterval,
+	)
 
-	db, err := openDB()
+	dsn := *db
+	if dsn == "" {
+		// #nosec G101 -- local Docker Compose default only; production supplies DATABASE_URL.
+		dsn = os.Getenv("DATABASE_URL")
+	}
+	if dsn == "" {
+		dsn = "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable"
+	}
+
+	dbConn, err := sql.Open("postgres", dsn)
 	if err != nil {
 		logger.Error("failed to open database", "error", err)
 		os.Exit(1)
 	}
-	closeDB := func() {
-		if err := db.Close(); err != nil {
-			logger.Error("database close error", "error", err)
-		}
-	}
+	dbConn.SetMaxOpenConns(*workerCount + 10)
+	dbConn.SetMaxIdleConns(*workerCount + 5)
+	dbConn.SetConnMaxLifetime(30 * time.Minute)
 
 	promRegistry := prometheus.NewRegistry()
 	observe.RegisterMetrics(promRegistry)
-	observe.RegisterPoolGauges(promRegistry, db)
-	observe.RegisterPendingCountGauges(promRegistry, db)
+	observe.RegisterPoolGauges(promRegistry, dbConn)
+	observe.RegisterPendingCountGauges(promRegistry, dbConn)
 
 	infra := observe.NewInfraServer(observe.InfraServerConfig{
-		Addr:      infraAddr,
-		DB:        db,
-		Pprof:     pprof,
+		Addr:      *metricsAddr,
+		DB:        dbConn,
+		Pprof:     false,
 		Collector: promRegistry,
 	})
 	infraErrCh := infra.Start()
-	logger.Info("infra server started", "addr", infraAddr)
+	logger.Info("infra server started", "addr", *metricsAddr)
 
-	runtimeCfg := loadWorkerRuntimeConfig()
-	runtime, runtimeErrCh, err := startDeliveryRuntime(context.Background(), logger, db, runtimeCfg)
-	if err != nil {
-		logger.Error("failed to start delivery runtime", "error", err)
-		closeDB()
-		os.Exit(1)
-	}
+	sched := roundrobin.New()
+	outboxStore := outbox.New(dbConn)
+	limiter := worker.NewHostLimiter(worker.HostLimiterConfig{})
 
-	ingestStore := ingest.New(db, registry.New(db), runtime.scheduler)
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ingestStore := ingest.New(dbConn, registry.New(dbConn), sched)
 	business := &http.Server{
-		Addr:              addr,
-		Handler:           newBusinessHandler(logger.With("component", "business-http"), ingestStore),
+		Addr:              *addr,
+		Handler:           newBusinessHandler(logger.With("component", "business-http"), ingestStore, dbConn),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	businessErrCh := make(chan error, 1)
@@ -87,7 +101,48 @@ func main() {
 		}
 		close(businessErrCh)
 	}()
-	logger.Info("business server started", "addr", addr)
+	logger.Info("business server started", "addr", *addr)
+
+	var wg sync.WaitGroup
+	allDone := make(chan struct{})
+
+	for i := 0; i < *workerCount; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			w := worker.New(
+				sched,
+				worker.WithHTTPClient(worker.NewHTTPClient(worker.DefaultHTTPConfig())),
+				worker.WithHostLimiter(limiter),
+				worker.WithRequestTimeout(30*time.Second),
+				worker.WithLogger(logger.With("component", "worker", "worker_id", workerID)),
+			)
+			err := w.Run(runCtx, outboxStore)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("worker error", "worker_id", workerID, "error", err)
+			}
+		}(i + 1)
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		err := worker.RunClaimableCustomerDiscovery(runCtx, outboxStore, sched, worker.DiscoveryConfig{
+			Interval:     *discoveryInterval,
+			EmptyBackoff: 5 * time.Second,
+			ErrorBackoff: time.Second,
+			MaxBackoff:   30 * time.Second,
+			Limit:        1000,
+		})
+		if err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("discovery error", "error", err)
+		}
+	}()
+
+	go func() {
+		wg.Wait()
+		close(allDone)
+	}()
 
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
@@ -99,81 +154,166 @@ func main() {
 		logger.Error("infra server error", "error", err)
 	case err := <-businessErrCh:
 		logger.Error("business server error", "error", err)
-	case err := <-runtimeErrCh:
-		logger.Error("delivery runtime error", "error", err)
+	case <-allDone:
+		logger.Info("all workers finished")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	cancel()
 
-	if err := runtime.Stop(ctx); err != nil {
-		logger.Error("delivery runtime shutdown error", "error", err)
-	}
-	if err := infra.Shutdown(ctx); err != nil {
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := infra.Shutdown(shutdownCtx); err != nil {
 		logger.Error("infra server shutdown error", "error", err)
 	}
-	if err := business.Shutdown(ctx); err != nil {
+	if err := business.Shutdown(shutdownCtx); err != nil {
 		logger.Error("business server shutdown error", "error", err)
 	}
-	closeDB()
+	if err := dbConn.Close(); err != nil {
+		logger.Error("database close error", "error", err)
+	}
 	logger.Info("shutdown complete")
 }
 
-func openDB() (*sql.DB, error) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		// #nosec G101 -- local Docker Compose default only; production supplies DATABASE_URL.
-		dsn = "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable"
-	}
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("sql open: %w", err)
-	}
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(30 * time.Minute)
-	return db, nil
+type ingestSubmitter interface {
+	Submit(context.Context, ingest.Event) (ingest.SubmittedEvent, error)
 }
 
-func envDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
+func newBusinessHandler(logger *slog.Logger, ing ingestSubmitter, db *sql.DB) http.Handler {
+	mux := http.NewServeMux()
 
-func envBool(key string, def bool) bool {
-	switch os.Getenv(key) {
-	case "1", "true", "yes", "on":
-		return true
-	case "0", "false", "no", "off":
-		return false
-	}
-	return def
-}
+	eventsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if ing == nil {
+			logger.Error("ingest store is not configured")
+			http.Error(w, "service unavailable", http.StatusInternalServerError)
+			return
+		}
 
-func envInt(key string, def int) int {
-	value := os.Getenv(key)
-	if value == "" {
-		return def
-	}
-	var parsed int
-	if _, err := fmt.Sscanf(value, "%d", &parsed); err != nil || parsed <= 0 {
-		return def
-	}
-	return parsed
-}
+		var raw map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
 
-func envDuration(key string, def time.Duration) time.Duration {
-	value := os.Getenv(key)
-	if value == "" {
-		return def
-	}
-	parsed, err := time.ParseDuration(value)
-	if err != nil || parsed <= 0 {
-		return def
-	}
-	return parsed
+		customerID, ok := jsonStringField(raw, "customer_id")
+		if !ok || customerID == "" {
+			http.Error(w, "customer_id is required", http.StatusBadRequest)
+			return
+		}
+		eventType, ok := jsonStringField(raw, "event_name")
+		if !ok || eventType == "" {
+			http.Error(w, "event_name is required", http.StatusBadRequest)
+			return
+		}
+		_, ok = jsonStringField(raw, "event_time")
+		if !ok {
+			http.Error(w, "timestamp is required", http.StatusBadRequest)
+			return
+		}
+		delete(raw, "customer_id")
+		payload, err := json.Marshal(raw)
+		if err != nil {
+			http.Error(w, "invalid event payload", http.StatusBadRequest)
+			return
+		}
+
+		submitted, err := ing.Submit(r.Context(), ingest.Event{
+			CustomerID: customerID,
+			Type:       eventType,
+			Payload:    payload,
+		})
+		if err != nil {
+			logger.Warn("ingest submit failed", "error", err)
+			http.Error(w, "invalid event payload", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(submitted)
+	})
+
+	mux.Handle("/events", eventsHandler)
+	mux.Handle("/api/events", eventsHandler)
+
+	mux.HandleFunc("/api/customers", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var cmd struct {
+			ID     string `json:"id"`
+			Weight uint32 `json:"weight"`
+			URL    string `json:"url"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		if cmd.ID == "" {
+			http.Error(w, "id is required", http.StatusBadRequest)
+			return
+		}
+		if cmd.URL == "" {
+			http.Error(w, "url is required", http.StatusBadRequest)
+			return
+		}
+		if db == nil {
+			http.Error(w, "database not available", http.StatusInternalServerError)
+			return
+		}
+
+		tx, err := db.BeginTx(r.Context(), nil)
+		if err != nil {
+			logger.Error("begin customer registration transaction", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		_, err = tx.ExecContext(r.Context(), `
+			INSERT INTO customers (id, weight)
+			VALUES ($1, $2)
+			ON CONFLICT (id) DO UPDATE SET weight = EXCLUDED.weight
+		`, cmd.ID, cmd.Weight)
+		if err != nil {
+			logger.Error("upsert customer", "customer_id", cmd.ID, "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		_, err = tx.ExecContext(r.Context(), `
+			INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active)
+			VALUES ($1, $2, '', ARRAY['order.created', 'payment.received'], true)
+		`, cmd.ID, cmd.URL)
+		if err != nil {
+			logger.Error("upsert webhook", "customer_id", cmd.ID, "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		if err := tx.Commit(); err != nil {
+			logger.Error("commit customer registration", "customer_id", cmd.ID, "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		logger.Info("customer registered", "customer_id", cmd.ID, "weight", cmd.Weight, "url", cmd.URL)
+		w.WriteHeader(http.StatusCreated)
+	})
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	return mux
 }
 
 type workerRuntimeConfig struct {
@@ -184,14 +324,14 @@ type workerRuntimeConfig struct {
 
 func loadWorkerRuntimeConfig() workerRuntimeConfig {
 	return workerRuntimeConfig{
-		WorkerCount:    envInt("WORKER_COUNT", 16),
-		RequestTimeout: envDuration("WORKER_REQUEST_TIMEOUT", 30*time.Second),
+		WorkerCount:    16,
+		RequestTimeout: 30 * time.Second,
 		Discovery: worker.DiscoveryConfig{
-			Interval:     envDuration("DISCOVERY_INTERVAL", time.Second),
-			EmptyBackoff: envDuration("DISCOVERY_EMPTY_BACKOFF", 5*time.Second),
-			ErrorBackoff: envDuration("DISCOVERY_ERROR_BACKOFF", time.Second),
-			MaxBackoff:   envDuration("DISCOVERY_MAX_BACKOFF", 30*time.Second),
-			Limit:        envInt("DISCOVERY_LIMIT", 1000),
+			Interval:     time.Second,
+			EmptyBackoff: 5 * time.Second,
+			ErrorBackoff: time.Second,
+			MaxBackoff:   30 * time.Second,
+			Limit:        1000,
 		},
 	}
 }
@@ -282,74 +422,6 @@ func trySendRuntimeError(errCh chan<- error, err error) {
 	case errCh <- err:
 	default:
 	}
-}
-
-type ingestSubmitter interface {
-	Submit(context.Context, ingest.Event) (ingest.SubmittedEvent, error)
-}
-
-func newBusinessHandler(logger *slog.Logger, ingestStore ingestSubmitter) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", http.MethodPost)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if ingestStore == nil {
-			logger.Error("ingest store is not configured")
-			http.Error(w, "service unavailable", http.StatusInternalServerError)
-			return
-		}
-
-		var raw map[string]json.RawMessage
-		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-			http.Error(w, "invalid json body", http.StatusBadRequest)
-			return
-		}
-		customerID, ok := jsonStringField(raw, "customer_id")
-		if !ok || customerID == "" {
-			http.Error(w, "customer_id is required", http.StatusBadRequest)
-			return
-		}
-		eventName, ok := jsonStringField(raw, "event_name")
-		if !ok || eventName == "" {
-			http.Error(w, "event_name is required", http.StatusBadRequest)
-			return
-		}
-		eventTime, ok := jsonStringField(raw, "event_time")
-		if !ok || eventTime == "" {
-			http.Error(w, "event_time is required", http.StatusBadRequest)
-			return
-		}
-		// event_time is contract-required for the Flodesk envelope and remains
-		// part of the persisted event payload after customer_id is removed.
-		delete(raw, "customer_id")
-		payload, err := json.Marshal(raw)
-		if err != nil {
-			http.Error(w, "invalid event payload", http.StatusBadRequest)
-			return
-		}
-
-		submitted, err := ingestStore.Submit(r.Context(), ingest.Event{
-			CustomerID: customerID,
-			Type:       eventName,
-			Payload:    payload,
-		})
-		if err != nil {
-			logger.Warn("ingest submit failed", "error", err)
-			http.Error(w, "invalid event payload", http.StatusBadRequest)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		_ = json.NewEncoder(w).Encode(submitted)
-	})
-	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	return mux
 }
 
 func jsonStringField(raw map[string]json.RawMessage, field string) (string, bool) {
