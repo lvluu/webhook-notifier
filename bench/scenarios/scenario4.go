@@ -233,7 +233,7 @@ func drainScenario4(ctx context.Context, db *sql.DB, numWorkers int, profile sce
 		if pending == 0 {
 			break
 		}
-		hasPending, err := outboxStore.HasPendingWork(pollCtx, scenario4CustomerID)
+		hasPending, err := outboxStore.HasClaimableWork(pollCtx, scenario4CustomerID)
 		if err != nil {
 			return 0, fmt.Errorf("check pending customer work: %w", err)
 		}
