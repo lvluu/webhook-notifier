@@ -41,7 +41,7 @@ One HTTP POST against a Delivery's URL. A Delivery typically has 1 Attempt on th
 _Avoid_: try, request, send
 
 **Host Concurrency Cap**:
-The maximum number of in-flight Attempts a single process may issue concurrently against one Integration Partner hostname. When the cap is reached, further Deliveries to that host are requeued with a short delay so the worker can serve other Customers. Orthogonal to per-Customer fairness — it protects partners, not Customers.
+The maximum number of in-flight Attempts the Webhook Notifier may issue concurrently against one Integration Partner hostname. When the cap is reached, further Deliveries to that host are requeued with a short delay so workers can serve other Customers. Orthogonal to per-Customer fairness — it protects partners, not Customers. A process-local cap is a partial enforcement mechanism; a horizontally scaled deployment needs fleet-wide enforcement to preserve the invariant.
 _Avoid_: rate limit, throttle, backpressure
 
 **Requeue**:

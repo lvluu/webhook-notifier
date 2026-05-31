@@ -2,7 +2,7 @@
 
 ## Context
 
-RetryPolicy limits the number and spacing of Attempts for one Delivery, and the Host Concurrency Cap limits per-process pressure on one Integration Partner hostname. Neither mechanism stops a chronically failing Webhook from repeatedly entering the worker pool across many Deliveries. That wastes worker capacity and keeps a broken Integration Partner in the hot path until every Delivery exhausts its retry budget.
+RetryPolicy limits the number and spacing of Attempts for one Delivery, and the process-local HostLimiter partially enforces the Host Concurrency Cap for one notifier instance. Neither mechanism stops a chronically failing Webhook from repeatedly entering the worker pool across many Deliveries. That wastes worker capacity and keeps a broken Integration Partner in the hot path until every Delivery exhausts its retry budget.
 
 ## Decision
 

@@ -871,19 +871,22 @@ func (s *Store) MarkDeadBatch(ctx context.Context, items []BatchMarkItem) error 
 	return nil
 }
 
-// HasPendingWork reports whether the customer has any deliveries in a
-// non-terminal state (pending, in_flight, or failed_retry). Used by workers to
-// decide whether to keep a customer in scheduler rotation after a claim batch
-// returns empty — e.g. when all remaining deliveries are in retry backoff.
-func (s *Store) HasPendingWork(ctx context.Context, customerID string) (bool, error) {
+// HasClaimableWork reports whether the customer has any deliveries that are
+// currently eligible for claim, matching ClaimNextN and discovery semantics.
+func (s *Store) HasClaimableWork(ctx context.Context, customerID string) (bool, error) {
 	var exists bool
 	err := s.db.QueryRowContext(ctx, `
 		SELECT EXISTS (
-			SELECT 1 FROM deliveries d
+			SELECT 1
+			FROM deliveries d
 			WHERE d.customer_id = $1
-			  AND d.status NOT IN ('succeeded', 'dead')
+			  AND (
+			      (d.status IN ('pending', 'failed_retry') AND d.next_attempt_at <= now())
+			      OR (d.status = 'in_flight' AND d.claimed_at < now() - ($2 * interval '1 millisecond'))
+			  )
 			  AND EXISTS (
-			      SELECT 1 FROM webhooks w
+			      SELECT 1
+			      FROM webhooks w
 			      WHERE w.id = d.webhook_id
 			        AND (
 			            w.breaker_state = 'closed'
@@ -892,7 +895,7 @@ func (s *Store) HasPendingWork(ctx context.Context, customerID string) (bool, er
 			        )
 			  )
 		)
-	`, customerID).Scan(&exists)
+	`, customerID, s.claimLease.Milliseconds()).Scan(&exists)
 	return exists, err
 }
 

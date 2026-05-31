@@ -50,7 +50,7 @@ type ProcessResult struct {
 // DeliveryStore mutates and claims Delivery rows. Satisfied by *outbox.Store.
 type DeliveryStore interface {
 	ClaimNextN(ctx context.Context, customerID string, limit int) ([]outbox.Delivery, error)
-	HasPendingWork(ctx context.Context, customerID string) (bool, error)
+	HasClaimableWork(ctx context.Context, customerID string) (bool, error)
 	MarkSucceeded(ctx context.Context, deliveryID string, statusCode int, duration time.Duration) error
 	MarkRetry(ctx context.Context, deliveryID string, statusCode int, errorClass string, delay time.Duration, duration time.Duration) error
 	MarkDead(ctx context.Context, deliveryID string, statusCode int, errorClass string, reason string, duration time.Duration) error
@@ -425,13 +425,19 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 			return fmt.Errorf("claim delivery for %s: %w", customerID, err)
 		}
 		if len(deliveries) == 0 {
-			hasWork, checkErr := store.HasPendingWork(ctx, customerID)
-			if checkErr == nil {
-				if hasWork {
-					w.Scheduler.Notify(customerID)
-				} else {
-					w.Scheduler.Remove(customerID)
-				}
+			hasWork, checkErr := store.HasClaimableWork(ctx, customerID)
+			switch {
+			case checkErr != nil:
+				w.Logger.Warn(
+					"claimability check failed; keeping customer in rotation",
+					"customer_id", customerID,
+					"error", checkErr,
+				)
+				w.Scheduler.Notify(customerID)
+			case hasWork:
+				w.Scheduler.Notify(customerID)
+			default:
+				w.Scheduler.Remove(customerID)
 			}
 			continue
 		}
