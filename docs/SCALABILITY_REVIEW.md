@@ -321,7 +321,7 @@ At 14k delivery/s with 100 instances:
 
 ## Appendix: Predictive Volume Model
 
-Based on Flodesk customer profile (email marketing SaaS):
+Based on a typical email marketing SaaS customer profile:
 
 | Metric | Normal | Peak (bulk import) |
 |--------|--------|-------------------|

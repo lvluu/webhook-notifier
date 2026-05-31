@@ -10,7 +10,7 @@ import (
 
 // ClaimBatchSize is the number of deliveries a worker can claim per scheduler
 // pick. Higher values amortize DB transaction overhead across multiple deliveries.
-const ClaimBatchSize uint32 = 32
+const ClaimBatchSize uint32 = 64
 
 // roundRobin is a plain round-robin Scheduler over the set of Customers with
 // pending Deliveries (ADR-0001).

@@ -42,7 +42,7 @@ func TestBusinessHandler_MethodNotAllowed(t *testing.T) {
 	t.Parallel()
 
 	logger := slogDiscard()
-	handler := newBusinessHandler(logger, nil)
+	handler := newBusinessHandler(logger, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/events", nil)
 	rr := httptest.NewRecorder()
 
@@ -61,7 +61,7 @@ func TestBusinessHandler_InvalidJSON(t *testing.T) {
 		submitFn: func(_ context.Context, _ ingest.Event) (ingest.SubmittedEvent, error) {
 			return ingest.SubmittedEvent{}, nil
 		},
-	})
+	}, nil)
 	req := httptest.NewRequest(http.MethodPost, "/events", strings.NewReader("{"))
 	rr := httptest.NewRecorder()
 
@@ -76,7 +76,7 @@ func TestBusinessHandler_NilStoreReturnsSanitizedError(t *testing.T) {
 	t.Parallel()
 
 	logger := slogDiscard()
-	handler := newBusinessHandler(logger, nil)
+	handler := newBusinessHandler(logger, nil, nil)
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/events",
@@ -94,7 +94,7 @@ func TestBusinessHandler_NilStoreReturnsSanitizedError(t *testing.T) {
 	}
 }
 
-func TestBusinessHandler_RequiresFlodeskEventShape(t *testing.T) {
+func TestBusinessHandler_RequiresExpectedEventShape(t *testing.T) {
 	t.Parallel()
 
 	logger := slogDiscard()
@@ -102,7 +102,7 @@ func TestBusinessHandler_RequiresFlodeskEventShape(t *testing.T) {
 		submitFn: func(_ context.Context, _ ingest.Event) (ingest.SubmittedEvent, error) {
 			return ingest.SubmittedEvent{}, nil
 		},
-	})
+	}, nil)
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/events",
@@ -125,7 +125,7 @@ func TestBusinessHandler_RejectsMissingEventName(t *testing.T) {
 		submitFn: func(_ context.Context, _ ingest.Event) (ingest.SubmittedEvent, error) {
 			return ingest.SubmittedEvent{}, nil
 		},
-	})
+	}, nil)
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/events",
@@ -148,7 +148,7 @@ func TestBusinessHandler_RejectsMissingEventTime(t *testing.T) {
 		submitFn: func(_ context.Context, _ ingest.Event) (ingest.SubmittedEvent, error) {
 			return ingest.SubmittedEvent{}, nil
 		},
-	})
+	}, nil)
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/events",
@@ -163,7 +163,7 @@ func TestBusinessHandler_RejectsMissingEventTime(t *testing.T) {
 	}
 }
 
-func TestBusinessHandler_SubmitsFlodeskEnvelope(t *testing.T) {
+func TestBusinessHandler_SubmitsExpectedEnvelope(t *testing.T) {
 	t.Parallel()
 
 	logger := slogDiscard()
@@ -173,7 +173,7 @@ func TestBusinessHandler_SubmitsFlodeskEnvelope(t *testing.T) {
 			got = event
 			return ingest.SubmittedEvent{EventID: "evt_1", DeliveryIDs: []string{"del_1"}}, nil
 		},
-	})
+	}, nil)
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/events",
@@ -203,37 +203,27 @@ func TestBusinessHandler_SubmitsFlodeskEnvelope(t *testing.T) {
 	}
 }
 
-func TestLoadWorkerRuntimeConfig_FromEnv(t *testing.T) {
-	t.Setenv("WORKER_COUNT", "3")
-	t.Setenv("WORKER_REQUEST_TIMEOUT", "12s")
-	t.Setenv("DISCOVERY_INTERVAL", "200ms")
-	t.Setenv("DISCOVERY_EMPTY_BACKOFF", "300ms")
-	t.Setenv("DISCOVERY_ERROR_BACKOFF", "400ms")
-	t.Setenv("DISCOVERY_MAX_BACKOFF", "2s")
-	t.Setenv("DISCOVERY_LIMIT", "77")
+func TestCustomerRegistration_IsIdempotentForWebhookRows(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	handler := newBusinessHandler(slogDiscard(), stubIngestSubmitter{
+		submitFn: func(_ context.Context, _ ingest.Event) (ingest.SubmittedEvent, error) {
+			return ingest.SubmittedEvent{}, nil
+		},
+	}, db)
 
-	cfg := loadWorkerRuntimeConfig()
+	body := `{"id":"cus_repeat","class":1,"url":"https://partner.example/webhook"}`
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/customers", strings.NewReader(body))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("request %d status: got %d, want %d", i+1, rr.Code, http.StatusCreated)
+		}
+	}
 
-	if cfg.WorkerCount != 3 {
-		t.Fatalf("WorkerCount: got %d, want 3", cfg.WorkerCount)
-	}
-	if cfg.RequestTimeout != 12*time.Second {
-		t.Fatalf("RequestTimeout: got %s, want 12s", cfg.RequestTimeout)
-	}
-	if cfg.Discovery.Interval != 200*time.Millisecond {
-		t.Fatalf("Discovery.Interval: got %s, want 200ms", cfg.Discovery.Interval)
-	}
-	if cfg.Discovery.EmptyBackoff != 300*time.Millisecond {
-		t.Fatalf("Discovery.EmptyBackoff: got %s, want 300ms", cfg.Discovery.EmptyBackoff)
-	}
-	if cfg.Discovery.ErrorBackoff != 400*time.Millisecond {
-		t.Fatalf("Discovery.ErrorBackoff: got %s, want 400ms", cfg.Discovery.ErrorBackoff)
-	}
-	if cfg.Discovery.MaxBackoff != 2*time.Second {
-		t.Fatalf("Discovery.MaxBackoff: got %s, want 2s", cfg.Discovery.MaxBackoff)
-	}
-	if cfg.Discovery.Limit != 77 {
-		t.Fatalf("Discovery.Limit: got %d, want 77", cfg.Discovery.Limit)
+	if got := countWebhooksForCustomerURL(t, ctx, db, "cus_repeat", "https://partner.example/webhook"); got != 1 {
+		t.Fatalf("webhook rows for customer/url: got %d, want 1", got)
 	}
 }
 
@@ -312,6 +302,20 @@ func countSucceededForCustomer(t *testing.T, ctx context.Context, db *sql.DB, cu
 	`, customerID, outbox.StatusSucceeded).Scan(&n)
 	if err != nil {
 		t.Fatalf("count succeeded for %s: %v", customerID, err)
+	}
+	return n
+}
+
+func countWebhooksForCustomerURL(t *testing.T, ctx context.Context, db *sql.DB, customerID, webhookURL string) int {
+	t.Helper()
+	var n int
+	err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM webhooks
+		WHERE customer_id = $1 AND url = $2
+	`, customerID, webhookURL).Scan(&n)
+	if err != nil {
+		t.Fatalf("count webhooks for %s/%s: %v", customerID, webhookURL, err)
 	}
 	return n
 }

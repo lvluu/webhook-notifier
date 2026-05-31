@@ -3,6 +3,7 @@ set dotenv-load := true
 
 database_url := env_var_or_default("DATABASE_URL", "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable")
 migrate      := "go run -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.17.1"
+stack_services := "postgres pgbouncer notifier caddy webhook-receiver prometheus grafana"
 
 # list available recipes
 default:
@@ -58,6 +59,57 @@ lint:
 # tidy go.mod
 tidy:
     go mod tidy
+
+# build production-like stack images
+stack-build:
+    docker compose build
+
+# start production-like stack with N notifier replicas behind Caddy
+stack-up n="3":
+    docker compose up -d --scale notifier={{n}} {{stack_services}}
+
+# same as stack-up; Caddy exposes host-accessible ingest on localhost:8080
+stack-up-host n="3":
+    just stack-up {{n}}
+
+# start opt-in chaos load aligned to SCALABILITY_REVIEW peak mix:
+# 50 whales @ 2.5k/s + 5k small @ 500/s (~3k events/s total)
+stack-chaos n="3":
+    docker compose up -d --scale notifier={{n}} {{stack_services}}
+    docker compose --profile chaos up -d chaos-whales chaos-small
+
+# smoke test Caddy ingest, PgBouncer, workers, and receiver delivery
+stack-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    smoke_id="smoke-$(date +%s)"
+    curl -fsS -X POST http://localhost:8080/api/customers \
+      -H 'Content-Type: application/json' \
+      -d "{\"id\":\"${smoke_id}\",\"weight\":1,\"url\":\"http://webhook-receiver:8080/hooks/${smoke_id}\"}" >/dev/null
+    curl -fsS -X POST http://localhost:8080/api/events \
+      -H 'Content-Type: application/json' \
+      -d "{\"customer_id\":\"${smoke_id}\",\"event_name\":\"subscriber.created\",\"event_time\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"data\":{\"subscriber_id\":\"${smoke_id}-sub\"}}" >/dev/null
+    sleep 3
+    docker compose exec -T postgres psql -U notifier -d notifier -P pager=off \
+      -c "SELECT status, count(*) FROM deliveries GROUP BY status ORDER BY status; SELECT count(*) AS attempts FROM delivery_attempts;"
+    curl -fsS http://localhost:9092/metrics
+
+# show running stack containers
+stack-status:
+    docker compose ps
+
+# stop and remove the full stack, including volumes
+stack-down:
+    docker compose down -v
+
+# follow stack logs, optionally for one service
+stack-logs service="":
+    docker compose logs --tail=100 -f {{service}}
+
+# rebuild images and recreate notifier replicas after code changes
+stack-rebuild n="3":
+    docker compose build
+    docker compose up -d --scale notifier={{n}} --no-deps --force-recreate notifier
 
 # end-to-end smoke (placeholder until #16)
 demo: up migrate

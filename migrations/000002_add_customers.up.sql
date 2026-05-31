@@ -1,10 +1,10 @@
 CREATE TABLE customers (
     id text PRIMARY KEY,
-    weight integer NOT NULL DEFAULT 1 CHECK (weight >= 0),
+    class integer NOT NULL DEFAULT 1 CHECK (class >= 0),
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
-INSERT INTO customers (id, weight) VALUES
+INSERT INTO customers (id, class) VALUES
     ('whale', 3),
     ('small', 1)
 ON CONFLICT (id) DO NOTHING;

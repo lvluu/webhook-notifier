@@ -90,7 +90,7 @@ Issue #9 specified `Get(customerID) ([]Webhook, error)`. The actual interface is
 
 ## Considered options
 
-- **`Get(customerID) ([]Webhook, error)`** — return all webhooks for a customer, filter by event type in Go. Rejected: with 3 event types it produces overlapping entries per customer and pushes SQL-equivalent filtering into Go. Per-`(customerID, eventType)` keys are smaller, exact, and scale naturally when Flodesk adds more event types.
+- **`Get(customerID) ([]Webhook, error)`** — return all webhooks for a customer, filter by event type in Go. Rejected: with 3 event types it produces overlapping entries per customer and pushes SQL-equivalent filtering into Go. Per-`(customerID, eventType)` keys are smaller, exact, and scale naturally when the platform adds more event types.
 - **Hand-rolled LRU+TTL** — `map[string]entry` + `sync.Mutex` + TTL check on `Get`. Rejected: concurrent LRU+TTL correctness is subtle. The vetted library gives both for zero design risk.
 - **Transactionally consistent fan-out** — keep `INSERT ... SELECT FROM webhooks` inside the ingest transaction, and only use Registry for worker-time metadata. Rejected: the ingest fan-out is the hot path that needs caching. Worker-time metadata (`loadDelivery`) is already a fast primary-key lookup.
 - **Registry at both ingest and outbox** — cache webhook metadata for the `loadDelivery` JOIN too. Rejected for this issue: outbox JOIN is fast by PK, and adding a second integration point doubles the surface area. Clean follow-up if profiling shows it matters.

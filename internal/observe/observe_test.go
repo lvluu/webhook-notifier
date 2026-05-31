@@ -137,36 +137,6 @@ func TestRegisterPoolGauges_registers_six_families(t *testing.T) {
 	}
 }
 
-func TestRegisterPendingCountGauges_registers_customer_class_families(t *testing.T) {
-	reg := prometheus.NewRegistry()
-
-	db, err := sql.Open("fake", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	RegisterPendingCountGauges(reg, db)
-
-	families, err := reg.Gather()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var found bool
-	for _, f := range families {
-		if f.GetName() != "webhook_pending_count" {
-			continue
-		}
-		found = true
-		if len(f.GetMetric()) != 3 {
-			t.Fatalf("expected 3 customer_class series, got %d", len(f.GetMetric()))
-		}
-	}
-	if !found {
-		t.Fatal("missing webhook_pending_count family")
-	}
-}
-
 func TestMetricsEndpoint_returns_nonzero_after_seed(t *testing.T) {
 	ResetMetricsForTest()
 	reg := prometheus.NewRegistry()
@@ -224,10 +194,10 @@ func TestMetricsEndpoint_returns_nonzero_after_seed(t *testing.T) {
 	requireContains(`webhook_breaker_trips_total{reason="retryable_5xx"} 1`)
 }
 
-func TestCustomerClassFromWeight(t *testing.T) {
+func TestCustomerClassFromValue(t *testing.T) {
 	tests := []struct {
-		weight uint32
-		want   string
+		class uint32
+		want  string
 	}{
 		{5, "whale"},
 		{3, "whale"},
@@ -236,9 +206,9 @@ func TestCustomerClassFromWeight(t *testing.T) {
 		{0, "paused"},
 	}
 	for _, tt := range tests {
-		got := CustomerClassFromWeight(tt.weight)
+		got := CustomerClassFromValue(tt.class)
 		if got != tt.want {
-			t.Errorf("CustomerClassFromWeight(%d) = %q, want %q", tt.weight, got, tt.want)
+			t.Errorf("CustomerClassFromValue(%d) = %q, want %q", tt.class, got, tt.want)
 		}
 	}
 }

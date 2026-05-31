@@ -76,23 +76,23 @@ func normalizeBreakerConfig(config BreakerConfig) BreakerConfig {
 
 // Delivery is a claimed outbox row with enough data for the worker to POST it.
 type Delivery struct {
-	ID             string
-	EventID        string
-	WebhookID      string
-	CustomerID     string
-	CustomerWeight uint32
-	EventType      string
-	Payload        []byte
-	URL            string
-	Secret         string
-	Status         DeliveryStatus
-	AttemptNumber  int
-	PreviousDelay  time.Duration
-	NextAttemptAt  time.Time
-	ClaimedAt      time.Time
-	LastError      sql.NullString
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID            string
+	EventID       string
+	WebhookID     string
+	CustomerID    string
+	CustomerClass uint32
+	EventType     string
+	Payload       []byte
+	URL           string
+	Secret        string
+	Status        DeliveryStatus
+	AttemptNumber int
+	PreviousDelay time.Duration
+	NextAttemptAt time.Time
+	ClaimedAt     time.Time
+	LastError     sql.NullString
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 // Store claims and mutates Delivery rows in Postgres.
@@ -209,7 +209,7 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 		)
 		SELECT
 		    c.id, c.event_id, c.webhook_id, c.customer_id,
-		    COALESCE(cust.weight, 1),
+		    COALESCE(cust.class, 1),
 		    e.type, e.payload, w.url, w.secret_encrypted,
 		    c.status, c.attempt_count, c.next_attempt_at, c.claimed_at,
 		    c.last_error, c.created_at, c.updated_at,
@@ -237,7 +237,7 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 		var previousDelayMillis sql.NullInt64
 		if err := rows.Scan(
 			&d.ID, &d.EventID, &d.WebhookID, &d.CustomerID,
-			&d.CustomerWeight,
+			&d.CustomerClass,
 			&d.EventType, &d.Payload, &d.URL, &d.Secret,
 			&d.Status, &d.AttemptNumber, &d.NextAttemptAt, &d.ClaimedAt,
 			&d.LastError, &d.CreatedAt, &d.UpdatedAt,
@@ -264,27 +264,56 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 
 // DiscoverClaimableCustomers returns up to limit Customer IDs greater than
 // afterCustomerID that have at least one Delivery eligible for claim.
+//
+// Uses a recursive CTE loose index scan to jump between distinct customer_id
+// values rather than scanning every row for SELECT DISTINCT, which is
+// critical when whales have 50K+ deliveries.
 func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID string, limit int) ([]string, error) {
 	if limit < 1 {
 		return nil, fmt.Errorf("limit must be >= 1")
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT d.customer_id
-		FROM deliveries d
-		JOIN webhooks w ON w.id = d.webhook_id
-		WHERE d.customer_id > $1
-		  AND (
-		      (d.status IN ('pending', 'failed_retry') AND d.next_attempt_at <= now())
-		      OR (d.status = 'in_flight' AND d.claimed_at < now() - ($2 * interval '1 millisecond'))
-		  )
-		  AND (
-		      w.breaker_state = 'closed'
-		      OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = d.id)
-		      OR (w.breaker_state = 'open' AND w.breaker_next_probe_at <= now())
-		  )
-		ORDER BY d.customer_id
-		LIMIT $3
+		WITH RECURSIVE distinct_customers AS (
+			(
+				SELECT d.customer_id, 1 AS rn
+				FROM deliveries d
+				JOIN webhooks w ON w.id = d.webhook_id
+				WHERE d.customer_id > $1
+				  AND (
+				      (d.status IN ('pending', 'failed_retry') AND d.next_attempt_at <= now())
+				      OR (d.status = 'in_flight' AND d.claimed_at < now() - ($2 * interval '1 millisecond'))
+				  )
+				  AND (
+				      w.breaker_state = 'closed'
+				      OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = d.id)
+				      OR (w.breaker_state = 'open' AND w.breaker_next_probe_at <= now())
+				  )
+				ORDER BY d.customer_id
+				LIMIT 1
+			)
+			UNION ALL
+			(
+				SELECT d.customer_id, dc.rn + 1
+				FROM distinct_customers dc
+				JOIN deliveries d ON d.customer_id > dc.customer_id
+				JOIN webhooks w ON w.id = d.webhook_id
+				WHERE d.customer_id > dc.customer_id
+				  AND (
+				      (d.status IN ('pending', 'failed_retry') AND d.next_attempt_at <= now())
+				      OR (d.status = 'in_flight' AND d.claimed_at < now() - ($2 * interval '1 millisecond'))
+				  )
+				  AND (
+				      w.breaker_state = 'closed'
+				      OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = d.id)
+				      OR (w.breaker_state = 'open' AND w.breaker_next_probe_at <= now())
+				  )
+				ORDER BY d.customer_id
+				LIMIT 1
+			)
+		)
+		SELECT customer_id FROM distinct_customers
+		WHERE rn <= $3
 	`, afterCustomerID, s.claimLease.Milliseconds(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("discover claimable customers: %w", err)
