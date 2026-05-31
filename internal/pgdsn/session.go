@@ -1,3 +1,5 @@
+// Package pgdsn provides tiny helpers for rewriting Postgres DSNs with
+// session-level options.
 package pgdsn
 
 import (
