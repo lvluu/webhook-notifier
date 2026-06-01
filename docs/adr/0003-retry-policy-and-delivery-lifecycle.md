@@ -29,14 +29,15 @@ Rationale for terminal-on-4xx: a misconfigured Webhook URL returning 404 should 
 ### Delivery lifecycle
 
 ```
-pending ──claim──> in_flight ──2xx──> succeeded
-                          │
-                          ├──retryable──> failed_retry ──next_attempt_at──> pending
-                          │                                  (loop until exhausted)
-                          └──terminal────────────────────> dead (DLQ)
+pending/failed_retry ──claim(row in delivery_claims)──> claimed
+                                                   │
+                                                   ├──2xx────────> succeeded
+                                                   ├──retryable──> failed_retry ──next_attempt_at──> pending
+                                                   │                                  (loop until exhausted)
+                                                   └──terminal────────────────────> dead (DLQ)
 ```
 
-Five states. `failed_retry` is a distinct state from `pending` so the bench harness and ops dashboards can distinguish "never tried" from "in retry backoff".
+`failed_retry` is a distinct persisted state from `pending` so the bench harness and ops dashboards can distinguish "never tried" from "in retry backoff". Claimed work is represented by `delivery_claims`, not by a persisted `deliveries.status = 'in_flight'` value.
 
 ### Partner-side idempotency contract
 

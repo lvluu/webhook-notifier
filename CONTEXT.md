@@ -32,6 +32,13 @@ _Avoid_: subscription (collides with Subscriber), endpoint, hook config
 The unit of scheduled work: an `(Event × Webhook)` pair. One Event fans out to one Delivery per matching Webhook, so a Customer with many Subscribers and many Webhooks can produce a large Delivery backlog.
 _Avoid_: job, dispatch, notification
 
+**Claim**:
+An active worker lease on a Delivery represented by a row in `delivery_claims`.
+Claim ownership is ephemeral processing state, not a persisted Delivery lifecycle
+status. A Claim may expire and be recovered by another worker according to the
+claim lease policy.
+_Avoid_: in-flight status (as storage truth), lock owner
+
 **Delivery History**:
 A retained record of a terminal Delivery after it leaves the live scheduling path. Delivery History is for audit, debugging, and reporting; it is not schedulable work.
 _Avoid_: archive, log, old delivery
