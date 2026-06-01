@@ -131,9 +131,24 @@ bench-3:
 bench-4:
     BENCH_PROFILE=stress go run ./cmd/bench scenario4
 
+# scenario4 throughput matrix: workers x DB pool size
+bench-4-matrix:
+    BENCH_PROFILE=stress \
+    BENCH_SCENARIO4_MATRIX_WORKERS=8,16,32,48,64 \
+    BENCH_SCENARIO4_MATRIX_DB_CONNS=16,32,48,64,96 \
+    go run ./cmd/bench scenario4
+
+# summarize scenario4 matrix files and recommend a throughput knee
+bench-4-knee:
+    bash ./bench/scripts/scenario4_knee.sh
+
 # dead partner circuit breaker + pool protection (issue #27)
 bench-5:
     BENCH_PROFILE=stress go run ./cmd/bench scenario5
+
+# assignment-aligned production-like mixed workload
+bench-6:
+    BENCH_PROFILE=stress go run ./cmd/bench scenario6
 
 # retain terminal deliveries into delivery_history
 delivery-history-retention:
