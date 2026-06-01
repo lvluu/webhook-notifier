@@ -392,12 +392,12 @@ Profile **%s**: %d Customers, %d Events per Customer, 3 Webhooks per Customer. E
 
 ## Acceptance Criteria
 
-| Criterion | Observed | Limit | Result |
-|---|---:|---:|---|
-| 100%% Deliveries terminal | %d / %d | %d / %d | %s |
-| Partner C outage-window Deliveries succeeded | %d / %d | %d / %d | %s |
-| Partner A lifecycle p99 unaffected | %.0f ms | < %.0f ms | %s |
-| Partner C post-recovery retry spike | %d max/s of %d retries | <= %d max/s | %s |
+| Pillar | Criterion | Observed | Limit | Result |
+|---|---|---|---:|---:|---|
+| Reliability | 100%% Deliveries terminal | %d / %d | %d / %d | %s |
+| Reliability | Partner C outage-window Deliveries succeeded | %d / %d | %d / %d | %s |
+| Reliability | Partner A lifecycle p99 unaffected | %.0f ms | < %.0f ms | %s |
+| Reliability | Partner C post-recovery retry spike | %d max/s of %d retries | <= %d max/s | %s |
 
 ## Per-Partner Lifecycle Latency
 
