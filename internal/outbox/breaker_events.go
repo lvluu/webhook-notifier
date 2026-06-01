@@ -11,3 +11,8 @@ func emitBreakerOpened(webhookID, reason string) {
 	observe.SetBreakerState(webhookID, BreakerStateOpen)
 	observe.IncBreakerTrip(reason)
 }
+
+func emitBreakerClosed(webhookID string) {
+	slog.Default().Info("webhook circuit breaker closed", "webhook_id", webhookID)
+	observe.SetBreakerState(webhookID, BreakerStateClosed)
+}

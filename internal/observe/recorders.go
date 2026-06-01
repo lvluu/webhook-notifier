@@ -14,7 +14,7 @@ func CustomerClassFromValue(class uint32) string {
 
 // IncDelivery safely increments WebhookDeliveriesTotal, skipping if nil.
 func IncDelivery(status string) {
-	if WebhookDeliveriesTotal == nil {
+	if !metricsRegistered() {
 		return
 	}
 	WebhookDeliveriesTotal.WithLabelValues(status).Add(1)
@@ -22,7 +22,7 @@ func IncDelivery(status string) {
 
 // ObserveDeliveryLatency safely observes WebhookDeliveryLatencySeconds, skipping if nil.
 func ObserveDeliveryLatency(customerClass string, seconds float64) {
-	if WebhookDeliveryLatencySeconds == nil {
+	if !metricsRegistered() {
 		return
 	}
 	WebhookDeliveryLatencySeconds.WithLabelValues(customerClass).Observe(seconds)
@@ -30,7 +30,7 @@ func ObserveDeliveryLatency(customerClass string, seconds float64) {
 
 // IncDlq safely increments WebhookDlqTotal, skipping if nil.
 func IncDlq(reason string) {
-	if WebhookDlqTotal == nil {
+	if !metricsRegistered() {
 		return
 	}
 	WebhookDlqTotal.WithLabelValues(reason).Add(1)
@@ -38,7 +38,7 @@ func IncDlq(reason string) {
 
 // ObserveSchedulerPick safely observes WebhookSchedulerPickDurationSeconds, skipping if nil.
 func ObserveSchedulerPick(seconds float64) {
-	if WebhookSchedulerPickDurationSeconds == nil {
+	if !metricsRegistered() {
 		return
 	}
 	WebhookSchedulerPickDurationSeconds.Observe(seconds)
@@ -46,7 +46,7 @@ func ObserveSchedulerPick(seconds float64) {
 
 // SetConfiguredWorkers safely sets WebhookWorkersConfigured, skipping if nil.
 func SetConfiguredWorkers(n int) {
-	if WebhookWorkersConfigured == nil {
+	if !metricsRegistered() {
 		return
 	}
 	WebhookWorkersConfigured.Set(float64(n))
@@ -54,7 +54,7 @@ func SetConfiguredWorkers(n int) {
 
 // SetActiveCustomers safely sets WebhookActiveCustomers, skipping if nil.
 func SetActiveCustomers(n float64) {
-	if WebhookActiveCustomers == nil {
+	if !metricsRegistered() {
 		return
 	}
 	WebhookActiveCustomers.Set(n)
@@ -62,7 +62,7 @@ func SetActiveCustomers(n float64) {
 
 // ObserveSemaphoreWait safely observes WebhookHostSemaphoreWaitSeconds, skipping if nil.
 func ObserveSemaphoreWait(host string, seconds float64) {
-	if WebhookHostSemaphoreWaitSeconds == nil {
+	if !metricsRegistered() {
 		return
 	}
 	WebhookHostSemaphoreWaitSeconds.WithLabelValues(host).Observe(seconds)
@@ -70,7 +70,7 @@ func ObserveSemaphoreWait(host string, seconds float64) {
 
 // ObserveClaimDuration safely observes WebhookClaimDurationSeconds, skipping if nil.
 func ObserveClaimDuration(seconds float64) {
-	if WebhookClaimDurationSeconds == nil {
+	if !metricsRegistered() {
 		return
 	}
 	WebhookClaimDurationSeconds.Observe(seconds)
@@ -78,7 +78,7 @@ func ObserveClaimDuration(seconds float64) {
 
 // ObserveClaimBatchSize safely observes WebhookClaimBatchSize, skipping if nil.
 func ObserveClaimBatchSize(n float64) {
-	if WebhookClaimBatchSize == nil {
+	if !metricsRegistered() {
 		return
 	}
 	WebhookClaimBatchSize.Observe(n)
@@ -86,7 +86,7 @@ func ObserveClaimBatchSize(n float64) {
 
 // IncClaimEmpty safely increments WebhookClaimEmptyTotal, skipping if nil.
 func IncClaimEmpty() {
-	if WebhookClaimEmptyTotal == nil {
+	if !metricsRegistered() {
 		return
 	}
 	WebhookClaimEmptyTotal.Add(1)
@@ -94,7 +94,7 @@ func IncClaimEmpty() {
 
 // ObserveIngestFanout safely observes WebhookIngestFanoutPerEvent, skipping if nil.
 func ObserveIngestFanout(n float64) {
-	if WebhookIngestFanoutPerEvent == nil {
+	if !metricsRegistered() {
 		return
 	}
 	WebhookIngestFanoutPerEvent.Observe(n)
@@ -102,7 +102,7 @@ func ObserveIngestFanout(n float64) {
 
 // ObserveAttempts safely observes WebhookAttemptsPerDelivery, skipping if nil.
 func ObserveAttempts(attempts float64) {
-	if WebhookAttemptsPerDelivery == nil {
+	if !metricsRegistered() {
 		return
 	}
 	WebhookAttemptsPerDelivery.Observe(attempts)
@@ -110,7 +110,7 @@ func ObserveAttempts(attempts float64) {
 
 // SetBreakerState safely records the active breaker state for a Webhook.
 func SetBreakerState(webhookID string, state string) {
-	if WebhookBreakerState == nil {
+	if !metricsRegistered() {
 		return
 	}
 	for _, candidate := range []string{"closed", "open", "half_open"} {
@@ -124,7 +124,7 @@ func SetBreakerState(webhookID string, state string) {
 
 // IncBreakerTrip safely increments WebhookBreakerTripsTotal, skipping if nil.
 func IncBreakerTrip(reason string) {
-	if WebhookBreakerTripsTotal == nil {
+	if !metricsRegistered() {
 		return
 	}
 	WebhookBreakerTripsTotal.WithLabelValues(reason).Add(1)

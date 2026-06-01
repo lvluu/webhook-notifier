@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
-
-	"github.com/lvluu/webhook-notifier/internal/observe"
 )
 
 // MarkSucceeded records the successful Attempt and moves the Delivery to
@@ -54,7 +52,7 @@ func (s *Store) MarkSucceeded(ctx context.Context, deliveryID string, statusCode
 		return err
 	}
 	if breakerClosed {
-		observe.SetBreakerState(webhookID, BreakerStateClosed)
+		emitBreakerClosed(webhookID)
 	}
 	return nil
 }

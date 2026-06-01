@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/lib/pq"
-	"github.com/lvluu/webhook-notifier/internal/observe"
 )
 
 type batchBase struct {
@@ -129,7 +128,7 @@ func (s *Store) MarkSucceededBatch(ctx context.Context, items []BatchMarkItem) e
 		return err
 	}
 	for _, wid := range closedBreakers {
-		observe.SetBreakerState(wid, BreakerStateClosed)
+		emitBreakerClosed(wid)
 	}
 	return nil
 }

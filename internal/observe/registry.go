@@ -1,6 +1,11 @@
 package observe
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"log/slog"
+	"sync/atomic"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
 
 // Package-level metric variables. Initialised by RegisterMetrics. Tests that
 // need a clean registry should call ResetMetricsForTest between test cases.
@@ -19,6 +24,7 @@ var (
 	WebhookIngestFanoutPerEvent         prometheus.Histogram
 	WebhookBreakerState                 *prometheus.GaugeVec
 	WebhookBreakerTripsTotal            *prometheus.CounterVec
+	metricsRegistrationWarned           atomic.Bool
 )
 
 // ResetMetricsForTest reinitialises all metric variables to nil so the next
@@ -39,6 +45,17 @@ func ResetMetricsForTest() {
 	WebhookIngestFanoutPerEvent = nil
 	WebhookBreakerState = nil
 	WebhookBreakerTripsTotal = nil
+	metricsRegistrationWarned.Store(false)
+}
+
+func metricsRegistered() bool {
+	if WebhookDeliveriesTotal != nil {
+		return true
+	}
+	if metricsRegistrationWarned.CompareAndSwap(false, true) {
+		slog.Default().Warn("observe metrics called before RegisterMetrics; dropping metric update")
+	}
+	return false
 }
 
 // RegisterMetrics creates all observe package metrics and registers them with

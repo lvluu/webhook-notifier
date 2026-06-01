@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/lib/pq"
@@ -93,7 +92,6 @@ func (s *Store) recordBreakerSuccess(ctx context.Context, tx *sql.Tx, webhookID 
 	if err != nil {
 		return false, fmt.Errorf("record breaker success: %w", err)
 	}
-	slog.Default().Info("webhook circuit breaker closed", "webhook_id", webhookID)
 	return true, nil
 }
 

@@ -30,9 +30,7 @@ func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Deli
 	if outcome.reason == retry.ReasonSucceeded || (outcome.reason == "" && outcome.errorClass == "") {
 		resultErr := store.MarkSucceeded(ctx, d.ID, outcome.statusCode, outcome.duration)
 		if resultErr == nil {
-			observe.IncDelivery("succeeded")
-			observe.ObserveDeliveryLatency(customerClass, outcome.lifetime.Seconds())
-			observe.ObserveAttempts(float64(d.AttemptNumber))
+			recordSucceededMetrics(customerClass, outcome.lifetime.Seconds(), d.AttemptNumber)
 		}
 		log.Info("delivery succeeded", "status_code", outcome.statusCode, "duration_ms", outcome.duration.Milliseconds())
 		return ProcessResult{Err: resultErr}
@@ -40,10 +38,7 @@ func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Deli
 	if outcome.reason != "" {
 		resultErr := store.MarkDead(ctx, d.ID, outcome.statusCode, outcome.errorClass, outcome.reason, outcome.duration)
 		if resultErr == nil {
-			observe.IncDelivery("dead")
-			observe.ObserveDeliveryLatency(customerClass, outcome.lifetime.Seconds())
-			observe.ObserveAttempts(float64(d.AttemptNumber))
-			observe.IncDlq(outcome.reason)
+			recordDeadMetrics(customerClass, outcome.lifetime.Seconds(), d.AttemptNumber, outcome.reason)
 		}
 		log.Warn("delivery dead", "reason", outcome.reason, "status_code", outcome.statusCode, "duration_ms", outcome.duration.Milliseconds())
 		return ProcessResult{Err: resultErr}

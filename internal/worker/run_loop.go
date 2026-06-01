@@ -76,7 +76,7 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 			outcome  deliveryOutcome
 		}
 		results := make([]classified, len(deliveries))
-		sem := make(chan struct{}, 16) // max concurrent HTTP calls per worker
+		sem := make(chan struct{}, w.DeliveryConcurrency)
 		var wg sync.WaitGroup
 		for i, d := range deliveries {
 			wg.Add(1)
@@ -167,9 +167,7 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 			}
 			for _, item := range succeeded {
 				customerClass := observe.CustomerClassFromValue(findDeliveryClass(item.DeliveryID, deliveries))
-				observe.IncDelivery("succeeded")
-				observe.ObserveDeliveryLatency(customerClass, item.Lifetime.Seconds())
-				observe.ObserveAttempts(float64(item.AttemptNumber))
+				recordSucceededMetrics(customerClass, item.Lifetime.Seconds(), item.AttemptNumber)
 			}
 		}
 		if len(retries) > 0 {
@@ -183,10 +181,7 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 			}
 			for _, item := range dead {
 				customerClass := observe.CustomerClassFromValue(findDeliveryClass(item.DeliveryID, deliveries))
-				observe.IncDelivery("dead")
-				observe.ObserveDeliveryLatency(customerClass, item.Lifetime.Seconds())
-				observe.ObserveAttempts(float64(item.AttemptNumber))
-				observe.IncDlq(item.Reason)
+				recordDeadMetrics(customerClass, item.Lifetime.Seconds(), item.AttemptNumber, item.Reason)
 			}
 		}
 

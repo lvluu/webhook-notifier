@@ -55,13 +55,14 @@ type DeliveryStore interface {
 
 // Worker sends webhook Deliveries and records retry outcomes.
 type Worker struct {
-	HTTP           *http.Client
-	RetryPolicy    retry.RetryPolicy
-	Scheduler      scheduler.Scheduler
-	HostLimiter    *HostLimiter
-	Logger         *slog.Logger
-	RequestTimeout time.Duration
-	MinBatchHint   int
+	HTTP                *http.Client
+	RetryPolicy         retry.RetryPolicy
+	Scheduler           scheduler.Scheduler
+	HostLimiter         *HostLimiter
+	Logger              *slog.Logger
+	RequestTimeout      time.Duration
+	MinBatchHint        int
+	DeliveryConcurrency int
 }
 
 // HTTPConfig configures the shared HTTP client used for webhook Attempts.
@@ -121,15 +122,26 @@ func WithMinBatchHint(minBatchHint int) Option {
 	}
 }
 
+// WithDeliveryConcurrency sets max concurrent HTTP delivery classifications
+// per worker run-loop batch.
+func WithDeliveryConcurrency(n int) Option {
+	return func(w *Worker) {
+		if n > 0 {
+			w.DeliveryConcurrency = n
+		}
+	}
+}
+
 // New returns a Worker using scheduler s and optional overrides.
 func New(s scheduler.Scheduler, opts ...Option) *Worker {
 	w := &Worker{
-		HTTP:           NewHTTPClient(DefaultHTTPConfig()),
-		RetryPolicy:    retry.New(retry.Config{}),
-		Scheduler:      s,
-		Logger:         observe.NewLogger(nil),
-		RequestTimeout: 30 * time.Second,
-		MinBatchHint:   32,
+		HTTP:                NewHTTPClient(DefaultHTTPConfig()),
+		RetryPolicy:         retry.New(retry.Config{}),
+		Scheduler:           s,
+		Logger:              observe.NewLogger(nil),
+		RequestTimeout:      30 * time.Second,
+		MinBatchHint:        32,
+		DeliveryConcurrency: 16,
 	}
 	for _, opt := range opts {
 		opt(w)
