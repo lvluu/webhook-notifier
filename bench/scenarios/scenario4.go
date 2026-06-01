@@ -213,6 +213,7 @@ func drainScenario4(ctx context.Context, db *sql.DB, numWorkers int, profile sce
 				plainSched,
 				worker.WithRetryPolicy(policy),
 				worker.WithLogger(workerLog),
+				worker.WithMinBatchHint(16),
 			)
 			if err := w.Run(workerCtx, outboxStore); err != nil && workerCtx.Err() == nil {
 				slog.Error("worker failed", "worker_id", id, "error", err)

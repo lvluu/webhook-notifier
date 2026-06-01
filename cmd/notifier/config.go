@@ -11,6 +11,9 @@ type workerRuntimeConfig struct {
 	MinBatchHint       int
 	HostConcurrencyCap int
 	RequestTimeout     time.Duration
+	DatabaseURL        string
+	NotifyChannel      string
+	EnablePGNotify     bool
 	Discovery          worker.DiscoveryConfig
 }
 
@@ -20,6 +23,8 @@ func loadWorkerRuntimeConfig() workerRuntimeConfig {
 		MinBatchHint:       32,
 		HostConcurrencyCap: 16,
 		RequestTimeout:     30 * time.Second,
+		NotifyChannel:      "claimable_customers",
+		EnablePGNotify:     true,
 		Discovery: worker.DiscoveryConfig{
 			Interval:     time.Second,
 			EmptyBackoff: 5 * time.Second,

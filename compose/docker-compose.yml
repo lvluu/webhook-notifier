@@ -48,9 +48,9 @@ services:
       DB_USER: notifier
       DB_PASSWORD: notifier
       DB_NAME: notifier
-      POOL_MODE: session
-      DEFAULT_POOL_SIZE: "25"
-      MAX_CLIENT_CONN: "200"
+      POOL_MODE: ${POOL_MODE:-session}
+      DEFAULT_POOL_SIZE: "${DEFAULT_POOL_SIZE:-25}"
+      MAX_CLIENT_CONN: "${MAX_CLIENT_CONN:-200}"
       LISTEN_PORT: "6432"
     depends_on:
       postgres:
@@ -69,15 +69,15 @@ services:
       - -metrics-addr
       - :9090
       - -workers
-      - "64"
+      - "${NOTIFIER_WORKERS:-64}"
       - -min-batch
-      - "32"
+      - "${NOTIFIER_MIN_BATCH:-32}"
       - -concurrency
-      - "16"
+      - "${NOTIFIER_CONCURRENCY:-16}"
       - -discovery-interval
-      - 5s
+      - ${NOTIFIER_DISCOVERY_INTERVAL:-5s}
       - -max-conns
-      - "30"
+      - "${NOTIFIER_MAX_CONNS:-30}"
     depends_on:
       pgbouncer:
         condition: service_started
@@ -120,13 +120,13 @@ services:
       - -customer-base
       - whale
       - -customers
-      - "50"
+      - "${CHAOS_WHALE_CUSTOMERS:-50}"
       - -class
       - "1"
       - -rate
-      - "2500"
+      - "${CHAOS_WHALE_RATE:-2500}"
       - -burst
-      - "10000"
+      - "${CHAOS_WHALE_BURST:-10000}"
 
   chaos-small:
     <<: *chaos-common
@@ -139,13 +139,13 @@ services:
       - -customer-base
       - small
       - -customers
-      - "5000"
+      - "${CHAOS_SMALL_CUSTOMERS:-5000}"
       - -class
       - "1"
       - -rate
-      - "500"
+      - "${CHAOS_SMALL_RATE:-500}"
       - -burst
-      - "1000"
+      - "${CHAOS_SMALL_BURST:-1000}"
 
   prometheus:
     image: prom/prometheus:latest

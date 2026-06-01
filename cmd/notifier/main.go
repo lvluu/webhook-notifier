@@ -18,7 +18,6 @@ import (
 
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 	"github.com/lvluu/webhook-notifier/internal/observe"
-	"github.com/lvluu/webhook-notifier/internal/pgdsn"
 	"github.com/lvluu/webhook-notifier/internal/registry"
 )
 
@@ -31,6 +30,7 @@ func main() {
 	concurrency := flag.Int("concurrency", 16, "Host Concurrency Cap")
 	discoveryInterval := flag.Duration("discovery-interval", time.Second, "claimable customer discovery interval")
 	maxConns := flag.Int("max-conns", 0, "max DB connections (0 = workerCount + 10)")
+	pgNotify := flag.Bool("pg-notify", true, "enable cross-replica Postgres LISTEN/NOTIFY wakeups")
 	flag.Parse()
 
 	logger := observe.NewLogger(os.Stderr)
@@ -42,6 +42,7 @@ func main() {
 		"min_batch", *minBatch,
 		"concurrency", *concurrency,
 		"discovery_interval", *discoveryInterval,
+		"pg_notify", *pgNotify,
 	)
 
 	dsn := *db
@@ -53,8 +54,6 @@ func main() {
 		// #nosec G101 -- local Docker Compose default only; production supplies DATABASE_URL.
 		dsn = "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable"
 	}
-	dsn = pgdsn.WithSessionSetting(dsn, "jit", "off")
-
 	dbConn, err := sql.Open("postgres", dsn)
 	if err != nil {
 		logger.Error("failed to open database", "error", err)
@@ -90,6 +89,8 @@ func main() {
 	runtimeCfg.MinBatchHint = *minBatch
 	runtimeCfg.HostConcurrencyCap = *concurrency
 	runtimeCfg.Discovery.Interval = *discoveryInterval
+	runtimeCfg.DatabaseURL = dsn
+	runtimeCfg.EnablePGNotify = *pgNotify
 
 	deliveryRuntime, runtimeErrCh, err := startDeliveryRuntime(runCtx, logger, dbConn, runtimeCfg)
 	if err != nil {
@@ -98,7 +99,12 @@ func main() {
 	}
 	defer cancel()
 
-	ingestStore := ingest.New(dbConn, registry.New(dbConn), deliveryRuntime.scheduler)
+	ingestStore := ingest.New(
+		dbConn,
+		registry.New(dbConn),
+		deliveryRuntime.scheduler,
+		ingest.WithClaimableCustomerNotify(*pgNotify),
+	)
 	business := &http.Server{
 		Addr:              *addr,
 		Handler:           newBusinessHandler(logger.With("component", "business-http"), ingestStore, dbConn),

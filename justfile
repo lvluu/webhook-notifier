@@ -81,7 +81,44 @@ stack-up-host n="3":
 # 50 whales @ 2.5k/s + 5k small @ 500/s (~3k events/s total)
 stack-chaos n="3":
     {{compose_cmd}} up -d --scale notifier={{n}} {{stack_services}}
-    {{compose_cmd}} --profile chaos up -d chaos-whales chaos-small
+    {{compose_cmd}} --profile chaos up -d --scale notifier={{n}} chaos-whales chaos-small
+
+# start/reconfigure stack with tunable runtime + chaos parameters, then keep chaos running
+stack-tune n="3" workers="16" max_conns="24" discovery_interval="1s" min_batch="32" concurrency="16" pool_mode="transaction" pool_size="30" max_client_conn="400" whale_customers="40" whale_rate="1200" whale_burst="4000" small_customers="2000" small_rate="350" small_burst="700":
+    POOL_MODE={{pool_mode}} \
+    DEFAULT_POOL_SIZE={{pool_size}} \
+    MAX_CLIENT_CONN={{max_client_conn}} \
+    NOTIFIER_WORKERS={{workers}} \
+    NOTIFIER_MIN_BATCH={{min_batch}} \
+    NOTIFIER_CONCURRENCY={{concurrency}} \
+    NOTIFIER_DISCOVERY_INTERVAL={{discovery_interval}} \
+    NOTIFIER_MAX_CONNS={{max_conns}} \
+    CHAOS_WHALE_CUSTOMERS={{whale_customers}} \
+    CHAOS_WHALE_RATE={{whale_rate}} \
+    CHAOS_WHALE_BURST={{whale_burst}} \
+    CHAOS_SMALL_CUSTOMERS={{small_customers}} \
+    CHAOS_SMALL_RATE={{small_rate}} \
+    CHAOS_SMALL_BURST={{small_burst}} \
+    {{compose_cmd}} up -d --scale notifier={{n}} {{stack_services}}
+    POOL_MODE={{pool_mode}} \
+    DEFAULT_POOL_SIZE={{pool_size}} \
+    MAX_CLIENT_CONN={{max_client_conn}} \
+    NOTIFIER_WORKERS={{workers}} \
+    NOTIFIER_MIN_BATCH={{min_batch}} \
+    NOTIFIER_CONCURRENCY={{concurrency}} \
+    NOTIFIER_DISCOVERY_INTERVAL={{discovery_interval}} \
+    NOTIFIER_MAX_CONNS={{max_conns}} \
+    CHAOS_WHALE_CUSTOMERS={{whale_customers}} \
+    CHAOS_WHALE_RATE={{whale_rate}} \
+    CHAOS_WHALE_BURST={{whale_burst}} \
+    CHAOS_SMALL_CUSTOMERS={{small_customers}} \
+    CHAOS_SMALL_RATE={{small_rate}} \
+    CHAOS_SMALL_BURST={{small_burst}} \
+    {{compose_cmd}} --profile chaos up -d --scale notifier={{n}} chaos-whales chaos-small
+
+# print averaged live metrics from Prometheus for A/B comparisons
+stack-metrics window="120" interval="5":
+    PROM_URL=http://localhost:9091 bash ./bench/scripts/stack_metrics_avg.sh {{window}} {{interval}}
 
 # smoke test Caddy ingest, PgBouncer, workers, and receiver delivery
 stack-smoke:
@@ -135,6 +172,16 @@ bench-3:
 # horizontal scale + atomicity + idempotency (issue #15)
 bench-4:
     BENCH_PROFILE=stress go run ./cmd/bench scenario4
+
+# scenario4 on reused local DB (no testcontainers) for lower-variance repeated runs
+bench-4-repeat n="5":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for i in $(seq 1 {{n}}); do
+      BENCH_REUSE_DB=1 BENCH_PROFILE=stress go run ./cmd/bench scenario4
+      tp=$(awk -F'|' '/\| 16 \| 10000 \| 10000 \|/{gsub(/ /, "", $6); print $6; found=1; exit} END{if (!found) print "n/a"}' bench/results/scenario-4.md)
+      echo "run=${i} throughput=${tp}"
+    done
 
 # scenario4 throughput matrix: workers x DB pool size
 bench-4-matrix:

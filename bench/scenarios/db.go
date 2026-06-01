@@ -25,6 +25,21 @@ import (
 // but the default path is a fresh throwaway container with the repo migrations
 // applied.
 func openBenchDatabase(ctx context.Context) (*sql.DB, func(), error) {
+	if benchReuseDatabase() {
+		dsn := os.Getenv("BENCH_DATABASE_URL")
+		source := "BENCH_DATABASE_URL"
+		if dsn == "" {
+			dsn = os.Getenv("DATABASE_URL")
+			source = "DATABASE_URL"
+		}
+		if dsn == "" {
+			dsn = "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable"
+			source = "default-local"
+		}
+		slog.Info("reusing bench database", "component", "bench-db", "source", source, "dsn", redactBenchDSN(dsn))
+		return openBenchDatabaseAtDSN(ctx, dsn, false)
+	}
+
 	if dsn := os.Getenv("BENCH_DATABASE_URL"); dsn != "" {
 		slog.Info("using bench database override", "component", "bench-db", "source", "BENCH_DATABASE_URL")
 		return openBenchDatabaseAtDSN(ctx, dsn, false)
@@ -134,6 +149,15 @@ func repoRoot() string {
 
 func benchKeepDatabase() bool {
 	switch strings.ToLower(os.Getenv("BENCH_KEEP_DATABASE")) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func benchReuseDatabase() bool {
+	switch strings.ToLower(os.Getenv("BENCH_REUSE_DB")) {
 	case "1", "true", "yes", "on":
 		return true
 	default:

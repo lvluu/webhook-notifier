@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
+	"github.com/lib/pq"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/scheduler/roundrobin"
 	"github.com/lvluu/webhook-notifier/internal/worker"
@@ -112,6 +114,16 @@ func startDeliveryRuntimeWithDeps(
 		}
 	}()
 
+	if cfg.EnablePGNotify && cfg.DatabaseURL != "" && cfg.NotifyChannel != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := runNotifyListener(runCtx, cfg.DatabaseURL, cfg.NotifyChannel, sched, logger); err != nil && !errors.Is(err, context.Canceled) {
+				trySendRuntimeError(logger, errCh, fmt.Errorf("notify listener: %w", err))
+			}
+		}()
+	}
+
 	go func() {
 		wg.Wait()
 		close(done)
@@ -131,6 +143,39 @@ func trySendRuntimeError(logger *slog.Logger, errCh chan<- error, err error) {
 	default:
 		if logger != nil {
 			logger.Error("runtime error channel full; dropping runtime error", "error", err)
+		}
+	}
+}
+
+func runNotifyListener(
+	ctx context.Context,
+	dsn string,
+	channel string,
+	sched roundrobinScheduler,
+	logger *slog.Logger,
+) error {
+	listener := pq.NewListener(dsn, 2*time.Second, 30*time.Second, nil)
+	defer func() { _ = listener.Close() }()
+
+	if err := listener.Listen(channel); err != nil {
+		return fmt.Errorf("listen on channel %q: %w", channel, err)
+	}
+
+	if logger != nil {
+		logger.Info("postgres notify listener started", "channel", channel)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case n := <-listener.Notify:
+			if n == nil {
+				continue
+			}
+			if n.Extra != "" {
+				sched.Notify(n.Extra)
+			}
 		}
 	}
 }

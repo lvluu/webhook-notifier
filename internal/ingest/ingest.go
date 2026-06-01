@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/lvluu/webhook-notifier/internal/observe"
 	"github.com/lvluu/webhook-notifier/internal/registry"
 )
+
+const claimableCustomersChannel = "claimable_customers"
 
 // Registry resolves which Webhooks should receive a given Event type for a Customer.
 // Defined at the consumer boundary; implementations live in internal/registry.
@@ -40,17 +43,19 @@ type Notifier interface {
 
 // Store persists Events and their derived Delivery rows in Postgres.
 type Store struct {
-	db       *sql.DB
-	registry Registry
-	notifier Notifier
+	db                *sql.DB
+	registry          Registry
+	notifier          Notifier
+	claimNotifyEnable bool
 }
 
 // New returns an Event ingest store backed by db.
 func New(db *sql.DB, reg Registry, notifier Notifier, opts ...Option) *Store {
 	s := &Store{
-		db:       db,
-		registry: reg,
-		notifier: notifier,
+		db:                db,
+		registry:          reg,
+		notifier:          notifier,
+		claimNotifyEnable: true,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -60,6 +65,13 @@ func New(db *sql.DB, reg Registry, notifier Notifier, opts ...Option) *Store {
 
 // Option configures a Store.
 type Option func(*Store)
+
+// WithClaimableCustomerNotify enables/disables cross-replica pg_notify hints.
+func WithClaimableCustomerNotify(enabled bool) Option {
+	return func(s *Store) {
+		s.claimNotifyEnable = enabled
+	}
+}
 
 // Submit writes the Event and one Delivery per matching active Webhook, then
 // notifies the Scheduler that the Customer has pending Deliveries.
@@ -111,10 +123,20 @@ func (s *Store) Submit(ctx context.Context, event Event) (SubmittedEvent, error)
 
 	if len(hooks) > 0 {
 		s.notifier.Notify(event.CustomerID)
+		s.emitClaimableCustomerNotify(event.CustomerID)
 	}
 
 	observe.ObserveIngestFanout(float64(len(submitted.DeliveryIDs)))
 	return submitted, nil
+}
+
+func (s *Store) emitClaimableCustomerNotify(customerID string) {
+	if !s.claimNotifyEnable || s.db == nil || customerID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	_, _ = s.db.ExecContext(ctx, `SELECT pg_notify($1, $2)`, claimableCustomersChannel, customerID)
 }
 
 func insertDeliveries(ctx context.Context, tx *sql.Tx, eventID string, hooks []Webhook) ([]string, error) {

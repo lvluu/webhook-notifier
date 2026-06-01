@@ -63,6 +63,7 @@ type Worker struct {
 	RequestTimeout      time.Duration
 	MinBatchHint        int
 	DeliveryConcurrency int
+	ClaimConcurrencyCap int
 }
 
 // HTTPConfig configures the shared HTTP client used for webhook Attempts.
@@ -132,6 +133,15 @@ func WithDeliveryConcurrency(n int) Option {
 	}
 }
 
+// WithClaimConcurrencyCap limits concurrent claim transactions per worker set.
+func WithClaimConcurrencyCap(n int) Option {
+	return func(w *Worker) {
+		if n > 0 {
+			w.ClaimConcurrencyCap = n
+		}
+	}
+}
+
 // New returns a Worker using scheduler s and optional overrides.
 func New(s scheduler.Scheduler, opts ...Option) *Worker {
 	w := &Worker{
@@ -142,6 +152,7 @@ func New(s scheduler.Scheduler, opts ...Option) *Worker {
 		RequestTimeout:      30 * time.Second,
 		MinBatchHint:        32,
 		DeliveryConcurrency: 16,
+		ClaimConcurrencyCap: 0,
 	}
 	for _, opt := range opts {
 		opt(w)

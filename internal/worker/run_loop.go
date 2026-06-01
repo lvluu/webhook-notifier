@@ -25,6 +25,11 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 		return fmt.Errorf("scheduler is required")
 	}
 
+	var claimSem chan struct{}
+	if w.ClaimConcurrencyCap > 0 {
+		claimSem = make(chan struct{}, w.ClaimConcurrencyCap)
+	}
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -46,7 +51,24 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 			continue
 		}
 
-		deliveries, err := store.ClaimNextN(ctx, customerID, max(int(batchHint), w.MinBatchHint))
+		if claimSem != nil {
+			select {
+			case claimSem <- struct{}{}:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		claimLimit := w.MinBatchHint
+		if batchHint > 0 {
+			claimLimit = int(batchHint)
+		}
+		if claimLimit < 1 {
+			claimLimit = 1
+		}
+		deliveries, err := store.ClaimNextN(ctx, customerID, claimLimit)
+		if claimSem != nil {
+			<-claimSem
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
