@@ -22,7 +22,6 @@ linters:
     govet:
       enable:
         - waitgroup
-        - waitgroupgo
     revive:
       rules:
         - name: exported
