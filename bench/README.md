@@ -19,7 +19,6 @@ BENCH_PROFILE=stress go run ./cmd/bench scenario2
 BENCH_PROFILE=stress go run ./cmd/bench scenario3
 BENCH_PROFILE=stress go run ./cmd/bench scenario4
 BENCH_PROFILE=stress go run ./cmd/bench scenario5
-BENCH_PROFILE=stress go run ./cmd/bench scenario6
 ```
 
 Use `BENCH_PROFILE=dev` for the smaller, faster tuning profile while iterating locally.
@@ -59,7 +58,6 @@ When no path is provided, the benchmark writes the connection string to `/tmp/be
 - `scenario3` - terminal 4xx classification with no retry waste.
 - `scenario4` - horizontal scale, claim atomicity, and idempotency stability.
 - `scenario5` - dead-partner circuit breaker and healthy-customer pool protection.
-- `scenario6` - assignment-aligned production-like mixed ingest and delivery workload.
 
 ## What The Bench Suite Proves
 
@@ -69,19 +67,6 @@ The scenarios are split so each assignment requirement gets a targeted proof:
 - Reliability: `scenario2`, `scenario3`, and `scenario5`
 - Scalability: `scenario4`, with `scenario1` also showing fairness holds under load
 - Breaker protection: `scenario5`
-- Assignment-like end-to-end mixed behavior: `scenario6` (reliability + scalability + fairness together)
-
-Scenario 6 fairness metric:
-- Uses P95 **first-attempt latency** (`delivery_attempts.attempt_number = 1` sent time minus `deliveries.created_at`).
-- Intention: measure scheduling/queue fairness directly, without conflating retry/backoff effects from transient partner failures.
-
-Claim batch tuning (`MinBatchHint`):
-- `MinBatchHint` is the minimum deliveries a worker claims per scheduler pick.
-- Higher values (for example `32`) usually improve raw throughput by reducing claim SQL round trips.
-- Lower values (for example `1` to `8`) usually improve fairness by yielding back to scheduler more often.
-- Use scenario intent to choose value:
-  - Throughput-focused (`scenario4`): start higher (`32`), then tune up/down with DB pool matrix.
-  - Fairness-sensitive mixed load (`scenario6`): start low (`1` to `8`), then increase only if fairness SLO still holds.
 
 No single scenario proves every requirement. The suite is meant to be read together, with each run covering a different failure mode or load shape.
 
@@ -96,6 +81,5 @@ Current reports:
 - `bench/results/scenario-3.md`
 - `bench/results/scenario-4.md`
 - `bench/results/scenario-5.md`
-- `bench/results/scenario-6.md`
 
 These reports are intended to be committed so the benchmark results stay reviewable and comparable across revisions.

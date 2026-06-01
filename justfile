@@ -135,10 +135,6 @@ bench-4:
 bench-5:
     BENCH_PROFILE=stress go run ./cmd/bench scenario5
 
-# assignment-aligned production-like mixed workload
-bench-6:
-    BENCH_PROFILE=stress go run ./cmd/bench scenario6
-
 # retain terminal deliveries into delivery_history
 delivery-history-retention:
     go run ./cmd/delivery-history-retention
