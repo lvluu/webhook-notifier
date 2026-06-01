@@ -8,7 +8,7 @@ The design therefore needs to commit to fairness semantics that are equal *today
 
 ## Decision
 
-Implement **Smooth Weighted Round Robin (SWRR) over the set of Customers with pending Deliveries**, with a default weight of `1` for every Customer. Source weights from a `WeightSource` interface (PoC impl: returns `1`; production impl: reads `customers.weight` with caching).
+Implement **Smooth Weighted Round Robin (SWRR) over the set of Customers with pending Deliveries**, with a default weight of `1` for every Customer. Source weights from a `WeightSource` interface (PoC impl: returns `1`; production impl: reads `customers.class` with caching).
 
 "Smooth" refers to the Nginx-style algorithm (Wensong Zhang) that interleaves picks instead of emitting contiguous weighted cycles. Classic WRR with weights `[3,1]` yields `AAAB AAAB`; SWRR yields `AABAAABA`. Same share invariant, with the low-weight Customer pulled forward as much as the 3:1 ratio permits — important once tiers ship, harmless when all weights are 1.
 
