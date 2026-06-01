@@ -453,7 +453,7 @@ func (s *Store) ArchiveTerminalDeliveriesWithMode(ctx context.Context, retention
 	defer func() { _ = tx.Rollback() }()
 
 	var archived int
-	query := `
+	const baseArchiveQueryPrefix = `
 		WITH terminal_candidates AS (
 			SELECT d.id AS delivery_id, COALESCE(dl.final_at, d.updated_at) AS final_at
 			FROM deliveries d
@@ -464,8 +464,7 @@ func (s *Store) ArchiveTerminalDeliveriesWithMode(ctx context.Context, retention
 			LIMIT $2
 			FOR UPDATE OF d SKIP LOCKED
 		),`
-	if mode == ArchiveEnrichmentFull {
-		query += `
+	const fullCandidatesCTE = `
 		candidates AS (
 			SELECT
 			    tc.delivery_id,
@@ -499,8 +498,7 @@ func (s *Store) ArchiveTerminalDeliveriesWithMode(ctx context.Context, retention
 			    WHERE da.delivery_id = d.id
 			) attempts ON true
 		),`
-	} else {
-		query += `
+	const deferredCandidatesCTE = `
 		candidates AS (
 			SELECT
 			    tc.delivery_id,
@@ -525,8 +523,7 @@ func (s *Store) ArchiveTerminalDeliveriesWithMode(ctx context.Context, retention
 			JOIN webhooks w ON w.id = d.webhook_id
 			LEFT JOIN dead_letters dl ON dl.delivery_id = d.id
 		),`
-	}
-	query += `
+	const baseArchiveQuerySuffix = `
 		inserted AS (
 			INSERT INTO delivery_history (
 			    delivery_id,
@@ -575,6 +572,11 @@ func (s *Store) ArchiveTerminalDeliveriesWithMode(ctx context.Context, retention
 		)
 		SELECT COUNT(*) FROM deleted
 	`
+	candidatesCTE := deferredCandidatesCTE
+	if mode == ArchiveEnrichmentFull {
+		candidatesCTE = fullCandidatesCTE
+	}
+	query := baseArchiveQueryPrefix + candidatesCTE + baseArchiveQuerySuffix
 	err = tx.QueryRowContext(ctx, query, retention.Milliseconds(), limit).Scan(&archived)
 	if err != nil {
 		return 0, fmt.Errorf("archive terminal deliveries: %w", err)

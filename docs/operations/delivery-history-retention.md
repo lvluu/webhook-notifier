@@ -21,7 +21,25 @@ Rationale:
 
 ## Query Evidence: EXPLAIN ANALYZE + BUFFERS
 
-Capture before/after evidence with representative terminal-row volume.
+Measured on `2026-06-01` against a seeded local dataset:
+
+- `customers`: 200
+- `events`: 5,000
+- terminal `deliveries`: 5,000 (`succeeded`/`dead`)
+- `dead_letters`: 2,000
+- `delivery_attempts`: 12,502
+
+Candidate selection (`LIMIT 500`) comparison:
+
+| Query shape | Execution time | Shared buffers hit |
+| --- | ---: | ---: |
+| Old join-heavy candidates CTE | `80.667 ms` | `16,116` |
+| New candidate-first CTE | `6.275 ms` | `604` |
+
+This evidence shows the largest gain comes from narrowing the lock/selection
+path before expensive enrichment joins.
+
+Repro query template:
 
 ```sql
 EXPLAIN (ANALYZE, BUFFERS)
@@ -38,10 +56,11 @@ WITH terminal_candidates AS (
 SELECT count(*) FROM terminal_candidates;
 ```
 
-Track:
-- planning/execution time
-- shared hit/read buffers
-- whether candidate selection uses terminal index path vs broad sort/scan
+Operational caveat:
+- `--enrichment=deferred` removes the lateral `delivery_attempts` aggregation
+  from the critical path. It still joins `events` and `webhooks` during insert.
+  If cache pressure remains material, split archive into two phases:
+  minimal copy first, asynchronous enrichment second.
 
 ## Vacuum / Bloat Validation
 
@@ -68,6 +87,19 @@ If `n_dead_tup` trends upward without regular autovacuum recovery:
 - reduce retention `--batch-size`
 - increase archive frequency
 - revisit `deliveries` autovacuum knobs in migrations
+
+Observed after one deferred retention pass (`archived 4996 deliveries`):
+
+| Table | `n_live_tup` | `n_dead_tup` | `autovacuum_count` |
+| --- | ---: | ---: | ---: |
+| `deliveries` | 4 | 4,996 | 14 |
+| `delivery_attempts` | 8 | 12,494 | 10 |
+| `dead_letters` | 4 | 1,996 | 1 |
+
+Interpretation:
+- delete-heavy archival still creates substantial dead tuples immediately
+  after each pass.
+- aggressive autovacuum is active and must remain part of retention operations.
 
 ## Operational Note
 
