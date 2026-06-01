@@ -4,6 +4,7 @@ set dotenv-load := true
 database_url := env_var_or_default("DATABASE_URL", "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable")
 migrate      := "go run -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.17.1"
 stack_services := "postgres pgbouncer notifier caddy webhook-receiver prometheus grafana"
+compose_cmd := "docker compose -f compose/docker-compose.yml --project-directory ."
 
 # list available recipes
 default:
@@ -11,12 +12,12 @@ default:
 
 # start Postgres
 up:
-    docker compose up -d postgres
-    docker compose exec -T postgres bash -c 'until pg_isready -U notifier -d notifier; do sleep 1; done'
+    {{compose_cmd}} up -d postgres
+    {{compose_cmd}} exec -T postgres bash -c 'until pg_isready -U notifier -d notifier; do sleep 1; done'
 
 # stop and remove containers + volumes
 down:
-    docker compose down -v
+    {{compose_cmd}} down -v
 
 # apply migrations
 migrate:
@@ -51,6 +52,10 @@ lint:
     #!/usr/bin/env bash
     set -euo pipefail
     GOBIN=$(go env GOPATH)/bin
+    if [[ ! -x "$GOBIN/goimports" ]]; then
+        go install golang.org/x/tools/cmd/goimports@v0.38.0
+    fi
+    find . -name '*.go' -not -path './.git/*' -print0 | xargs -0 "$GOBIN/goimports" -w
     if [[ ! -x "$GOBIN/golangci-lint" ]] || ! "$GOBIN/golangci-lint" --version | grep -q 'version 2\.12\.2'; then
         go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
     fi
@@ -62,11 +67,11 @@ tidy:
 
 # build production-like stack images
 stack-build:
-    docker compose build
+    {{compose_cmd}} build
 
 # start production-like stack with N notifier replicas behind Caddy
 stack-up n="3":
-    docker compose up -d --scale notifier={{n}} {{stack_services}}
+    {{compose_cmd}} up -d --scale notifier={{n}} {{stack_services}}
 
 # same as stack-up; Caddy exposes host-accessible ingest on localhost:8080
 stack-up-host n="3":
@@ -75,8 +80,8 @@ stack-up-host n="3":
 # start opt-in chaos load aligned to SCALABILITY_REVIEW peak mix:
 # 50 whales @ 2.5k/s + 5k small @ 500/s (~3k events/s total)
 stack-chaos n="3":
-    docker compose up -d --scale notifier={{n}} {{stack_services}}
-    docker compose --profile chaos up -d chaos-whales chaos-small
+    {{compose_cmd}} up -d --scale notifier={{n}} {{stack_services}}
+    {{compose_cmd}} --profile chaos up -d chaos-whales chaos-small
 
 # smoke test Caddy ingest, PgBouncer, workers, and receiver delivery
 stack-smoke:
@@ -90,26 +95,26 @@ stack-smoke:
       -H 'Content-Type: application/json' \
       -d "{\"customer_id\":\"${smoke_id}\",\"event_name\":\"subscriber.created\",\"event_time\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"data\":{\"subscriber_id\":\"${smoke_id}-sub\"}}" >/dev/null
     sleep 3
-    docker compose exec -T postgres psql -U notifier -d notifier -P pager=off \
+    {{compose_cmd}} exec -T postgres psql -U notifier -d notifier -P pager=off \
       -c "SELECT status, count(*) FROM deliveries GROUP BY status ORDER BY status; SELECT count(*) AS attempts FROM delivery_attempts;"
     curl -fsS http://localhost:9092/metrics
 
 # show running stack containers
 stack-status:
-    docker compose ps
+    {{compose_cmd}} ps
 
 # stop and remove the full stack, including volumes
 stack-down:
-    docker compose down -v
+    {{compose_cmd}} down -v
 
 # follow stack logs, optionally for one service
 stack-logs service="":
-    docker compose logs --tail=100 -f {{service}}
+    {{compose_cmd}} logs --tail=100 -f {{service}}
 
 # rebuild images and recreate notifier replicas after code changes
 stack-rebuild n="3":
-    docker compose build
-    docker compose up -d --scale notifier={{n}} --no-deps --force-recreate notifier
+    {{compose_cmd}} build
+    {{compose_cmd}} up -d --scale notifier={{n}} --no-deps --force-recreate notifier
 
 # end-to-end smoke (placeholder until #16)
 demo: up migrate

@@ -395,7 +395,7 @@ Each scenario lives in `cmd/bench` and emits a markdown report under `bench/resu
 │   ├── receiver/       # configurable test receiver
 │   ├── scenarios/      # scenario drivers
 │   └── results/        # committed run outputs
-├── docker-compose.yml
+├── compose/docker-compose.yml
 ├── Makefile
 └── go.mod
 ```

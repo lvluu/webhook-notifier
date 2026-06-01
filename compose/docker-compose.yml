@@ -87,7 +87,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./compose/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
     depends_on:
       - notifier
 
@@ -152,16 +152,16 @@ services:
     ports:
       - "9091:9090"
     volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./compose/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
 
   grafana:
     image: grafana/grafana:latest
     ports:
       - "3000:3000"
     volumes:
-      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
-      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./compose/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./compose/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./compose/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
 

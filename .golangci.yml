@@ -19,6 +19,9 @@ linters:
     - gosec
     - nolintlint
   settings:
+    govet:
+      enable:
+        - waitgroup
     revive:
       rules:
         - name: exported

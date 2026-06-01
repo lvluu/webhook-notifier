@@ -337,7 +337,7 @@ func seedScenario6Customers(ctx context.Context, db *sql.DB, smallCount int) err
 	args := []any{scenario6WhaleCustomerID}
 	argPos := 2
 	for i := 0; i < smallCount; i++ {
-		sb.WriteString(fmt.Sprintf(", ($%d, 1)", argPos))
+		_, _ = fmt.Fprintf(&sb, ", ($%d, 1)", argPos)
 		args = append(args, fmt.Sprintf("%s%03d", scenario6SmallPrefix, i))
 		argPos++
 	}
@@ -364,7 +364,7 @@ func seedScenario6Webhooks(ctx context.Context, db *sql.DB, baseURL string, smal
 				sb.WriteString(", ")
 			}
 			base := row*4 + 1
-			sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, true)", base, base+1, base+2, base+3))
+			_, _ = fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, true)", base, base+1, base+2, base+3)
 			args = append(args, cid, baseURL+path, "", "{"+eventType+"}")
 			row++
 		}
