@@ -393,7 +393,7 @@ Profile **%s**: %d Customers, %d Events per Customer, 3 Webhooks per Customer. E
 ## Acceptance Criteria
 
 | Pillar | Criterion | Observed | Limit | Result |
-|---|---|---|---:|---:|---|
+|---|---|---:|---:|---|
 | Reliability | 100%% Deliveries terminal | %d / %d | %d / %d | %s |
 | Reliability | Partner C outage-window Deliveries succeeded | %d / %d | %d / %d | %s |
 | Reliability | Partner A lifecycle p99 unaffected | %.0f ms | < %.0f ms | %s |

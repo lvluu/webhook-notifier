@@ -280,7 +280,7 @@ Profile **%s**: 1 Customer with 2 Webhooks: one healthy URL returning 2xx and on
 ## Acceptance Criteria
 
 | Pillar | Criterion | Observed | Limit | Result |
-|---|---|---|---:|---:|---|
+|---|---|---:|---:|---|
 | Reliability | 100%% Deliveries terminal | %d / %d | %d / %d | %s |
 | Reliability | Good Webhook Deliveries succeeded | %d / %d | %d / %d | %s |
 | Reliability | 404 Webhook Deliveries dead with terminal_4xx | %d / %d | %d / %d | %s |

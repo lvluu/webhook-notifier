@@ -668,7 +668,7 @@ The dead-customer attempt count includes a small number of in-flight claims alre
 ## Acceptance Criteria
 
 | Pillar | Criterion | Observed | Limit | Result |
-|---|---|---|---:|---:|---|
+|---|---|---:|---:|---|
 | Fairness | Healthy Customer p95 within 10%% of control | %s | <= 1.10x | %s |
 | Reliability | Customer 1 breaker opens after threshold | %d failures | >= %d | %s |
 | Reliability | Customer 1 half-open probe observed | %s | true | %s |

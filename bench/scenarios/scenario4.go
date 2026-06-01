@@ -473,7 +473,7 @@ This repo uses just bench-4 as the canonical task command for the issue #15 benc
 ## Acceptance Criteria
 
 | Pillar | Criterion | Observed | Limit | Result |
-|---|---|---|---:|---:|---|
+|---|---|---:|---:|---|
 | Scalability | Scaling: %d workers vs %d workers | %.2fx | >= 4.00x | %s |
 | Reliability | Throughput duplicate tuples | %d | 0 | %s |
 | Reliability | Retry probe duplicate tuples | %d | 0 | %s |
