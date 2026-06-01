@@ -35,7 +35,7 @@ cd flodesk-home-assignment
 # 2. Start Postgres
 just up
 
-# 3. Apply migrations (currently empty — will fill as #4 lands)
+# 3. Apply migrations
 just migrate
 
 # 4. Build everything

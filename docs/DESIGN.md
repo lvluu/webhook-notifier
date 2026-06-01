@@ -87,7 +87,7 @@ flowchart LR
   }
 
   // WeightSource resolves a Customer's fairness weight. Default impl returns 1
-  // for every Customer; future impls read from `customers.weight` (DB) or a
+  // for every Customer; future impls read from `customers.class` (DB) or a
   // plan-tier lookup. The Scheduler depends on this interface, not on storage.
   type WeightSource interface {
       Weight(CustomerID) uint32 // 0 = paused; >=1 = share multiplier
@@ -217,7 +217,7 @@ The single technical claim that drives most of the design: **the unit of fairnes
 customers
 ──────────
 id (uuid)
-weight (int, default 1, check >= 0)  -- 0 = paused
+class (int, default 1, check >= 0)  -- 0 = paused
 plan_tier (text, nullable)            -- optional; resolves to weight via policy
 ```
 

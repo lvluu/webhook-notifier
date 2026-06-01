@@ -377,11 +377,11 @@ The acceptance criteria are that Small Customers have lifecycle p99 under 2s, th
 
 ## Acceptance Criteria
 
-| Criterion | Observed | Limit | Result |
-|---|---:|---:|---|
-| Full workload created | %d deliveries | %d deliveries | %s |
-| All Small lifecycle p99 | %.0f ms | < 2000 ms | %s |
-| Late Small picked within one RR cycle | %d picks | <= %d active Customers | %s |
+| Pillar | Criterion | Observed | Limit | Result |
+|---|---|---:|---:|---|
+| Reliability | Full workload created | %d deliveries | %d deliveries | %s |
+| Fairness | All Small lifecycle p99 | %.0f ms | < 2000 ms | %s |
+| Fairness | Late Small picked within one RR cycle | %d picks | <= %d active Customers | %s |
 
 ## Backlog Drain Latency
 

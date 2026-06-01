@@ -667,16 +667,16 @@ The dead-customer attempt count includes a small number of in-flight claims alre
 
 ## Acceptance Criteria
 
-| Criterion | Observed | Limit | Result |
-|---|---:|---:|---|
-| Healthy Customer p95 within 10%% of control | %s | <= 1.10x | %s |
-| Customer 1 breaker opens after threshold | %d failures | >= %d | %s |
-| Customer 1 half-open probe observed | %s | true | %s |
-| Customer 1 deliveries skipped after open | %d pending | > 0 | %s |
-| Customer 1 dead-customer attempts before breaker hold | %d attempts | <= %d | %s |
-| Breaker trip metric recorded | %.0f | >= 1 | %s |
-| Goroutine count returned near baseline | %d delta | <= 8 | %s |
-| Overall result | %s | PASS | %s |
+| Pillar | Criterion | Observed | Limit | Result |
+|---|---|---:|---:|---|
+| Fairness | Healthy Customer p95 within 10%% of control | %s | <= 1.10x | %s |
+| Reliability | Customer 1 breaker opens after threshold | %d failures | >= %d | %s |
+| Reliability | Customer 1 half-open probe observed | %s | true | %s |
+| Reliability | Customer 1 deliveries skipped after open | %d pending | > 0 | %s |
+| Reliability | Customer 1 dead-customer attempts before breaker hold | %d attempts | <= %d | %s |
+| Reliability | Breaker trip metric recorded | %.0f | >= 1 | %s |
+| Reliability | Goroutine count returned near baseline | %d delta | <= 8 | %s |
+| Reliability | Overall result | %s | PASS | %s |
 `,
 		dead.BreakerOpenSnapshot.State,
 		dead.BreakerOpenSnapshot.FailureCount,
