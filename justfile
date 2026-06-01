@@ -52,6 +52,10 @@ lint:
     #!/usr/bin/env bash
     set -euo pipefail
     GOBIN=$(go env GOPATH)/bin
+    if [[ ! -x "$GOBIN/goimports" ]]; then
+        go install golang.org/x/tools/cmd/goimports@v0.38.0
+    fi
+    find . -name '*.go' -not -path './.git/*' -print0 | xargs -0 "$GOBIN/goimports" -w
     if [[ ! -x "$GOBIN/golangci-lint" ]] || ! "$GOBIN/golangci-lint" --version | grep -q 'version 2\.12\.2'; then
         go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
     fi
