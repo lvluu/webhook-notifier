@@ -47,6 +47,11 @@ type benchProfileConfig struct {
 	BreakerFailureThreshold int           `yaml:"breaker_failure_threshold"`
 	BreakerInitialCooldown  durationValue `yaml:"breaker_initial_cooldown"`
 	BreakerMaxCooldown      durationValue `yaml:"breaker_max_cooldown"`
+	MinBatchHint            int           `yaml:"min_batch_hint"`
+	RetryMaxAttempts        int           `yaml:"retry_max_attempts"`
+	RetryBaseDelay          durationValue `yaml:"retry_base_delay"`
+	RetryCapDelay           durationValue `yaml:"retry_cap_delay"`
+	FairnessRatioLimit      float64       `yaml:"fairness_ratio_limit"`
 }
 
 type durationValue time.Duration

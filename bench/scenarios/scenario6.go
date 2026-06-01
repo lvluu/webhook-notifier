@@ -35,6 +35,11 @@ type scenario6Profile struct {
 	SmallDeliveries         int
 	SubmitInterval          time.Duration
 	RequestTimeout          time.Duration
+	MinBatchHint            int
+	RetryMaxAttempts        int
+	RetryBaseDelay          time.Duration
+	RetryCapDelay           time.Duration
+	FairnessRatioLimit      float64
 	BreakerFailureThreshold int
 }
 
@@ -66,6 +71,18 @@ func scenario6ProfileFromEnv() (scenario6Profile, error) {
 	if raw.RequestTimeout.Duration() <= 0 {
 		return scenario6Profile{}, fmt.Errorf("scenario6 profile %q requires positive request_timeout", name)
 	}
+	if raw.MinBatchHint < 1 {
+		return scenario6Profile{}, fmt.Errorf("scenario6 profile %q requires min_batch_hint >= 1", name)
+	}
+	if raw.RetryMaxAttempts < 1 {
+		return scenario6Profile{}, fmt.Errorf("scenario6 profile %q requires retry_max_attempts >= 1", name)
+	}
+	if raw.RetryBaseDelay.Duration() < 0 || raw.RetryCapDelay.Duration() < 0 {
+		return scenario6Profile{}, fmt.Errorf("scenario6 profile %q has invalid retry delays", name)
+	}
+	if raw.FairnessRatioLimit <= 0 {
+		return scenario6Profile{}, fmt.Errorf("scenario6 profile %q requires fairness_ratio_limit > 0", name)
+	}
 	if raw.BreakerFailureThreshold < 0 {
 		return scenario6Profile{}, fmt.Errorf("scenario6 profile %q has invalid breaker threshold", name)
 	}
@@ -77,6 +94,11 @@ func scenario6ProfileFromEnv() (scenario6Profile, error) {
 		SmallDeliveries:         raw.SmallDeliveries,
 		SubmitInterval:          raw.SubmitInterval.Duration(),
 		RequestTimeout:          raw.RequestTimeout.Duration(),
+		MinBatchHint:            raw.MinBatchHint,
+		RetryMaxAttempts:        raw.RetryMaxAttempts,
+		RetryBaseDelay:          raw.RetryBaseDelay.Duration(),
+		RetryCapDelay:           raw.RetryCapDelay.Duration(),
+		FairnessRatioLimit:      raw.FairnessRatioLimit,
 		BreakerFailureThreshold: raw.BreakerFailureThreshold,
 	}, nil
 }
@@ -116,6 +138,11 @@ func RunScenario6(ctx context.Context) error {
 }
 
 func runScenario6Once(ctx context.Context, db *sql.DB, profile scenario6Profile, workers int) (scenario6RunResult, error) {
+	// Keep DB pool proportional to worker concurrency during this benchmark so
+	// higher worker counts are not artificially bottlenecked by a tiny client pool.
+	db.SetMaxOpenConns(max(workers*4, 16))
+	db.SetMaxIdleConns(max(workers*4, 16))
+
 	if err := resetBenchData(ctx, db); err != nil {
 		return scenario6RunResult{}, fmt.Errorf("reset bench data: %w", err)
 	}
@@ -152,11 +179,11 @@ func runScenario6Once(ctx context.Context, db *sql.DB, profile scenario6Profile,
 				sched,
 				worker.WithLogger(workerLog),
 				worker.WithRequestTimeout(profile.RequestTimeout),
-				worker.WithMinBatchHint(1),
+				worker.WithMinBatchHint(profile.MinBatchHint),
 				worker.WithRetryPolicy(retry.New(retry.Config{
-					MaxAttempts: 10,
-					BaseDelay:   25 * time.Millisecond,
-					CapDelay:    2 * time.Second,
+					MaxAttempts: profile.RetryMaxAttempts,
+					BaseDelay:   profile.RetryBaseDelay,
+					CapDelay:    profile.RetryCapDelay,
 				})),
 			)
 			if err := w.Run(workerCtx, outboxStore); err != nil && workerCtx.Err() == nil {
@@ -223,7 +250,7 @@ func runScenario6Once(ctx context.Context, db *sql.DB, profile scenario6Profile,
 		Total:         total,
 		Duplicates:    duplicates,
 		ReliabilityOK: duplicates == 0 && deadRate <= 1.0,
-		FairnessOK:    smallP95 <= whaleP95*1.25,
+		FairnessOK:    smallP95 <= whaleP95*profile.FairnessRatioLimit,
 	}, nil
 }
 
@@ -396,6 +423,7 @@ Assignment mapping:
 Fairness metric note:
 - Uses first-attempt queue latency (`+"`delivery_attempts.sent_at(attempt=1) - deliveries.created_at`"+`) at P95.
 - Excludes retry/backoff tail so fairness reflects scheduler/queue behavior rather than partner instability.
+- Throughput in this scenario is end-to-end: total deliveries divided by wall time from ingest submission start to full drain.
 
 ## Results
 

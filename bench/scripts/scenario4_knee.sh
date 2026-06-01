@@ -2,7 +2,14 @@
 set -euo pipefail
 
 tmp_csv="$(mktemp)"
-trap 'rm -f "$tmp_csv"' EXIT
+tmp_best_per_worker=""
+cleanup() {
+  rm -f "$tmp_csv"
+  if [[ -n "$tmp_best_per_worker" ]]; then
+    rm -f "$tmp_best_per_worker"
+  fi
+}
+trap cleanup EXIT
 
 echo "worker,db_conns,throughput,file" >"$tmp_csv"
 matrix_report="bench/results/scenario-4-matrix.md"
@@ -82,7 +89,6 @@ echo
 
 # Best per worker, then knee: smallest worker within 95% of max best-per-worker throughput.
 tmp_best_per_worker="$(mktemp)"
-trap 'rm -f "$tmp_csv" "$tmp_best_per_worker"' EXIT
 
 awk -F',' '
   NR == 1 { next }

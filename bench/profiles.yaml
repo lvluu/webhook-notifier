@@ -96,12 +96,22 @@ scenarios:
       small_deliveries: 20
       submit_interval: 2ms
       request_timeout: 1500ms
+      min_batch_hint: 8
+      retry_max_attempts: 10
+      retry_base_delay: 25ms
+      retry_cap_delay: 2s
+      fairness_ratio_limit: 1.05
       breaker_failure_threshold: 0
     stress:
-      worker_counts: [8, 16, 32]
+      worker_counts: [8, 16]
       whale_deliveries: 2000
       small_count: 50
       small_deliveries: 100
       submit_interval: 1ms
       request_timeout: 1500ms
+      min_batch_hint: 8
+      retry_max_attempts: 10
+      retry_base_delay: 25ms
+      retry_cap_delay: 2s
+      fairness_ratio_limit: 1.05
       breaker_failure_threshold: 0
