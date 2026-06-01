@@ -306,6 +306,8 @@ func (rs *ReceiverServer) probabilityHit(r *http.Request, kind string, prob floa
 
 func stableProbability(seed string, r *http.Request, kind string) float64 {
 	h := fnv.New64a()
+	_, _ = h.Write([]byte(r.Header.Get("X-Attempt-Number")))
+	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(seed))
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(kind))
@@ -313,8 +315,6 @@ func stableProbability(seed string, r *http.Request, kind string) float64 {
 	_, _ = h.Write([]byte(r.URL.Path))
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(r.Header.Get("X-Delivery-Id")))
-	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(r.Header.Get("X-Attempt-Number")))
 	return float64(h.Sum64()) / float64(^uint64(0))
 }
 
