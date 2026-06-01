@@ -125,9 +125,9 @@ DATABASE_URL=postgres://notifier:notifier@localhost:5432/notifier?sslmode=disabl
 │   ├── receiver/        # configurable test HTTP server fixture
 │   ├── scenarios/       # the five benchmark scenarios
 │   └── results/         # committed scenario reports
-├── caddy/               # local ingress config for scaled Compose stack
-├── grafana/             # provisioned datasource and notifier dashboard
-├── prometheus/          # scrape config for notifier + receiver metrics
+├── compose/caddy/       # local ingress config for scaled Compose stack
+├── compose/grafana/     # provisioned datasource and notifier dashboard
+├── compose/prometheus/  # scrape config for notifier + receiver metrics
 ├── migrations/          # golang-migrate SQL files
 ├── compose/docker-compose.yml   # production-like local stack
 └── justfile
