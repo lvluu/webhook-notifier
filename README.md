@@ -129,7 +129,7 @@ DATABASE_URL=postgres://notifier:notifier@localhost:5432/notifier?sslmode=disabl
 ├── grafana/             # provisioned datasource and notifier dashboard
 ├── prometheus/          # scrape config for notifier + receiver metrics
 ├── migrations/          # golang-migrate SQL files
-├── docker-compose.yml   # production-like local stack
+├── compose/docker-compose.yml   # production-like local stack
 └── justfile
 ```
 

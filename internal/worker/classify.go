@@ -1,0 +1,114 @@
+package worker
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net/url"
+	"time"
+
+	"github.com/lvluu/webhook-notifier/internal/outbox"
+	"github.com/lvluu/webhook-notifier/internal/retry"
+)
+
+// deliveryOutcome captures the result of sending a delivery and classifying the
+// response, before any database mark is applied.
+type deliveryOutcome struct {
+	statusCode int
+	duration   time.Duration
+	lifetime   time.Duration
+	errorClass string
+	delay      time.Duration
+	reason     string
+	requeued   bool
+	err        error
+}
+
+// classifyDelivery sends the HTTP request and classifies the outcome without
+// touching the database. Separated from Process so the Run loop can batch
+// multiple outcomes into a single round trip per outcome kind.
+func (w *Worker) classifyDelivery(ctx context.Context, d outbox.Delivery) deliveryOutcome {
+	if w.HostLimiter != nil {
+		u, parseErr := url.Parse(d.URL)
+		if parseErr != nil {
+			return deliveryOutcome{err: fmt.Errorf("parse delivery URL: %w", parseErr)}
+		}
+
+		release, acquireErr := w.HostLimiter.Acquire(ctx, u.Hostname())
+		if acquireErr != nil {
+			if ctx.Err() != nil {
+				return deliveryOutcome{err: ctx.Err()}
+			}
+			return deliveryOutcome{requeued: true}
+		}
+		defer release()
+	}
+
+	lifetime := time.Since(d.CreatedAt)
+
+	// Pre-flight MaxAge check
+	_, terminal, reason := w.RetryPolicy.NextWithKey(d.AttemptNumber, d.PreviousDelay, nil, nil, d.ID, lifetime)
+	if terminal && reason == retry.ReasonAgeExceeded {
+		w.Logger.Warn("delivery expired pre-flight, skipping HTTP call",
+			"delivery_id", d.ID,
+			"lifetime_ms", lifetime.Milliseconds(),
+			"max_age_ms", w.RetryPolicy.MaxAge.Milliseconds(),
+		)
+		return deliveryOutcome{
+			lifetime:   lifetime,
+			errorClass: reason,
+			reason:     reason,
+		}
+	}
+
+	started := time.Now()
+	resp, err := w.Send(ctx, Delivery{
+		EventID:       d.EventID,
+		DeliveryID:    d.ID,
+		CustomerID:    d.CustomerID,
+		URL:           d.URL,
+		Body:          d.Payload,
+		EventType:     d.EventType,
+		Secret:        d.Secret,
+		AttemptNumber: d.AttemptNumber,
+	})
+	duration := time.Since(started)
+	lifetime = time.Since(d.CreatedAt)
+
+	if resp != nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		if closeErr := resp.Body.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close response body: %w", closeErr)
+		}
+	}
+
+	statusCode := 0
+	if resp != nil {
+		statusCode = resp.StatusCode
+	}
+
+	delay, terminal, reason := w.RetryPolicy.NextWithKey(d.AttemptNumber, d.PreviousDelay, resp, err, d.ID, lifetime)
+
+	if reason == retry.ReasonSucceeded {
+		return deliveryOutcome{
+			statusCode: statusCode,
+			duration:   duration,
+			lifetime:   lifetime,
+		}
+	}
+	if terminal {
+		return deliveryOutcome{
+			statusCode: statusCode,
+			duration:   duration,
+			lifetime:   lifetime,
+			errorClass: reason,
+			reason:     reason,
+		}
+	}
+	return deliveryOutcome{
+		statusCode: statusCode,
+		duration:   duration,
+		errorClass: reason,
+		delay:      delay,
+	}
+}

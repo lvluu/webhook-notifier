@@ -1,10 +1,6 @@
 package observe
 
-import (
-	"database/sql"
-
-	"github.com/prometheus/client_golang/prometheus"
-)
+import "github.com/prometheus/client_golang/prometheus"
 
 // Package-level metric variables. Initialised by RegisterMetrics. Tests that
 // need a clean registry should call ResetMetricsForTest between test cases.
@@ -43,42 +39,6 @@ func ResetMetricsForTest() {
 	WebhookIngestFanoutPerEvent = nil
 	WebhookBreakerState = nil
 	WebhookBreakerTripsTotal = nil
-}
-
-// RegisterPoolGauges registers six GaugeFunc metrics backed by sql.DB.Stats().
-// Must be called after the DB is opened and metrics are registered.
-func RegisterPoolGauges(reg prometheus.Registerer, db *sql.DB) {
-	reg.MustRegister(
-		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name: "webhook_pg_pool_max_open",
-			Help: "Maximum number of open connections to the database.",
-		}, func() float64 { return float64(db.Stats().MaxOpenConnections) }),
-
-		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name: "webhook_pg_pool_open",
-			Help: "Current number of open connections.",
-		}, func() float64 { return float64(db.Stats().OpenConnections) }),
-
-		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name: "webhook_pg_pool_in_use",
-			Help: "Current number of open connections in use.",
-		}, func() float64 { return float64(db.Stats().InUse) }),
-
-		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name: "webhook_pg_pool_idle",
-			Help: "Current number of idle connections.",
-		}, func() float64 { return float64(db.Stats().Idle) }),
-
-		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name: "webhook_pg_pool_wait_count",
-			Help: "Total number of connections waited for.",
-		}, func() float64 { return float64(db.Stats().WaitCount) }),
-
-		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name: "webhook_pg_pool_wait_duration_seconds",
-			Help: "Total time blocked waiting for a new connection, in seconds.",
-		}, func() float64 { return db.Stats().WaitDuration.Seconds() }),
-	)
 }
 
 // RegisterMetrics creates all observe package metrics and registers them with
@@ -184,134 +144,4 @@ func initMetrics(reg prometheus.Registerer) {
 		WebhookBreakerState,
 		WebhookBreakerTripsTotal,
 	)
-}
-
-// CustomerClassFromValue derives the customer_class label from a class value.
-func CustomerClassFromValue(class uint32) string {
-	switch {
-	case class >= 3:
-		return "whale"
-	case class == 0:
-		return "paused"
-	default:
-		return "small"
-	}
-}
-
-// IncDelivery safely increments WebhookDeliveriesTotal, skipping if nil.
-func IncDelivery(status string) {
-	if WebhookDeliveriesTotal == nil {
-		return
-	}
-	WebhookDeliveriesTotal.WithLabelValues(status).Add(1)
-}
-
-// ObserveDeliveryLatency safely observes WebhookDeliveryLatencySeconds, skipping if nil.
-func ObserveDeliveryLatency(customerClass string, seconds float64) {
-	if WebhookDeliveryLatencySeconds == nil {
-		return
-	}
-	WebhookDeliveryLatencySeconds.WithLabelValues(customerClass).Observe(seconds)
-}
-
-// IncDlq safely increments WebhookDlqTotal, skipping if nil.
-func IncDlq(reason string) {
-	if WebhookDlqTotal == nil {
-		return
-	}
-	WebhookDlqTotal.WithLabelValues(reason).Add(1)
-}
-
-// ObserveSchedulerPick safely observes WebhookSchedulerPickDurationSeconds, skipping if nil.
-func ObserveSchedulerPick(seconds float64) {
-	if WebhookSchedulerPickDurationSeconds == nil {
-		return
-	}
-	WebhookSchedulerPickDurationSeconds.Observe(seconds)
-}
-
-// SetConfiguredWorkers safely sets WebhookWorkersConfigured, skipping if nil.
-func SetConfiguredWorkers(n int) {
-	if WebhookWorkersConfigured == nil {
-		return
-	}
-	WebhookWorkersConfigured.Set(float64(n))
-}
-
-// SetActiveCustomers safely sets WebhookActiveCustomers, skipping if nil.
-func SetActiveCustomers(n float64) {
-	if WebhookActiveCustomers == nil {
-		return
-	}
-	WebhookActiveCustomers.Set(n)
-}
-
-// ObserveSemaphoreWait safely observes WebhookHostSemaphoreWaitSeconds, skipping if nil.
-func ObserveSemaphoreWait(host string, seconds float64) {
-	if WebhookHostSemaphoreWaitSeconds == nil {
-		return
-	}
-	WebhookHostSemaphoreWaitSeconds.WithLabelValues(host).Observe(seconds)
-}
-
-// ObserveClaimDuration safely observes WebhookClaimDurationSeconds, skipping if nil.
-func ObserveClaimDuration(seconds float64) {
-	if WebhookClaimDurationSeconds == nil {
-		return
-	}
-	WebhookClaimDurationSeconds.Observe(seconds)
-}
-
-// ObserveClaimBatchSize safely observes WebhookClaimBatchSize, skipping if nil.
-func ObserveClaimBatchSize(n float64) {
-	if WebhookClaimBatchSize == nil {
-		return
-	}
-	WebhookClaimBatchSize.Observe(n)
-}
-
-// IncClaimEmpty safely increments WebhookClaimEmptyTotal, skipping if nil.
-func IncClaimEmpty() {
-	if WebhookClaimEmptyTotal == nil {
-		return
-	}
-	WebhookClaimEmptyTotal.Add(1)
-}
-
-// ObserveIngestFanout safely observes WebhookIngestFanoutPerEvent, skipping if nil.
-func ObserveIngestFanout(n float64) {
-	if WebhookIngestFanoutPerEvent == nil {
-		return
-	}
-	WebhookIngestFanoutPerEvent.Observe(n)
-}
-
-// ObserveAttempts safely observes WebhookAttemptsPerDelivery, skipping if nil.
-func ObserveAttempts(attempts float64) {
-	if WebhookAttemptsPerDelivery == nil {
-		return
-	}
-	WebhookAttemptsPerDelivery.Observe(attempts)
-}
-
-// SetBreakerState safely records the active breaker state for a Webhook.
-func SetBreakerState(webhookID string, state string) {
-	if WebhookBreakerState == nil {
-		return
-	}
-	for _, candidate := range []string{"closed", "open", "half_open"} {
-		value := 0.0
-		if candidate == state {
-			value = 1
-		}
-		WebhookBreakerState.WithLabelValues(webhookID, candidate).Set(value)
-	}
-}
-
-// IncBreakerTrip safely increments WebhookBreakerTripsTotal, skipping if nil.
-func IncBreakerTrip(reason string) {
-	if WebhookBreakerTripsTotal == nil {
-		return
-	}
-	WebhookBreakerTripsTotal.WithLabelValues(reason).Add(1)
 }
