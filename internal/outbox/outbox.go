@@ -33,6 +33,17 @@ const (
 	StatusDead DeliveryStatus = "dead"
 )
 
+// ArchiveEnrichmentMode controls how much related data retention loads during
+// archive passes.
+type ArchiveEnrichmentMode string
+
+const (
+	// ArchiveEnrichmentFull archives attempt-summary and related metadata.
+	ArchiveEnrichmentFull ArchiveEnrichmentMode = "full"
+	// ArchiveEnrichmentDeferred archives core fields and defers heavy enrichment.
+	ArchiveEnrichmentDeferred ArchiveEnrichmentMode = "deferred"
+)
+
 const (
 	// BreakerStateClosed means the Webhook is claimable normally.
 	BreakerStateClosed = "closed"
@@ -419,11 +430,20 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 // ArchiveTerminalDeliveries copies old terminal Deliveries into Delivery History
 // and removes them from the live queue in one transaction.
 func (s *Store) ArchiveTerminalDeliveries(ctx context.Context, retention time.Duration, limit int) (int, error) {
+	return s.ArchiveTerminalDeliveriesWithMode(ctx, retention, limit, ArchiveEnrichmentFull)
+}
+
+// ArchiveTerminalDeliveriesWithMode copies old terminal Deliveries into Delivery
+// History and removes them from the live queue in one transaction.
+func (s *Store) ArchiveTerminalDeliveriesWithMode(ctx context.Context, retention time.Duration, limit int, mode ArchiveEnrichmentMode) (int, error) {
 	if retention <= 0 {
 		return 0, fmt.Errorf("retention must be > 0")
 	}
 	if limit < 1 {
 		return 0, fmt.Errorf("limit must be >= 1")
+	}
+	if mode != ArchiveEnrichmentFull && mode != ArchiveEnrichmentDeferred {
+		return 0, fmt.Errorf("archive mode must be one of %q or %q", ArchiveEnrichmentFull, ArchiveEnrichmentDeferred)
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -433,10 +453,22 @@ func (s *Store) ArchiveTerminalDeliveries(ctx context.Context, retention time.Du
 	defer func() { _ = tx.Rollback() }()
 
 	var archived int
-	err = tx.QueryRowContext(ctx, `
-		WITH candidates AS (
+	query := `
+		WITH terminal_candidates AS (
+			SELECT d.id AS delivery_id, COALESCE(dl.final_at, d.updated_at) AS final_at
+			FROM deliveries d
+			LEFT JOIN dead_letters dl ON dl.delivery_id = d.id
+			WHERE d.status IN ('succeeded', 'dead')
+			  AND COALESCE(dl.final_at, d.updated_at) < now() - ($1 * interval '1 millisecond')
+			ORDER BY COALESCE(dl.final_at, d.updated_at), d.id
+			LIMIT $2
+			FOR UPDATE OF d SKIP LOCKED
+		),`
+	if mode == ArchiveEnrichmentFull {
+		query += `
+		candidates AS (
 			SELECT
-			    d.id AS delivery_id,
+			    tc.delivery_id,
 			    d.event_id,
 			    d.webhook_id,
 			    d.customer_id,
@@ -451,8 +483,9 @@ func (s *Store) ArchiveTerminalDeliveries(ctx context.Context, retention time.Du
 			    attempts.last_error_class,
 			    d.last_error,
 			    d.created_at AS delivery_created_at,
-			    COALESCE(dl.final_at, d.updated_at) AS final_at
-			FROM deliveries d
+			    tc.final_at
+			FROM terminal_candidates tc
+			JOIN deliveries d ON d.id = tc.delivery_id
 			JOIN events e ON e.id = d.event_id
 			JOIN webhooks w ON w.id = d.webhook_id
 			LEFT JOIN dead_letters dl ON dl.delivery_id = d.id
@@ -465,12 +498,35 @@ func (s *Store) ArchiveTerminalDeliveries(ctx context.Context, retention time.Du
 			    FROM delivery_attempts da
 			    WHERE da.delivery_id = d.id
 			) attempts ON true
-			WHERE d.status IN ('succeeded', 'dead')
-			  AND COALESCE(dl.final_at, d.updated_at) < now() - ($1 * interval '1 millisecond')
-			ORDER BY COALESCE(dl.final_at, d.updated_at), d.id
-			LIMIT $2
-			FOR UPDATE OF d SKIP LOCKED
-		),
+		),`
+	} else {
+		query += `
+		candidates AS (
+			SELECT
+			    tc.delivery_id,
+			    d.event_id,
+			    d.webhook_id,
+			    d.customer_id,
+			    e.type AS event_type,
+			    COALESCE(substring(w.url from '^[a-zA-Z][a-zA-Z0-9+.-]*://([^/:?#]+)'), w.url) AS url_host,
+			    d.status AS final_status,
+			    dl.reason AS terminal_reason,
+			    d.attempt_count,
+			    NULL::timestamptz AS first_attempt_at,
+			    NULL::timestamptz AS last_attempt_at,
+			    NULL::integer AS last_status_code,
+			    NULL::text AS last_error_class,
+			    d.last_error,
+			    d.created_at AS delivery_created_at,
+			    tc.final_at
+			FROM terminal_candidates tc
+			JOIN deliveries d ON d.id = tc.delivery_id
+			JOIN events e ON e.id = d.event_id
+			JOIN webhooks w ON w.id = d.webhook_id
+			LEFT JOIN dead_letters dl ON dl.delivery_id = d.id
+		),`
+	}
+	query += `
 		inserted AS (
 			INSERT INTO delivery_history (
 			    delivery_id,
@@ -518,7 +574,8 @@ func (s *Store) ArchiveTerminalDeliveries(ctx context.Context, retention time.Du
 			RETURNING d.id
 		)
 		SELECT COUNT(*) FROM deleted
-	`, retention.Milliseconds(), limit).Scan(&archived)
+	`
+	err = tx.QueryRowContext(ctx, query, retention.Milliseconds(), limit).Scan(&archived)
 	if err != nil {
 		return 0, fmt.Errorf("archive terminal deliveries: %w", err)
 	}

@@ -76,6 +76,7 @@ func TestRunArchivesOldTerminalDeliveriesAndLeavesRecentRows(t *testing.T) {
 		DatabaseURL: "",
 		Retention:   24 * time.Hour,
 		BatchSize:   1,
+		Enrichment:  outbox.ArchiveEnrichmentFull,
 		DB:          db,
 		Out:         io.Discard,
 	})
