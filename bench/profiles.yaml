@@ -87,3 +87,21 @@ scenarios:
       breaker_failure_threshold: 2
       breaker_initial_cooldown: 15s
       breaker_max_cooldown: 15s
+  # Scenario 6: assignment-aligned production-like mixed ingest and delivery workload.
+  scenario6:
+    dev:
+      worker_counts: [4, 8]
+      whale_deliveries: 200
+      small_count: 10
+      small_deliveries: 20
+      submit_interval: 2ms
+      request_timeout: 1500ms
+      breaker_failure_threshold: 0
+    stress:
+      worker_counts: [8, 16, 32]
+      whale_deliveries: 2000
+      small_count: 50
+      small_deliveries: 100
+      submit_interval: 1ms
+      request_timeout: 1500ms
+      breaker_failure_threshold: 0
