@@ -24,73 +24,86 @@ import (
 )
 
 func TestRunArchivesOldTerminalDeliveriesAndLeavesRecentRows(t *testing.T) {
-	ctx := context.Background()
-	db := newPostgresDB(t, ctx)
-	store := outbox.New(db)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	oldSucceededID := submitOneDeliveryToURL(t, ctx, db, "cus_archive_success", srv.URL)
-	claimedSucceeded, ok, err := store.ClaimNext(ctx, "cus_archive_success")
-	if err != nil {
-		t.Fatalf("ClaimNext succeeded delivery: %v", err)
-	}
-	if !ok {
-		t.Fatal("ClaimNext succeeded delivery: got no delivery, want one")
-	}
-	if err := store.MarkSucceeded(ctx, claimedSucceeded.ID, http.StatusOK, 10*time.Millisecond); err != nil {
-		t.Fatalf("MarkSucceeded: %v", err)
+	tests := []struct {
+		name       string
+		enrichment outbox.ArchiveEnrichmentMode
+	}{
+		{name: "full", enrichment: outbox.ArchiveEnrichmentFull},
+		{name: "deferred", enrichment: outbox.ArchiveEnrichmentDeferred},
 	}
 
-	oldDeadID := submitOneDeliveryToURL(t, ctx, db, "cus_archive_dead", srv.URL)
-	claimedDead, ok, err := store.ClaimNext(ctx, "cus_archive_dead")
-	if err != nil {
-		t.Fatalf("ClaimNext dead delivery: %v", err)
-	}
-	if !ok {
-		t.Fatal("ClaimNext dead delivery: got no delivery, want one")
-	}
-	if err := store.MarkDead(ctx, claimedDead.ID, http.StatusNotFound, retry.ReasonTerminal4xx, retry.ReasonTerminal4xx, 10*time.Millisecond); err != nil {
-		t.Fatalf("MarkDead: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := newPostgresDB(t, ctx)
+			store := outbox.New(db)
 
-	recentID := submitOneDeliveryToURL(t, ctx, db, "cus_archive_recent", srv.URL)
-	claimedRecent, ok, err := store.ClaimNext(ctx, "cus_archive_recent")
-	if err != nil {
-		t.Fatalf("ClaimNext recent delivery: %v", err)
-	}
-	if !ok {
-		t.Fatal("ClaimNext recent delivery: got no delivery, want one")
-	}
-	if err := store.MarkSucceeded(ctx, claimedRecent.ID, http.StatusOK, 10*time.Millisecond); err != nil {
-		t.Fatalf("MarkSucceeded recent: %v", err)
-	}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
 
-	retention.AgeTerminalDelivery(t, ctx, db, oldSucceededID, 48*time.Hour)
-	retention.AgeTerminalDelivery(t, ctx, db, oldDeadID, 48*time.Hour)
+			oldSucceededID := submitOneDeliveryToURL(t, ctx, db, "cus_archive_success", srv.URL)
+			claimedSucceeded, ok, err := store.ClaimNext(ctx, "cus_archive_success")
+			if err != nil {
+				t.Fatalf("ClaimNext succeeded delivery: %v", err)
+			}
+			if !ok {
+				t.Fatal("ClaimNext succeeded delivery: got no delivery, want one")
+			}
+			if err := store.MarkSucceeded(ctx, claimedSucceeded.ID, http.StatusOK, 10*time.Millisecond); err != nil {
+				t.Fatalf("MarkSucceeded: %v", err)
+			}
 
-	archived, err := runDeliveryHistoryRetention(ctx, config{
-		DatabaseURL: "",
-		Retention:   24 * time.Hour,
-		BatchSize:   1,
-		DB:          db,
-		Out:         io.Discard,
-	})
-	if err != nil {
-		t.Fatalf("runDeliveryHistoryRetention: %v", err)
-	}
-	if archived != 2 {
-		t.Fatalf("archived count: got %d, want 2", archived)
-	}
+			oldDeadID := submitOneDeliveryToURL(t, ctx, db, "cus_archive_dead", srv.URL)
+			claimedDead, ok, err := store.ClaimNext(ctx, "cus_archive_dead")
+			if err != nil {
+				t.Fatalf("ClaimNext dead delivery: %v", err)
+			}
+			if !ok {
+				t.Fatal("ClaimNext dead delivery: got no delivery, want one")
+			}
+			if err := store.MarkDead(ctx, claimedDead.ID, http.StatusNotFound, retry.ReasonTerminal4xx, retry.ReasonTerminal4xx, 10*time.Millisecond); err != nil {
+				t.Fatalf("MarkDead: %v", err)
+			}
 
-	assertDeliveryMissing(t, ctx, db, oldSucceededID)
-	assertDeliveryMissing(t, ctx, db, oldDeadID)
-	assertDeliveryStatus(t, ctx, db, recentID, string(outbox.StatusSucceeded))
-	assertDeliveryHistory(t, ctx, db, oldSucceededID, "succeeded", sql.NullString{}, 1)
-	assertDeliveryHistory(t, ctx, db, oldDeadID, "dead", sql.NullString{String: retry.ReasonTerminal4xx, Valid: true}, 1)
+			recentID := submitOneDeliveryToURL(t, ctx, db, "cus_archive_recent", srv.URL)
+			claimedRecent, ok, err := store.ClaimNext(ctx, "cus_archive_recent")
+			if err != nil {
+				t.Fatalf("ClaimNext recent delivery: %v", err)
+			}
+			if !ok {
+				t.Fatal("ClaimNext recent delivery: got no delivery, want one")
+			}
+			if err := store.MarkSucceeded(ctx, claimedRecent.ID, http.StatusOK, 10*time.Millisecond); err != nil {
+				t.Fatalf("MarkSucceeded recent: %v", err)
+			}
+
+			retention.AgeTerminalDelivery(t, ctx, db, oldSucceededID, 48*time.Hour)
+			retention.AgeTerminalDelivery(t, ctx, db, oldDeadID, 48*time.Hour)
+
+			archived, err := runDeliveryHistoryRetention(ctx, config{
+				DatabaseURL: "",
+				Retention:   24 * time.Hour,
+				BatchSize:   1,
+				Enrichment:  tt.enrichment,
+				DB:          db,
+				Out:         io.Discard,
+			})
+			if err != nil {
+				t.Fatalf("runDeliveryHistoryRetention: %v", err)
+			}
+			if archived != 2 {
+				t.Fatalf("archived count: got %d, want 2", archived)
+			}
+
+			assertDeliveryMissing(t, ctx, db, oldSucceededID)
+			assertDeliveryMissing(t, ctx, db, oldDeadID)
+			assertDeliveryStatus(t, ctx, db, recentID, string(outbox.StatusSucceeded))
+			assertDeliveryHistory(t, ctx, db, oldSucceededID, "succeeded", sql.NullString{}, 1)
+			assertDeliveryHistory(t, ctx, db, oldDeadID, "dead", sql.NullString{String: retry.ReasonTerminal4xx, Valid: true}, 1)
+		})
+	}
 }
 
 func newPostgresDB(t *testing.T, ctx context.Context) *sql.DB {

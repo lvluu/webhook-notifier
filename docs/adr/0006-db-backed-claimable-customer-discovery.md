@@ -19,7 +19,8 @@ Issue #22 adds DB-backed claimable Customer discovery so each process periodical
 seeds its local Scheduler from Postgres.
 
 For this decision, a **claimable Customer** means a Customer with at least one
-claimable Delivery: due `pending`/`failed_retry`, or expired-lease `in_flight`.
+claimable Delivery: due `pending`/`failed_retry`, or an expired claim lease in
+`delivery_claims`.
 A Customer with only future `failed_retry` Deliveries is not claimable yet.
 
 An alternative raised on #22 is a Hatchet-style ID-block claim: allocate
@@ -53,7 +54,12 @@ FROM deliveries
 WHERE customer_id > $1
   AND (
     (status IN ('pending', 'failed_retry') AND next_attempt_at <= now())
-    OR (status = 'in_flight' AND claimed_at < now() - $2::interval)
+    OR EXISTS (
+      SELECT 1
+      FROM delivery_claims dc
+      WHERE dc.delivery_id = deliveries.id
+        AND dc.claimed_at < now() - $2::interval
+    )
   )
 ORDER BY customer_id
 LIMIT $3
@@ -61,9 +67,9 @@ LIMIT $3
 
 Due-time and lease-expiry checks use database time, matching the claim query.
 Discovery must not decide eligibility with the application host clock.
-Stale `in_flight` Deliveries are claimable solely by expired claim lease; they do
-not also require `next_attempt_at` to be due. If claim eligibility changes,
-discovery eligibility changes with it.
+Stale claimed Deliveries are claimable solely by expired claim lease; they do not
+also require `next_attempt_at` to be due. If claim eligibility changes, discovery
+eligibility changes with it.
 
 The loop respects `context.Context`, uses jittered polling, and backs off when
 no Customers are found. Discovery is one loop per process, not one loop per
@@ -131,14 +137,14 @@ reconnect policy is a separate runtime concern.
 - **Local ingest `Notify` only.** Already implemented as part of the registry
   refactor. Rejected as sufficient cluster behavior: it only wakes the process
   that performed ingest and does not help another process discover retry-due or
-  stale in-flight Deliveries.
+  stale claimed Deliveries.
 - **DB-backed discovery loop feeding local SWRR** *(chosen)*. Preserves
   ADR-0001's Scheduler and `WeightSource` semantics. Works with the current
   UUID primary keys and existing per-Customer claim path. Adds a small polling
   cost and one discovery integration point.
 - **Postgres `LISTEN/NOTIFY` only.** Low latency for newly inserted work, but
   notifications are ephemeral and do not cover missed events, process restarts,
-  retry-due Deliveries, or stale in-flight recovery by themselves. Useful later
+  retry-due Deliveries, or stale claimed recovery by themselves. Useful later
   as a wake-up optimization layered on top of polling, not as the source of
   truth. Issue #22 implements polling only.
 - **Materialized `claimable_customers` / `customer_work` table.** Makes discovery
@@ -178,7 +184,12 @@ Third, the existing claim path is already per-Customer:
 WHERE customer_id = $1
   AND (
     (status IN ('pending', 'failed_retry') AND next_attempt_at <= now())
-    OR (status = 'in_flight' AND claimed_at < now() - $lease)
+    OR EXISTS (
+      SELECT 1
+      FROM delivery_claims dc
+      WHERE dc.delivery_id = deliveries.id
+        AND dc.claimed_at < now() - $lease
+    )
   )
 ORDER BY next_attempt_at, created_at, id
 FOR UPDATE SKIP LOCKED
@@ -207,9 +218,8 @@ CREATE INDEX IF NOT EXISTS idx_deliveries_ready_customers
 ON deliveries (customer_id, next_attempt_at)
 WHERE status IN ('pending', 'failed_retry');
 
-CREATE INDEX IF NOT EXISTS idx_deliveries_stale_inflight_customers
-ON deliveries (customer_id, claimed_at)
-WHERE status = 'in_flight';
+CREATE INDEX IF NOT EXISTS idx_delivery_claims_stale_by_claimed_at
+ON delivery_claims (claimed_at, delivery_id);
 ```
 
 The exact index shape should be validated with `EXPLAIN` against benchmark-sized
@@ -229,7 +239,7 @@ concurrent index creation if the table is already large.
 - Delivery processing remains duplicate-safe through Postgres row locking.
 - The design favours correctness over availability for the queue/claim path:
   without Postgres, workers do not make progress.
-- Retry-due and stale in-flight Deliveries become discoverable even when no new
+- Retry-due and stale claimed Deliveries become discoverable even when no new
   ingest happens locally.
 - Polling introduces a small, tunable DB read cost per process. Backoff and
   jitter are required to avoid synchronized empty scans.

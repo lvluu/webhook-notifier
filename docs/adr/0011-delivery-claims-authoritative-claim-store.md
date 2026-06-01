@@ -8,6 +8,10 @@ The original outbox model used `deliveries.status = 'in_flight'` to represent a 
 
 Introduce a dedicated `delivery_claims` table and treat it as the authoritative record for claim ownership while a worker is actively processing a Delivery.
 
+Claiming invariant:
+
+- A Delivery is claimed if and only if a `delivery_claims` row exists for that `delivery_id` and the claim lease is still valid.
+
 The claim table stores:
 
 - `delivery_id`
@@ -20,6 +24,8 @@ The `deliveries` row continues to hold the durable lifecycle state:
 - `failed_retry`
 - `succeeded`
 - `dead`
+
+`in_flight` is no longer a persisted lifecycle state. It may still appear as a runtime projection label in Go/SQL result shapes for claimed rows.
 
 The worker flow is:
 
@@ -42,3 +48,7 @@ The worker flow is:
 - In exchange, the claim lifecycle is separated from terminal state transitions, which makes the outbox behavior easier to reason about at higher worker counts.
 - The design stays compatible with fairness and retry semantics because the scheduler still picks Customers and the retry budget still advances only on partner-facing Attempts.
 
+## Amends / supersedes
+
+- Supersedes legacy wording that treated `deliveries.status = 'in_flight'` as the persisted claim source of truth.
+- Amends [0003](./0003-retry-policy-and-delivery-lifecycle.md) and [0006](./0006-db-backed-claimable-customer-discovery.md): references to `in_flight` in claim semantics should now be read as claim ownership represented by `delivery_claims` (unless a section is explicitly historical).

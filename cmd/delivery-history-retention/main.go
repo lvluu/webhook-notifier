@@ -19,6 +19,7 @@ type config struct {
 	DatabaseURL string
 	Retention   time.Duration
 	BatchSize   int
+	Enrichment  outbox.ArchiveEnrichmentMode
 	DB          *sql.DB
 	Out         io.Writer
 }
@@ -28,12 +29,21 @@ func main() {
 		DatabaseURL: envDefault("DATABASE_URL", "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable"),
 		Retention:   24 * time.Hour,
 		BatchSize:   1000,
+		Enrichment:  outbox.ArchiveEnrichmentFull,
 		Out:         os.Stdout,
 	}
 
 	flag.StringVar(&cfg.DatabaseURL, "database-url", cfg.DatabaseURL, "Postgres connection string")
 	flag.DurationVar(&cfg.Retention, "retention", cfg.Retention, "terminal delivery retention before archiving")
 	flag.IntVar(&cfg.BatchSize, "batch-size", cfg.BatchSize, "maximum deliveries to retain into history per pass")
+	flag.Func("enrichment", "archive enrichment mode: full or deferred", func(v string) error {
+		mode := outbox.ArchiveEnrichmentMode(v)
+		if mode != outbox.ArchiveEnrichmentFull && mode != outbox.ArchiveEnrichmentDeferred {
+			return fmt.Errorf("invalid enrichment %q: must be one of %q or %q", v, outbox.ArchiveEnrichmentFull, outbox.ArchiveEnrichmentDeferred)
+		}
+		cfg.Enrichment = mode
+		return nil
+	})
 	flag.Parse()
 
 	ctx := context.Background()
@@ -65,7 +75,7 @@ func runDeliveryHistoryRetention(ctx context.Context, cfg config) (int, error) {
 	store := outbox.New(db)
 	var total int
 	for {
-		archived, err := store.ArchiveTerminalDeliveries(ctx, cfg.Retention, cfg.BatchSize)
+		archived, err := store.ArchiveTerminalDeliveriesWithMode(ctx, cfg.Retention, cfg.BatchSize, cfg.Enrichment)
 		if err != nil {
 			return total, err
 		}
