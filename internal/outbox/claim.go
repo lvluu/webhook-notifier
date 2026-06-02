@@ -9,6 +9,102 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/observe"
 )
 
+// ClaimNextBatch claims up to limit ready Deliveries across the given customer
+// IDs. It is a multi-customer generalization of ClaimNextN that amortises the
+// DB round-trip when individual customers are sparse — the sparse-Customer
+// workload #83 would otherwise pay one claim query per Customer.
+//
+// The return includes deliveries from any of the provided customers, without a
+// per-Customer guarantee. Callers must re-notify every customer in the input
+// set to keep them in rotation; empty-claim removal is left to the normal
+// discovery/claim-evaluate path.
+func (s *Store) ClaimNextBatch(ctx context.Context, customerIDs []string, limit int) ([]Delivery, error) {
+	if len(customerIDs) == 0 {
+		return nil, nil
+	}
+	if limit < 1 {
+		return nil, fmt.Errorf("limit must be >= 1")
+	}
+
+	claimStarted := time.Now()
+
+	rows, err := s.db.QueryContext(ctx, `
+		WITH ready_candidate AS (
+			SELECT d.id, d.attempt_count
+			FROM deliveries d
+			LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
+			WHERE d.customer_id = ANY($1)
+			  AND d.status IN ('pending', 'failed_retry')
+			  AND d.next_attempt_at <= now()
+			  AND dc.delivery_id IS NULL
+			ORDER BY d.next_attempt_at, d.created_at, d.id
+			LIMIT $3
+			FOR UPDATE OF d SKIP LOCKED
+		),
+		stale_candidate AS (
+			SELECT d.id, d.attempt_count
+			FROM delivery_claims dc
+			JOIN deliveries d ON d.id = dc.delivery_id
+			WHERE d.customer_id = ANY($1)
+			  AND dc.claimed_at < now() - ($2 * interval '1 millisecond')
+			ORDER BY d.next_attempt_at, d.created_at, d.id
+			LIMIT $3
+			FOR UPDATE OF d SKIP LOCKED
+		),
+		candidate AS (
+			SELECT * FROM ready_candidate
+			UNION ALL
+			SELECT * FROM stale_candidate
+		),
+		claimed AS (
+			INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
+			SELECT c.id, c.attempt_count + 1, now()
+			FROM candidate c
+			ON CONFLICT (delivery_id) DO UPDATE
+			    SET attempt_number = EXCLUDED.attempt_number,
+			        claimed_at = now()
+			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
+			RETURNING delivery_id, attempt_number, claimed_at
+		)
+		SELECT
+		    d.id, d.event_id, d.webhook_id, d.customer_id,
+		    COALESCE(cust.class, 1),
+		    e.type, e.payload, w.url, w.secret_encrypted,
+		    'in_flight' AS status,
+		    dc.attempt_number, d.next_attempt_at, dc.claimed_at,
+		    d.last_error, d.created_at, d.updated_at,
+		    (
+		        SELECT GREATEST(EXTRACT(EPOCH FROM (d.next_attempt_at - da.sent_at)) * 1000, 0)::bigint
+		        FROM delivery_attempts da
+		        WHERE da.delivery_id = d.id
+		        ORDER BY da.attempt_number DESC
+		        LIMIT 1
+		    ) AS previous_delay_millis
+		FROM claimed dc
+		JOIN deliveries d ON d.id = dc.delivery_id
+		JOIN events e ON e.id = d.event_id
+		JOIN webhooks w ON w.id = d.webhook_id
+		LEFT JOIN customers cust ON cust.id = d.customer_id
+		ORDER BY d.next_attempt_at, d.created_at, d.id
+	`, customerIDs, s.claimLease.Milliseconds(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("cte claim batch: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	deliveries, err := scanClaimedDeliveries(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(deliveries) == 0 {
+		observe.IncClaimEmpty()
+	}
+	observe.ObserveClaimDuration(time.Since(claimStarted).Seconds())
+	observe.ObserveClaimBatchSize(float64(len(deliveries)))
+	return deliveries, nil
+}
+
 // ClaimNext claims one ready Delivery for customerID using SELECT FOR UPDATE
 // SKIP LOCKED. It returns ok=false when no ready Delivery exists.
 func (s *Store) ClaimNext(ctx context.Context, customerID string) (delivery Delivery, ok bool, err error) {

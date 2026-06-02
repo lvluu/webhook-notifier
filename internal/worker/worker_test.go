@@ -153,6 +153,10 @@ func (r *recordingDeliveryStore) ClaimNextN(context.Context, string, int) ([]out
 	return nil, nil
 }
 
+func (r *recordingDeliveryStore) ClaimNextBatch(context.Context, []string, int) ([]outbox.Delivery, error) {
+	return nil, nil
+}
+
 func (r *recordingDeliveryStore) HasClaimableWork(context.Context, string) (bool, error) {
 	return false, nil
 }
@@ -199,6 +203,10 @@ type removeOnEmptyClaimStore struct {
 
 func (s *removeOnEmptyClaimStore) ClaimNextN(context.Context, string, int) ([]outbox.Delivery, error) {
 	s.claimCalls++
+	return nil, nil
+}
+
+func (s *removeOnEmptyClaimStore) ClaimNextBatch(context.Context, []string, int) ([]outbox.Delivery, error) {
 	return nil, nil
 }
 
