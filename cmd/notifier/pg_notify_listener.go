@@ -167,7 +167,11 @@ func listenOnce(ctx context.Context, logger *slog.Logger, dsn string, notifyChan
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
-	defer conn.Close(ctx)
+	defer func() {
+		if err := conn.Close(ctx); err != nil && logger != nil {
+			logger.Warn("close pg_notify connection", "error", err)
+		}
+	}()
 
 	if _, err := conn.Exec(ctx, "LISTEN "+pgx.Identifier{notifyChan}.Sanitize()); err != nil {
 		return fmt.Errorf("listen %s: %w", notifyChan, err)
