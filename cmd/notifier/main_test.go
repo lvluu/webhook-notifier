@@ -253,7 +253,7 @@ func TestStartDeliveryRuntime_ColdBootDiscoveryDrainsExistingDeliveries(t *testi
 	}
 
 	logger := slogDiscard()
-	runtime, runtimeErrCh, err := startDeliveryRuntime(ctx, logger, db, workerRuntimeConfig{
+	runtime, runtimeErrCh, err := startDeliveryRuntime(ctx, logger, db, "", workerRuntimeConfig{
 		WorkerCount:    2,
 		RequestTimeout: 2 * time.Second,
 		Discovery: worker.DiscoveryConfig{

@@ -59,6 +59,7 @@ func TestRegisterMetrics_registers_metric_families(t *testing.T) {
 	WebhookHostSemaphoreWaitSeconds.WithLabelValues("example.com").Observe(0)
 	WebhookBreakerState.WithLabelValues("webhook_1", "closed").Set(1)
 	WebhookBreakerTripsTotal.WithLabelValues("retryable_5xx").Add(0)
+	WebhookPendingDeliveries.Set(0)
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -151,6 +152,7 @@ func TestMetricsEndpoint_returns_nonzero_after_seed(t *testing.T) {
 	WebhookClaimDurationSeconds.Observe(0.1)
 	WebhookClaimBatchSize.Observe(5)
 	WebhookClaimEmptyTotal.Add(2)
+	WebhookPendingDeliveries.Set(7)
 	WebhookActiveCustomers.Set(4)
 	WebhookIngestFanoutPerEvent.Observe(3)
 	SetBreakerState("webhook_1", "open")
@@ -188,6 +190,7 @@ func TestMetricsEndpoint_returns_nonzero_after_seed(t *testing.T) {
 	requireContains(`webhook_claim_duration_seconds_bucket`)
 	requireContains(`webhook_claim_batch_size_bucket`)
 	requireContains(`webhook_claim_empty_total 2`)
+	requireContains(`webhook_pending_deliveries 7`)
 	requireContains(`webhook_active_customers 4`)
 	requireContains(`webhook_ingest_fanout_per_event_bucket`)
 	requireContains(`webhook_breaker_state{state="open",webhook_id="webhook_1"} 1`)

@@ -92,6 +92,14 @@ func IncClaimEmpty() {
 	WebhookClaimEmptyTotal.Add(1)
 }
 
+// SetPendingDeliveries safely sets the current queue backlog gauge.
+func SetPendingDeliveries(n float64) {
+	if !metricsRegistered() {
+		return
+	}
+	WebhookPendingDeliveries.Set(n)
+}
+
 // ObserveIngestFanout safely observes WebhookIngestFanoutPerEvent, skipping if nil.
 func ObserveIngestFanout(n float64) {
 	if !metricsRegistered() {

@@ -63,6 +63,7 @@ type Worker struct {
 	RequestTimeout      time.Duration
 	MinBatchHint        int
 	DeliveryConcurrency int
+	EmptyClaimBackoff   time.Duration
 }
 
 // HTTPConfig configures the shared HTTP client used for webhook Attempts.
@@ -132,6 +133,15 @@ func WithDeliveryConcurrency(n int) Option {
 	}
 }
 
+// WithEmptyClaimBackoff sets the pause after an empty claim cycle.
+func WithEmptyClaimBackoff(delay time.Duration) Option {
+	return func(w *Worker) {
+		if delay > 0 {
+			w.EmptyClaimBackoff = delay
+		}
+	}
+}
+
 // New returns a Worker using scheduler s and optional overrides.
 func New(s scheduler.Scheduler, opts ...Option) *Worker {
 	w := &Worker{
@@ -142,6 +152,7 @@ func New(s scheduler.Scheduler, opts ...Option) *Worker {
 		RequestTimeout:      30 * time.Second,
 		MinBatchHint:        32,
 		DeliveryConcurrency: 16,
+		EmptyClaimBackoff:   20 * time.Millisecond,
 	}
 	for _, opt := range opts {
 		opt(w)

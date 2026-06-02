@@ -13,8 +13,16 @@ import (
 )
 
 const (
-	idleBackoff = 50 * time.Millisecond
+	idleBackoff              = 50 * time.Millisecond
+	defaultEmptyClaimBackoff = 20 * time.Millisecond
 )
+
+func (w *Worker) emptyClaimDelay() time.Duration {
+	if w.EmptyClaimBackoff > 0 {
+		return w.EmptyClaimBackoff
+	}
+	return defaultEmptyClaimBackoff
+}
 
 // Run continuously claims scheduled Deliveries and processes them.
 func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
@@ -67,6 +75,11 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 				w.Scheduler.Notify(customerID)
 			default:
 				w.Scheduler.Remove(customerID)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(w.emptyClaimDelay()):
 			}
 			continue
 		}

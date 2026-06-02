@@ -1,0 +1,360 @@
+{
+  "title": "Postgres Query Health",
+  "uid": "postgres-query-health",
+  "version": 1,
+  "schemaVersion": 39,
+  "timezone": "browser",
+  "refresh": "10s",
+  "description": "pg_stat_statements and live wait-event view for notifier claim/discovery/retention queries. Reset pg_stat_statements before a controlled benchmark window if you want clean deltas.",
+  "tags": [
+    "postgres",
+    "pg_stat_statements",
+    "notifier"
+  ],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Total Query Calls",
+      "description": "Cumulative statement call count since the last pg_stat_statements reset.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "postgres"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COALESCE(SUM(calls), 0)::bigint AS total_calls FROM pg_stat_statements;",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Total Exec Time",
+      "description": "Cumulative SQL execution time since the last pg_stat_statements reset.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "postgres"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COALESCE(SUM(total_exec_time), 0)::double precision / 1000.0 AS total_exec_seconds FROM pg_stat_statements;",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 1
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Slowest Mean Query",
+      "description": "The current maximum mean execution time across all tracked statements.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "postgres"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COALESCE(MAX(mean_exec_time), 0)::double precision AS max_mean_ms FROM pg_stat_statements;",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 1
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Calls Per Second Since Reset",
+      "description": "Average query call rate since the last pg_stat_statements reset. Use this as a benchmark-window delta signal.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "postgres"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 6
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH reset AS (SELECT stats_reset FROM pg_stat_statements_info), totals AS (SELECT COALESCE(SUM(calls), 0)::double precision AS calls_total FROM pg_stat_statements) SELECT totals.calls_total / GREATEST(EXTRACT(EPOCH FROM (now() - reset.stats_reset)), 1) AS calls_per_sec_since_reset FROM totals CROSS JOIN reset;",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 1
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Exec Seconds Per Second Since Reset",
+      "description": "Average SQL execution time per second since the last pg_stat_statements reset. Higher values indicate more DB time burned by the workload.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "postgres"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 6
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH reset AS (SELECT stats_reset FROM pg_stat_statements_info), totals AS (SELECT COALESCE(SUM(total_exec_time), 0)::double precision AS total_exec_ms FROM pg_stat_statements) SELECT totals.total_exec_ms / 1000.0 / GREATEST(EXTRACT(EPOCH FROM (now() - reset.stats_reset)), 1) AS exec_seconds_per_sec_since_reset FROM totals CROSS JOIN reset;",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Mean Exec Time Since Reset",
+      "description": "Average statement mean latency since the last pg_stat_statements reset.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "postgres"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 6
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COALESCE(SUM(total_exec_time), 0)::double precision / GREATEST(COALESCE(SUM(calls), 0), 1) AS mean_exec_ms_since_reset FROM pg_stat_statements;",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 2
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value"
+      }
+    },
+    {
+      "type": "table",
+      "title": "Top SQL By Total Exec Time",
+      "description": "Highest cumulative cost statements since the last reset. Look here first when claim latency regresses.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "postgres"
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT LEFT(regexp_replace(query, '\\\\s+', ' ', 'g'), 140) AS query_snippet, calls, round(total_exec_time::numeric, 2) AS total_exec_ms, round(mean_exec_time::numeric, 3) AS mean_exec_ms, round((rows::numeric / NULLIF(calls, 0)), 3) AS rows_per_call, shared_blks_hit, shared_blks_read, temp_blks_read, temp_blks_written FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 20;",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "type": "table",
+      "title": "Claim / Discovery / Retention SQL",
+      "description": "Narrow view for the hot queue SQL families when tuning wakeups, discovery cadence, or retention.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "postgres"
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT LEFT(regexp_replace(query, '\\\\s+', ' ', 'g'), 160) AS query_snippet, calls, round(total_exec_time::numeric, 2) AS total_exec_ms, round(mean_exec_time::numeric, 3) AS mean_exec_ms, round((rows::numeric / NULLIF(calls, 0)), 3) AS rows_per_call, shared_blks_hit, shared_blks_read FROM pg_stat_statements WHERE lower(query) LIKE '%claim%' OR lower(query) LIKE '%discover%' OR lower(query) LIKE '%retention%' OR lower(query) LIKE '%archive%' ORDER BY total_exec_time DESC LIMIT 20;",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "type": "table",
+      "title": "Queue-Path SQL",
+      "description": "Statements touching deliveries, delivery_claims, or delivery_history. Use this for targeted regressions.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "postgres"
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT LEFT(regexp_replace(query, '\\\\s+', ' ', 'g'), 160) AS query_snippet, calls, round(total_exec_time::numeric, 2) AS total_exec_ms, round(mean_exec_time::numeric, 3) AS mean_exec_ms, round((rows::numeric / NULLIF(calls, 0)), 3) AS rows_per_call, shared_blks_hit, shared_blks_read FROM pg_stat_statements WHERE lower(query) LIKE '%deliveries%' OR lower(query) LIKE '%delivery_claims%' OR lower(query) LIKE '%delivery_history%' ORDER BY total_exec_time DESC LIMIT 20;",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "type": "table",
+      "title": "Current Wait Events",
+      "description": "Live wait-event mix for the notifier database. Useful for spotting lock, WAL, or IO pressure while the queue is hot.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "postgres"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 54
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COALESCE(wait_event_type, 'running') AS wait_event_type, COALESCE(wait_event, 'running') AS wait_event, COUNT(*) AS sessions FROM pg_stat_activity WHERE datname = current_database() GROUP BY 1, 2 ORDER BY sessions DESC, wait_event_type, wait_event;",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    }
+  ]
+}

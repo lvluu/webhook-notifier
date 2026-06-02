@@ -25,7 +25,7 @@ The PRD lives at [#1](https://github.com/lvluu/flodesk-home-assignment/issues/1)
 
 Everything else (`golangci-lint`, `golang-migrate`) is fetched on first use by the corresponding `just` recipe.
 
-## Quickstart
+## Minimal Dev
 
 ```bash
 # 1. Clone
@@ -53,9 +53,36 @@ just down
 
 Run `just` with no arguments to see all recipes.
 
-## Production-like stack
+## Low-Resource Compose Dev
 
-For a runnable demo closer to production topology, start the full Compose stack:
+Start the lightweight Compose stack only when you want the app processes locally:
+
+```bash
+just stack-up
+```
+
+This starts:
+
+- Postgres 17 with migrations applied during first container initialization.
+- PgBouncer in transaction-pooling mode between notifier replicas and Postgres.
+- One scaled `notifier` replica by default.
+- Caddy on `localhost:8080` as the host-facing ingress for `POST /api/customers` and `POST /api/events`.
+- A webhook receiver fixture on `localhost:8081`, with receiver metrics on `localhost:9092`.
+
+Start Grafana and Prometheus only when you need dashboards:
+
+```bash
+just stack-observe
+```
+
+That adds:
+
+- Prometheus on `localhost:9091`.
+- Grafana on `localhost:3000`.
+
+## Load Test Stack
+
+For a runnable demo closer to production topology, add the heavier services on top of the dev stack:
 
 ```bash
 just stack-build
@@ -63,26 +90,25 @@ just stack-up 3
 just stack-smoke
 ```
 
-This starts:
+This adds:
 
 - Postgres 17 with migrations applied during first container initialization.
 - PgBouncer in transaction-pooling mode between notifier replicas and Postgres.
-- Three scaled `notifier` replicas by default.
+- Three scaled `notifier` replicas when you opt in.
 - Caddy on `localhost:8080` as the host-facing ingress for `POST /api/customers` and `POST /api/events`.
 - A webhook receiver fixture on `localhost:8081`, with receiver metrics on `localhost:9092`.
-- Prometheus on `localhost:9091`.
-- Grafana on `localhost:3000`.
 
 Useful stack commands:
 
 ```bash
 just stack-status          # container status
 just stack-logs notifier   # follow one service
+just stack-observe         # start Prometheus and Grafana
 just stack-chaos 3         # opt-in aggressive subscriber.created whale/small load
 just stack-down            # remove containers and volumes
 ```
 
-Prometheus discovers scaled notifier replicas through Docker DNS and scrapes each replica's `:9090` metrics endpoint directly. Caddy only fronts the business ingest API; it is not another notifier process and does not change worker scale. The opt-in chaos load emits `subscriber.created` Events from Whale Customers (`weight=3`) and Small Customers (`weight=1`) so fairness and queue-depth metrics map directly to the assignment scenario.
+Prometheus discovers scaled notifier replicas through Docker DNS and scrapes each replica's `:9090` metrics endpoint directly when you start the optional observability profile. Caddy only fronts the business ingest API; it is not another notifier process and does not change worker scale. The opt-in chaos load emits `subscriber.created` Events from Whale Customers (`weight=3`) and Small Customers (`weight=1`) so fairness and queue-depth metrics map directly to the assignment scenario.
 
 ## Configuration
 

@@ -32,13 +32,19 @@ services:
       - -c
       - max_connections=100
       - -c
-      - shared_buffers=256MB
+      - shared_buffers=128MB
       - -c
       - max_wal_senders=0
       - -c
       - synchronous_commit=off
       - -c
       - password_encryption=md5
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.max=10000
+      - -c
+      - pg_stat_statements.track=all
 
   pgbouncer:
     image: edoburu/pgbouncer:latest
@@ -49,8 +55,8 @@ services:
       DB_PASSWORD: notifier
       DB_NAME: notifier
       POOL_MODE: session
-      DEFAULT_POOL_SIZE: "25"
-      MAX_CLIENT_CONN: "200"
+      DEFAULT_POOL_SIZE: "12"
+      MAX_CLIENT_CONN: "100"
       LISTEN_PORT: "6432"
     depends_on:
       postgres:
@@ -69,15 +75,25 @@ services:
       - -metrics-addr
       - :9090
       - -workers
-      - "64"
+      - "8"
       - -min-batch
-      - "32"
+      - "4"
       - -concurrency
-      - "16"
+      - "4"
       - -discovery-interval
+      - 10s
+      - -empty-claim-backoff
+      - 20ms
+      - -pending-sample-interval
       - 5s
+      - -enable-pg-notify-wakeups
+      - "true"
+      - -pg-notify-channel
+      - webhook_customer_ready
+      - -claim-query-mode
+      - split
       - -max-conns
-      - "30"
+      - "12"
     depends_on:
       pgbouncer:
         condition: service_started
@@ -109,6 +125,29 @@ services:
       - "8081:8080"
       - "9092:9091"
 
+  delivery-history-retention:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          delivery-history-retention \
+            -db postgres://notifier:notifier@pgbouncer:6432/notifier?sslmode=disable \
+            -retention 1m \
+            -batch-size 300 \
+            -enrichment deferred;
+          sleep 60;
+        done
+    depends_on:
+      pgbouncer:
+        condition: service_started
+    profiles:
+      - retention
+      - chaos
+
   chaos-whales:
     <<: *chaos-common
     command:
@@ -124,9 +163,9 @@ services:
       - -class
       - "1"
       - -rate
-      - "2500"
+      - "250"
       - -burst
-      - "10000"
+      - "1000"
 
   chaos-small:
     <<: *chaos-common
@@ -143,12 +182,14 @@ services:
       - -class
       - "1"
       - -rate
-      - "500"
+      - "50"
       - -burst
-      - "1000"
+      - "200"
 
   prometheus:
     image: prom/prometheus:latest
+    profiles:
+      - observe
     ports:
       - "9091:9090"
     volumes:
@@ -156,6 +197,8 @@ services:
 
   grafana:
     image: grafana/grafana:latest
+    profiles:
+      - observe
     ports:
       - "3000:3000"
     volumes:
