@@ -72,6 +72,7 @@ func seedCustomer(t *testing.T, ctx context.Context, db *sql.DB, id string, clas
 }
 
 func TestWeight_KnownCustomer(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := newTestDB(t, ctx)
 	seedCustomer(t, ctx, db, "whale", 3)
@@ -88,6 +89,7 @@ func TestWeight_KnownCustomer(t *testing.T) {
 }
 
 func TestWeight_UnknownCustomerDefaultsToOne(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := newTestDB(t, ctx)
 
@@ -99,6 +101,7 @@ func TestWeight_UnknownCustomerDefaultsToOne(t *testing.T) {
 }
 
 func TestWeight_ZeroWeight(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := newTestDB(t, ctx)
 	seedCustomer(t, ctx, db, "paused", 0)
@@ -111,6 +114,7 @@ func TestWeight_ZeroWeight(t *testing.T) {
 }
 
 func TestWeight_CachesResult(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := newTestDB(t, ctx)
 	seedCustomer(t, ctx, db, "cached", 5)
@@ -131,6 +135,7 @@ func TestWeight_CachesResult(t *testing.T) {
 }
 
 func TestWeight_RefreshInvalidatesCache(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := newTestDB(t, ctx)
 	seedCustomer(t, ctx, db, "refreshme", 7)
@@ -151,6 +156,7 @@ func TestWeight_RefreshInvalidatesCache(t *testing.T) {
 }
 
 func TestWeight_RefreshAll(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := newTestDB(t, ctx)
 	seedCustomer(t, ctx, db, "a", 1)
@@ -177,6 +183,7 @@ func TestWeight_RefreshAll(t *testing.T) {
 }
 
 func TestWeight_EmptyID(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := newTestDB(t, ctx)
 
@@ -188,6 +195,7 @@ func TestWeight_EmptyID(t *testing.T) {
 }
 
 func TestWeight_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := newTestDB(t, ctx)
 	seedCustomer(t, ctx, db, "concurrent", 8)

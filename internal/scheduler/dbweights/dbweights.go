@@ -84,6 +84,9 @@ func (s *DBWeightSource) loadWeight(customerID scheduler.CustomerID) uint32 {
 	var class uint32
 	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(class, 1) FROM customers WHERE id = $1`, customerID).Scan(&class)
 	if err != nil {
+		// Interface contract: Weight() cannot surface errors.
+		// Fall back to 1 so the scheduler degrades to equal-share
+		// round-robin rather than dropping the customer entirely.
 		return 1
 	}
 	return class
