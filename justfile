@@ -115,7 +115,7 @@ stack-status:
 
 # stop and remove the full stack, including volumes
 stack-down:
-    {{compose_cmd}} down -v
+    {{compose_cmd}} {{all_profiles}} down -v
 
 # follow stack logs, optionally for one service
 stack-logs service="":
