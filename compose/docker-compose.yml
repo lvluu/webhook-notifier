@@ -179,9 +179,9 @@ services:
       - -class
       - "3"
       - -rate
-      - "1000"
+      - "200"
       - -burst
-      - "1000"
+      - "200"
 
   chaos-small:
     <<: *chaos-common
