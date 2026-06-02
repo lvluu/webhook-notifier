@@ -300,7 +300,7 @@ func batchConsecutiveWebhookFailures(ctx context.Context, tx *sql.Tx, webhookIDs
 	return counts, nil
 }
 
-func (s *Store) batchOpenHalfOpenBreakers(ctx context.Context, tx *sql.Tx, webhookIDs []string, maxCooldownMs int64) ([]string, error) {
+func batchOpenHalfOpenBreakers(ctx context.Context, tx *sql.Tx, webhookIDs []string, maxCooldownMs int64) ([]string, error) {
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE webhooks
 		SET breaker_state = 'open',
@@ -332,7 +332,7 @@ func (s *Store) batchOpenHalfOpenBreakers(ctx context.Context, tx *sql.Tx, webho
 	return opened, nil
 }
 
-func (s *Store) batchOpenClosedBreakers(ctx context.Context, tx *sql.Tx, failureCounts map[string]int, initialCooldownMs int64) ([]string, error) {
+func batchOpenClosedBreakers(ctx context.Context, tx *sql.Tx, failureCounts map[string]int, initialCooldownMs int64) ([]string, error) {
 	webhookIDs := make([]string, 0, len(failureCounts))
 	counts := make([]int, 0, len(failureCounts))
 	for wid, n := range failureCounts {
@@ -491,7 +491,7 @@ func (s *Store) batchRecordBreakerFailure(ctx context.Context, tx *sql.Tx, deliv
 	}
 
 	if len(halfOpenIDs) > 0 {
-		opened, err := s.batchOpenHalfOpenBreakers(ctx, tx, halfOpenIDs, s.breakerConfig.MaxCooldown.Milliseconds())
+		opened, err := batchOpenHalfOpenBreakers(ctx, tx, halfOpenIDs, s.breakerConfig.MaxCooldown.Milliseconds())
 		if err != nil {
 			return nil, err
 		}
@@ -512,7 +512,7 @@ func (s *Store) batchRecordBreakerFailure(ctx context.Context, tx *sql.Tx, deliv
 			}
 		}
 		if len(exceeded) > 0 {
-			opened, err := s.batchOpenClosedBreakers(ctx, tx, exceeded, s.breakerConfig.InitialCooldown.Milliseconds())
+			opened, err := batchOpenClosedBreakers(ctx, tx, exceeded, s.breakerConfig.InitialCooldown.Milliseconds())
 			if err != nil {
 				return nil, err
 			}
