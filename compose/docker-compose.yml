@@ -166,7 +166,7 @@ services:
       - -class
       - "3"
       - -rate
-      - "500"
+      - "1000"
       - -burst
       - "2000"
 
@@ -181,7 +181,7 @@ services:
       - -customer-base
       - small
       - -customers
-      - "5000"
+      - "10000"
       - -class
       - "1"
       - -rate
