@@ -13,6 +13,7 @@ x-chaos-common: &chaos-common
 services:
   postgres:
     image: postgres:17-alpine
+    shm_size: 256m
     environment:
       POSTGRES_USER: notifier
       POSTGRES_PASSWORD: notifier
@@ -57,8 +58,8 @@ services:
       DB_PASSWORD: notifier
       DB_NAME: notifier
       POOL_MODE: transaction
-      DEFAULT_POOL_SIZE: "50"
-      MAX_CLIENT_CONN: "300"
+      DEFAULT_POOL_SIZE: "80"
+      MAX_CLIENT_CONN: "400"
       LISTEN_PORT: "6432"
     depends_on:
       postgres:
@@ -77,7 +78,7 @@ services:
       - -metrics-addr
       - :9090
       - -workers
-      - "8"
+      - "16"
       - -min-batch
       - "4"
       - -multi-pick
@@ -98,7 +99,7 @@ services:
       - -claim-query-mode
       - split
       - -max-conns
-      - "20"
+      - "30"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9090/metrics"]
       interval: 2s
@@ -174,13 +175,13 @@ services:
       - -customer-base
       - whale
       - -customers
-      - "50"
+      - "5"
       - -class
       - "3"
       - -rate
       - "1000"
       - -burst
-      - "2000"
+      - "1000"
 
   chaos-small:
     <<: *chaos-common
