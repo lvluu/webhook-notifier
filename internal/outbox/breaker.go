@@ -211,6 +211,170 @@ func (s *Store) openBreaker(ctx context.Context, tx *sql.Tx, webhookID string, f
 	return rows > 0, nil
 }
 
+type breakerStateRow struct {
+	webhookID       string
+	state           string
+	failureCount    int
+	cooldownMillis  int64
+	probeDeliveryID sql.NullString
+}
+
+func batchLoadBreakerStates(ctx context.Context, tx *sql.Tx, webhookIDs []string) (map[string]breakerStateRow, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id::text, breaker_state, breaker_failure_count,
+		       breaker_cooldown_ms, breaker_probe_delivery_id::text
+		FROM webhooks
+		WHERE id = ANY($1::uuid[])
+	`, webhookIDs)
+	if err != nil {
+		return nil, fmt.Errorf("batch load breaker states: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	states := make(map[string]breakerStateRow, len(webhookIDs))
+	for rows.Next() {
+		var r breakerStateRow
+		if err := rows.Scan(&r.webhookID, &r.state, &r.failureCount, &r.cooldownMillis, &r.probeDeliveryID); err != nil {
+			return nil, fmt.Errorf("scan breaker state: %w", err)
+		}
+		states[r.webhookID] = r
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate breaker states: %w", err)
+	}
+	return states, nil
+}
+
+func batchConsecutiveWebhookFailures(ctx context.Context, tx *sql.Tx, webhookIDs []string, limit int) (map[string]int, error) {
+	rows, err := tx.QueryContext(ctx, `
+		WITH latest_success AS (
+			SELECT d.webhook_id, max(da.sent_at) AS last_success_at
+			FROM delivery_attempts da
+			JOIN deliveries d ON d.id = da.delivery_id
+			WHERE d.webhook_id = ANY($1::uuid[])
+			  AND da.status_code >= 200
+			  AND da.status_code < 300
+			GROUP BY d.webhook_id
+		),
+		failure_attempts AS (
+			SELECT d.webhook_id, da.sent_at
+			FROM delivery_attempts da
+			JOIN deliveries d ON d.id = da.delivery_id
+			LEFT JOIN latest_success ls ON ls.webhook_id = d.webhook_id
+			WHERE d.webhook_id = ANY($1::uuid[])
+			  AND da.sent_at > COALESCE(ls.last_success_at, '-infinity'::timestamptz)
+			  AND (
+			      da.error_class IS NOT NULL
+			      OR da.status_code IS NULL
+			      OR da.status_code < 200
+			      OR da.status_code >= 300
+			  )
+		),
+		ranked AS (
+			SELECT webhook_id,
+			       ROW_NUMBER() OVER (PARTITION BY webhook_id ORDER BY sent_at DESC) AS rn
+			FROM failure_attempts
+		)
+		SELECT webhook_id::text, count(*)::int
+		FROM ranked
+		WHERE rn <= $2
+		GROUP BY webhook_id
+	`, webhookIDs, limit)
+	if err != nil {
+		return nil, fmt.Errorf("batch count consecutive webhook failures: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	counts := make(map[string]int, len(webhookIDs))
+	for rows.Next() {
+		var wid string
+		var n int
+		if err := rows.Scan(&wid, &n); err != nil {
+			return nil, fmt.Errorf("scan failure count: %w", err)
+		}
+		counts[wid] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate failure counts: %w", err)
+	}
+	return counts, nil
+}
+
+func (s *Store) batchOpenHalfOpenBreakers(ctx context.Context, tx *sql.Tx, webhookIDs []string, maxCooldownMs int64) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `
+		UPDATE webhooks
+		SET breaker_state = 'open',
+		    breaker_failure_count = breaker_failure_count + 1,
+		    breaker_opened_at = now(),
+		    breaker_next_probe_at = now() + (LEAST(breaker_cooldown_ms * 2, $2) * interval '1 millisecond'),
+		    breaker_cooldown_ms = LEAST(breaker_cooldown_ms * 2, $2),
+		    breaker_probe_delivery_id = NULL
+		WHERE id = ANY($1::uuid[])
+		  AND breaker_state = 'half_open'
+		RETURNING id::text
+	`, webhookIDs, maxCooldownMs)
+	if err != nil {
+		return nil, fmt.Errorf("batch open half-open breakers: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var opened []string
+	for rows.Next() {
+		var wid string
+		if err := rows.Scan(&wid); err != nil {
+			return nil, fmt.Errorf("scan opened webhook: %w", err)
+		}
+		opened = append(opened, wid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate opened webhooks: %w", err)
+	}
+	return opened, nil
+}
+
+func (s *Store) batchOpenClosedBreakers(ctx context.Context, tx *sql.Tx, failureCounts map[string]int, initialCooldownMs int64) ([]string, error) {
+	webhookIDs := make([]string, 0, len(failureCounts))
+	counts := make([]int, 0, len(failureCounts))
+	for wid, n := range failureCounts {
+		webhookIDs = append(webhookIDs, wid)
+		counts = append(counts, n)
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		WITH input AS (
+			SELECT * FROM unnest($1::text[], $2::int[]) AS t(webhook_id, failure_count)
+		)
+		UPDATE webhooks w
+		SET breaker_state = 'open',
+		    breaker_failure_count = input.failure_count,
+		    breaker_opened_at = now(),
+		    breaker_next_probe_at = now() + ($3 * interval '1 millisecond'),
+		    breaker_cooldown_ms = $3,
+		    breaker_probe_delivery_id = NULL
+		FROM input
+		WHERE w.id = input.webhook_id::uuid
+		  AND w.breaker_state = 'closed'
+		RETURNING w.id::text
+	`, webhookIDs, counts, initialCooldownMs)
+	if err != nil {
+		return nil, fmt.Errorf("batch open closed breakers: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var opened []string
+	for rows.Next() {
+		var wid string
+		if err := rows.Scan(&wid); err != nil {
+			return nil, fmt.Errorf("scan opened webhook: %w", err)
+		}
+		opened = append(opened, wid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate opened webhooks: %w", err)
+	}
+	return opened, nil
+}
+
 func nextBreakerCooldown(current time.Duration, config BreakerConfig) time.Duration {
 	if current <= 0 {
 		return config.InitialCooldown
@@ -224,4 +388,139 @@ func nextBreakerCooldown(current time.Duration, config BreakerConfig) time.Durat
 
 func nullIfEmpty(value string) sql.NullString {
 	return sql.NullString{String: value, Valid: value != ""}
+}
+
+func (s *Store) batchRecordBreakerSuccess(ctx context.Context, tx *sql.Tx, deliveryIDs []string) ([]string, error) {
+	webhookIDs, err := batchDeliveryWebhookIDs(ctx, tx, deliveryIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	var uniqueWIDs []string
+	seen := make(map[string]bool, len(webhookIDs))
+	for _, wid := range webhookIDs {
+		if !seen[wid] {
+			seen[wid] = true
+			uniqueWIDs = append(uniqueWIDs, wid)
+		}
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		UPDATE webhooks
+		SET breaker_state = 'closed',
+		    breaker_failure_count = 0,
+		    breaker_opened_at = NULL,
+		    breaker_next_probe_at = NULL,
+		    breaker_cooldown_ms = $2,
+		    breaker_probe_delivery_id = NULL
+		WHERE id = ANY($1::uuid[])
+		  AND breaker_state <> 'closed'
+		  AND NOT (
+		      breaker_state = 'half_open'
+		      AND breaker_probe_delivery_id IS NOT NULL
+		      AND breaker_probe_delivery_id <> ALL($3::uuid[])
+		  )
+		RETURNING id::text
+	`, uniqueWIDs, s.breakerConfig.InitialCooldown.Milliseconds(), deliveryIDs)
+	if err != nil {
+		return nil, fmt.Errorf("batch record breaker success: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var closed []string
+	for rows.Next() {
+		var wid string
+		if err := rows.Scan(&wid); err != nil {
+			return nil, fmt.Errorf("scan closed webhook: %w", err)
+		}
+		closed = append(closed, wid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate closed webhooks: %w", err)
+	}
+	return closed, nil
+}
+
+type trippedBreaker struct {
+	webhookID string
+	reason    string
+}
+
+func (s *Store) batchRecordBreakerFailure(ctx context.Context, tx *sql.Tx, deliveryIDs []string, items []BatchMarkItem, reasonFn func(BatchMarkItem) string) ([]trippedBreaker, error) {
+	webhookIDs, err := batchDeliveryWebhookIDs(ctx, tx, deliveryIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	type webhookInfo struct {
+		webhookID string
+		reason    string
+	}
+	deduped := make(map[string]webhookInfo, len(webhookIDs))
+	for _, item := range items {
+		wid, ok := webhookIDs[item.DeliveryID]
+		if !ok {
+			return nil, fmt.Errorf("delivery %s not found", item.DeliveryID)
+		}
+		if _, exists := deduped[wid]; !exists {
+			deduped[wid] = webhookInfo{webhookID: wid, reason: reasonFn(item)}
+		}
+	}
+
+	var tripped []trippedBreaker
+
+	uniqueIDs := make([]string, 0, len(deduped))
+	for wid := range deduped {
+		uniqueIDs = append(uniqueIDs, wid)
+	}
+
+	states, err := batchLoadBreakerStates(ctx, tx, uniqueIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	var halfOpenIDs []string
+	var closedIDs []string
+	for wid, state := range states {
+		switch state.state {
+		case BreakerStateHalfOpen:
+			halfOpenIDs = append(halfOpenIDs, wid)
+		case BreakerStateClosed:
+			closedIDs = append(closedIDs, wid)
+		}
+	}
+
+	if len(halfOpenIDs) > 0 {
+		opened, err := s.batchOpenHalfOpenBreakers(ctx, tx, halfOpenIDs, s.breakerConfig.MaxCooldown.Milliseconds())
+		if err != nil {
+			return nil, err
+		}
+		for _, wid := range opened {
+			tripped = append(tripped, trippedBreaker{webhookID: wid, reason: deduped[wid].reason})
+		}
+	}
+
+	if len(closedIDs) > 0 {
+		counts, err := batchConsecutiveWebhookFailures(ctx, tx, closedIDs, s.breakerConfig.FailureThreshold+1)
+		if err != nil {
+			return nil, err
+		}
+		exceeded := make(map[string]int, len(counts))
+		for wid, n := range counts {
+			if n >= s.breakerConfig.FailureThreshold {
+				exceeded[wid] = n
+			}
+		}
+		if len(exceeded) > 0 {
+			opened, err := s.batchOpenClosedBreakers(ctx, tx, exceeded, s.breakerConfig.InitialCooldown.Milliseconds())
+			if err != nil {
+				return nil, err
+			}
+			for _, wid := range opened {
+				tripped = append(tripped, trippedBreaker{webhookID: wid, reason: deduped[wid].reason})
+			}
+		}
+	}
+
+	return tripped, nil
 }
