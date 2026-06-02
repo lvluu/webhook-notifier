@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_delivery_claims_stale_by_claimed_at;

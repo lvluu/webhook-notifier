@@ -18,7 +18,6 @@ import (
 
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 	"github.com/lvluu/webhook-notifier/internal/observe"
-	"github.com/lvluu/webhook-notifier/internal/pgdsn"
 	"github.com/lvluu/webhook-notifier/internal/registry"
 )
 
@@ -30,6 +29,11 @@ func main() {
 	minBatch := flag.Int("min-batch", 32, "minimum claim batch size per customer")
 	concurrency := flag.Int("concurrency", 16, "Host Concurrency Cap")
 	discoveryInterval := flag.Duration("discovery-interval", time.Second, "claimable customer discovery interval")
+	emptyClaimBackoff := flag.Duration("empty-claim-backoff", 20*time.Millisecond, "pause after an empty claim cycle")
+	backlogSampleInterval := flag.Duration("pending-sample-interval", 5*time.Second, "sample interval for pending-delivery backlog gauge (0 disables)")
+	enablePgNotifyWakeups := flag.Bool("enable-pg-notify-wakeups", true, "use LISTEN/NOTIFY wakeups in addition to polling")
+	pgNotifyChannel := flag.String("pg-notify-channel", "webhook_customer_ready", "LISTEN/NOTIFY channel for customer wakeups")
+	claimQueryMode := flag.String("claim-query-mode", "split", "claim query mode: split or legacy")
 	maxConns := flag.Int("max-conns", 0, "max DB connections (0 = workerCount + 10)")
 	flag.Parse()
 
@@ -42,6 +46,11 @@ func main() {
 		"min_batch", *minBatch,
 		"concurrency", *concurrency,
 		"discovery_interval", *discoveryInterval,
+		"empty_claim_backoff", *emptyClaimBackoff,
+		"pending_sample_interval", *backlogSampleInterval,
+		"pg_notify_wakeups", *enablePgNotifyWakeups,
+		"pg_notify_channel", *pgNotifyChannel,
+		"claim_query_mode", *claimQueryMode,
 	)
 
 	dsn := *db
@@ -53,8 +62,6 @@ func main() {
 		// #nosec G101 -- local Docker Compose default only; production supplies DATABASE_URL.
 		dsn = "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable"
 	}
-	dsn = pgdsn.WithSessionSetting(dsn, "jit", "off")
-
 	dbConn, err := sql.Open("postgres", dsn)
 	if err != nil {
 		logger.Error("failed to open database", "error", err)
@@ -89,16 +96,22 @@ func main() {
 	runtimeCfg.WorkerCount = *workerCount
 	runtimeCfg.MinBatchHint = *minBatch
 	runtimeCfg.HostConcurrencyCap = *concurrency
+	runtimeCfg.EmptyClaimBackoff = *emptyClaimBackoff
+	runtimeCfg.BacklogSampleInterval = *backlogSampleInterval
+	runtimeCfg.EnablePgNotifyWakeups = *enablePgNotifyWakeups
+	runtimeCfg.PgNotifyChannel = *pgNotifyChannel
+	runtimeCfg.ClaimQueryMode = *claimQueryMode
 	runtimeCfg.Discovery.Interval = *discoveryInterval
+	observe.StartPendingDeliveriesSampler(runCtx, dbConn, runtimeCfg.BacklogSampleInterval, logger.With("component", "pending-backlog"))
 
-	deliveryRuntime, runtimeErrCh, err := startDeliveryRuntime(runCtx, logger, dbConn, runtimeCfg)
+	deliveryRuntime, runtimeErrCh, err := startDeliveryRuntime(runCtx, logger, dbConn, dsn, runtimeCfg)
 	if err != nil {
 		logger.Error("failed to start delivery runtime", "error", err)
 		os.Exit(1)
 	}
 	defer cancel()
 
-	ingestStore := ingest.New(dbConn, registry.New(dbConn), deliveryRuntime.scheduler)
+	ingestStore := ingest.New(dbConn, registry.New(dbConn), deliveryRuntime.notifier)
 	business := &http.Server{
 		Addr:              *addr,
 		Handler:           newBusinessHandler(logger.With("component", "business-http"), ingestStore, dbConn),

@@ -3,7 +3,8 @@ set dotenv-load := true
 
 database_url := env_var_or_default("DATABASE_URL", "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable")
 migrate      := "go run -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.17.1"
-stack_services := "postgres pgbouncer notifier caddy webhook-receiver prometheus grafana"
+stack_services := "postgres pgbouncer notifier caddy webhook-receiver"
+observe_services := "prometheus grafana"
 compose_cmd := "docker compose -f compose/docker-compose.yml --project-directory ."
 
 # list available recipes
@@ -69,16 +70,20 @@ tidy:
 stack-build:
     {{compose_cmd}} build
 
-# start production-like stack with N notifier replicas behind Caddy
-stack-up n="3":
+# start low-resource dev stack with N notifier replicas behind Caddy
+stack-up n="1":
     {{compose_cmd}} up -d --scale notifier={{n}} {{stack_services}}
 
 # same as stack-up; Caddy exposes host-accessible ingest on localhost:8080
 stack-up-host n="3":
     just stack-up {{n}}
 
-# start opt-in chaos load aligned to SCALABILITY_REVIEW peak mix:
-# 50 whales @ 2.5k/s + 5k small @ 500/s (~3k events/s total)
+# start observability stack on top of the low-resource dev stack
+stack-observe:
+    {{compose_cmd}} --profile observe up -d {{observe_services}}
+
+# start opt-in chaos load aligned to the smaller affordable mix:
+# 50 whales @ 250/s + 5k small @ 50/s (~300 events/s total)
 stack-chaos n="3":
     {{compose_cmd}} up -d --scale notifier={{n}} {{stack_services}}
     {{compose_cmd}} --profile chaos up -d chaos-whales chaos-small
@@ -158,3 +163,7 @@ bench-6:
 # retain terminal deliveries into delivery_history
 delivery-history-retention:
     go run ./cmd/delivery-history-retention
+
+# watch sustained load and fail if pending backlog drops below the floor
+sustained-load-watch floor="500" duration="900" interval="30":
+    bash ./bench/scripts/sustained_load_watch.sh {{floor}} {{duration}} {{interval}}

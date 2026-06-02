@@ -1,7 +1,7 @@
 {
   "title": "Webhook Notifier",
   "uid": "notifier",
-  "version": 2,
+  "version": 4,
   "schemaVersion": 39,
   "timezone": "browser",
   "refresh": "5s",
@@ -246,10 +246,36 @@
       "fieldConfig": {"defaults": {"unit": "short"}}
     },
     {
+      "title": "Pending Deliveries",
+      "description": "Current number of pending or retryable deliveries in the outbox. This is the live backlog depth, sampled from the database over time.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
+      "targets": [
+        {
+          "expr": "webhook_pending_deliveries",
+          "legendFormat": "pending deliveries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {"thresholdsStyle": {"mode": "line"}},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 100},
+              {"color": "red", "value": 1000}
+            ]
+          }
+        }
+      }
+    },
+    {
       "title": "Notifier Instances And Workers",
       "description": "Live notifier instance count plus configured worker goroutines (total and per instance). Use this to confirm horizontal scaling versus in-process concurrency; higher only helps if the service stays healthy.",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 48},
       "targets": [
         {
           "expr": "count(up{job=\"notifier\"})",

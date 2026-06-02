@@ -15,6 +15,7 @@ import (
 
 type deliveryRuntime struct {
 	scheduler roundrobinScheduler
+	notifier  schedulerNotifier
 	cancel    context.CancelFunc
 	done      chan struct{}
 }
@@ -27,7 +28,7 @@ type roundrobinScheduler interface {
 
 type runtimeDeps struct {
 	newScheduler func() roundrobinScheduler
-	newStore     func(*sql.DB) *outbox.Store
+	newStore     func(*sql.DB, workerRuntimeConfig) *outbox.Store
 	newLimiter   func(int) *worker.HostLimiter
 	runDiscovery func(context.Context, *outbox.Store, roundrobinScheduler, worker.DiscoveryConfig) error
 }
@@ -35,7 +36,12 @@ type runtimeDeps struct {
 func defaultRuntimeDeps() runtimeDeps {
 	return runtimeDeps{
 		newScheduler: func() roundrobinScheduler { return roundrobin.New() },
-		newStore:     func(db *sql.DB) *outbox.Store { return outbox.New(db) },
+		newStore: func(db *sql.DB, cfg workerRuntimeConfig) *outbox.Store {
+			opts := []outbox.Option{
+				outbox.WithClaimQueryMode(outbox.ClaimQueryMode(cfg.ClaimQueryMode)),
+			}
+			return outbox.New(db, opts...)
+		},
 		newLimiter: func(maxPerHost int) *worker.HostLimiter {
 			return worker.NewHostLimiter(worker.HostLimiterConfig{MaxPerHost: maxPerHost})
 		},
@@ -59,15 +65,17 @@ func startDeliveryRuntime(
 	parent context.Context,
 	logger *slog.Logger,
 	db *sql.DB,
+	dsn string,
 	cfg workerRuntimeConfig,
 ) (*deliveryRuntime, <-chan error, error) {
-	return startDeliveryRuntimeWithDeps(parent, logger, db, cfg, defaultRuntimeDeps())
+	return startDeliveryRuntimeWithDeps(parent, logger, db, dsn, cfg, defaultRuntimeDeps())
 }
 
 func startDeliveryRuntimeWithDeps(
 	parent context.Context,
 	logger *slog.Logger,
 	db *sql.DB,
+	dsn string,
 	cfg workerRuntimeConfig,
 	deps runtimeDeps,
 ) (*deliveryRuntime, <-chan error, error) {
@@ -80,7 +88,14 @@ func startDeliveryRuntimeWithDeps(
 	errCh := make(chan error, cfg.WorkerCount+1)
 
 	sched := deps.newScheduler()
-	outboxStore := deps.newStore(db)
+	notify := schedulerNotifier{
+		scheduler:  sched,
+		db:         db,
+		logger:     logger.With("component", "pg-notify"),
+		notifyChan: cfg.PgNotifyChannel,
+		enabled:    cfg.EnablePgNotifyWakeups,
+	}
+	outboxStore := deps.newStore(db, cfg)
 	limiter := deps.newLimiter(cfg.HostConcurrencyCap)
 
 	var wg sync.WaitGroup
@@ -94,6 +109,7 @@ func startDeliveryRuntimeWithDeps(
 				worker.WithHostLimiter(limiter),
 				worker.WithMinBatchHint(cfg.MinBatchHint),
 				worker.WithRequestTimeout(cfg.RequestTimeout),
+				worker.WithEmptyClaimBackoff(cfg.EmptyClaimBackoff),
 				worker.WithLogger(logger.With("component", "worker", "worker_id", workerID)),
 			)
 			err := w.Run(runCtx, outboxStore)
@@ -112,6 +128,17 @@ func startDeliveryRuntimeWithDeps(
 		}
 	}()
 
+	if cfg.EnablePgNotifyWakeups && dsn != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := runCustomerWakeListener(runCtx, logger.With("component", "pg-listener"), dsn, cfg.PgNotifyChannel, sched)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				trySendRuntimeError(logger, errCh, fmt.Errorf("wake listener: %w", err))
+			}
+		}()
+	}
+
 	go func() {
 		wg.Wait()
 		close(done)
@@ -120,6 +147,7 @@ func startDeliveryRuntimeWithDeps(
 
 	return &deliveryRuntime{
 		scheduler: sched,
+		notifier:  notify,
 		cancel:    cancel,
 		done:      done,
 	}, errCh, nil

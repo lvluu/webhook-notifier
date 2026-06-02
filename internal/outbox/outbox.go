@@ -46,6 +46,16 @@ const (
 	BreakerStateHalfOpen = "half_open"
 )
 
+// ClaimQueryMode controls which SQL shape the store uses for claim discovery.
+type ClaimQueryMode string
+
+const (
+	// ClaimQueryModeSplit uses branch-specific scans for ready vs stale claims.
+	ClaimQueryModeSplit ClaimQueryMode = "split"
+	// ClaimQueryModeLegacy uses the combined claimable predicate.
+	ClaimQueryModeLegacy ClaimQueryMode = "legacy"
+)
+
 // BreakerConfig controls persisted per-Webhook circuit breaker transitions.
 // A FailureThreshold of 0 disables breaker tripping entirely.
 type BreakerConfig struct {
@@ -105,6 +115,7 @@ type Store struct {
 	db            *sql.DB
 	claimLease    time.Duration
 	breakerConfig BreakerConfig
+	claimMode     ClaimQueryMode
 }
 
 // Option configures a Store.
@@ -127,12 +138,25 @@ func WithBreakerConfig(config BreakerConfig) Option {
 	}
 }
 
+// WithClaimQueryMode selects which claim SQL shape the store should use.
+func WithClaimQueryMode(mode ClaimQueryMode) Option {
+	return func(s *Store) {
+		switch mode {
+		case ClaimQueryModeLegacy:
+			s.claimMode = ClaimQueryModeLegacy
+		default:
+			s.claimMode = ClaimQueryModeSplit
+		}
+	}
+}
+
 // New returns an outbox store backed by db.
 func New(db *sql.DB, opts ...Option) *Store {
 	store := &Store{
 		db:            db,
 		claimLease:    DefaultClaimLease,
 		breakerConfig: defaultBreakerConfig(),
+		claimMode:     ClaimQueryModeSplit,
 	}
 	for _, opt := range opts {
 		opt(store)

@@ -19,6 +19,7 @@ var (
 	WebhookClaimDurationSeconds         prometheus.Histogram
 	WebhookClaimBatchSize               prometheus.Histogram
 	WebhookClaimEmptyTotal              prometheus.Counter
+	WebhookPendingDeliveries            prometheus.Gauge
 	WebhookActiveCustomers              prometheus.Gauge
 	WebhookWorkersConfigured            prometheus.Gauge
 	WebhookIngestFanoutPerEvent         prometheus.Histogram
@@ -40,6 +41,7 @@ func ResetMetricsForTest() {
 	WebhookClaimDurationSeconds = nil
 	WebhookClaimBatchSize = nil
 	WebhookClaimEmptyTotal = nil
+	WebhookPendingDeliveries = nil
 	WebhookActiveCustomers = nil
 	WebhookWorkersConfigured = nil
 	WebhookIngestFanoutPerEvent = nil
@@ -120,6 +122,11 @@ func initMetrics(reg prometheus.Registerer) {
 		Help: "Total number of claim queries that returned zero rows.",
 	})
 
+	WebhookPendingDeliveries = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "webhook_pending_deliveries",
+		Help: "Current number of claimable deliveries awaiting worker processing.",
+	})
+
 	WebhookActiveCustomers = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "webhook_active_customers",
 		Help: "Current number of customers with pending deliveries in the scheduler.",
@@ -155,6 +162,7 @@ func initMetrics(reg prometheus.Registerer) {
 		WebhookClaimDurationSeconds,
 		WebhookClaimBatchSize,
 		WebhookClaimEmptyTotal,
+		WebhookPendingDeliveries,
 		WebhookActiveCustomers,
 		WebhookWorkersConfigured,
 		WebhookIngestFanoutPerEvent,

@@ -99,3 +99,41 @@ Current reports:
 - `bench/results/scenario-6.md`
 
 These reports are intended to be committed so the benchmark results stay reviewable and comparable across revisions.
+
+## Sustained-Load Health Checks (Issue #54)
+
+For dead-tuple/backlog drift validation under sustained load, run:
+
+```bash
+psql "$DATABASE_URL" -f bench/scripts/issue54_health.sql
+```
+
+Checklist and pass/fail gates:
+
+- `docs/operations/issue-54-throughput-hardening.md`
+
+To keep the queue saturated while you watch for throughput decay, use the sustained-load watcher:
+
+```bash
+just sustained-load-watch 500 900 30
+```
+
+Arguments:
+
+- `500` - minimum `pending_retry_total` floor.
+- `900` - total watch duration in seconds.
+- `30` - sampling interval in seconds.
+
+The watcher waits until the backlog reaches the floor, then samples queue size and delivery rate until the run completes. If backlog drops below the floor, the run is no longer a sustained-load test.
+
+## DB Query Monitoring
+
+For query-level DB health (waits, locks, bloat, `pg_stat_statements` hotspots):
+
+```bash
+psql "$DATABASE_URL" -f bench/scripts/db_query_health.sql
+```
+
+Runbook and thresholds:
+
+- `docs/operations/db-query-monitoring.md`
