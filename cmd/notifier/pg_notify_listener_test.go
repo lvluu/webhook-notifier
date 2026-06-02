@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -93,6 +94,38 @@ func TestPgNotifyBroadcaster_CoalescesCustomerDuringCooldown(t *testing.T) {
 	waitForCallCount(t, executor, 2)
 }
 
+func TestPgNotifyBroadcaster_CooldownStartsAfterBroadcastCompletes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	now := time.Now()
+	release := make(chan struct{})
+	executor := &recordingPgNotifyExecutor{
+		started: make(chan string, 2),
+		release: release,
+	}
+	broadcaster := newPgNotifyBroadcaster(executor, slogDiscard(), "customer_ready", 1)
+	broadcaster.now = func() time.Time { return now }
+	go func() {
+		_ = broadcaster.Run(ctx)
+	}()
+
+	broadcaster.Notify("cus_1")
+	waitForStartedCustomer(t, executor.started, "cus_1")
+
+	now = now.Add(pgNotifyBroadcastCooldown + time.Nanosecond)
+	close(release)
+	waitForCustomerReleased(t, broadcaster, "cus_1")
+
+	broadcaster.Notify("cus_1")
+	waitForCallCount(t, executor, 1)
+
+	now = now.Add(pgNotifyBroadcastCooldown + time.Nanosecond)
+	broadcaster.Notify("cus_1")
+	waitForStartedCustomer(t, executor.started, "cus_1")
+	waitForCallCount(t, executor, 2)
+}
+
 func TestPgNotifyBroadcaster_DropsWhenQueueIsFullWithoutBlocking(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -148,6 +181,33 @@ func TestPgNotifyBroadcaster_ReleasesCustomerAfterFailure(t *testing.T) {
 	broadcaster.Notify("cus_1")
 	waitForStartedCustomer(t, executor.started, "cus_1")
 	waitForCallCount(t, executor, 2)
+}
+
+func TestPgNotifyBroadcaster_PrunesStaleCooldownEntries(t *testing.T) {
+	now := time.Now()
+	executor := &recordingPgNotifyExecutor{}
+	broadcaster := newPgNotifyBroadcaster(executor, slogDiscard(), "customer_ready", 1)
+	broadcaster.now = func() time.Time { return now }
+
+	broadcaster.mu.Lock()
+	for i := 0; i < 1025; i++ {
+		broadcaster.lastBroadcastByCustomer[fmt.Sprintf("stale_%d", i)] = now.Add(-11 * pgNotifyBroadcastCooldown)
+	}
+	broadcaster.mu.Unlock()
+
+	broadcaster.broadcast(context.Background(), "cus_1")
+
+	broadcaster.mu.Lock()
+	entryCount := len(broadcaster.lastBroadcastByCustomer)
+	_, keptCurrent := broadcaster.lastBroadcastByCustomer["cus_1"]
+	broadcaster.mu.Unlock()
+
+	if entryCount != 1 {
+		t.Fatalf("cooldown entries: got %d, want 1", entryCount)
+	}
+	if !keptCurrent {
+		t.Fatal("current Customer cooldown entry was pruned")
+	}
 }
 
 func waitForStartedCustomer(t *testing.T, started <-chan string, want string) {

@@ -40,9 +40,9 @@ type pgNotifyBroadcaster struct {
 	queue      chan string
 	now        func() time.Time
 
-	mu                   sync.Mutex
-	lastQueuedByCustomer map[string]time.Time
-	pending              map[string]struct{}
+	mu                      sync.Mutex
+	lastBroadcastByCustomer map[string]time.Time
+	pending                 map[string]struct{}
 }
 
 func (n schedulerNotifier) Notify(customerID string) {
@@ -67,8 +67,8 @@ func newPgNotifyBroadcaster(executor pgNotifyExecutor, logger *slog.Logger, noti
 		queue:      make(chan string, queueSize),
 		now:        time.Now,
 
-		lastQueuedByCustomer: make(map[string]time.Time),
-		pending:              make(map[string]struct{}),
+		lastBroadcastByCustomer: make(map[string]time.Time),
+		pending:                 make(map[string]struct{}),
 	}
 }
 
@@ -85,7 +85,7 @@ func (b *pgNotifyBroadcaster) Notify(customerID string) {
 		return
 	}
 	now := b.now()
-	if lastQueued := b.lastQueuedByCustomer[customerID]; now.Sub(lastQueued) < b.cooldown {
+	if lastBroadcast := b.lastBroadcastByCustomer[customerID]; now.Sub(lastBroadcast) < b.cooldown {
 		observe.IncPgNotifyBroadcast("coalesced")
 		return
 	}
@@ -113,12 +113,12 @@ func (b *pgNotifyBroadcaster) broadcast(parent context.Context, customerID strin
 	defer func() {
 		b.mu.Lock()
 		delete(b.pending, customerID)
-		b.lastQueuedByCustomer[customerID] = b.now()
-		if len(b.lastQueuedByCustomer) > 1024 {
+		b.lastBroadcastByCustomer[customerID] = b.now()
+		if len(b.lastBroadcastByCustomer) > 1024 {
 			deadline := b.now().Add(-10 * b.cooldown)
-			for id, last := range b.lastQueuedByCustomer {
+			for id, last := range b.lastBroadcastByCustomer {
 				if last.Before(deadline) {
-					delete(b.lastQueuedByCustomer, id)
+					delete(b.lastBroadcastByCustomer, id)
 				}
 			}
 		}
