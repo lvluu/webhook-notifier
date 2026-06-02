@@ -21,3 +21,4 @@ coverage.*
 # Env
 .env
 .env.local
+chaos
