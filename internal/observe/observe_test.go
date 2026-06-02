@@ -103,6 +103,7 @@ func TestRegisterMetrics_registers_metric_families(t *testing.T) {
 	WebhookBreakerState.WithLabelValues("webhook_1", "closed").Set(1)
 	WebhookBreakerTripsTotal.WithLabelValues("retryable_5xx").Add(0)
 	WebhookPendingDeliveries.WithLabelValues(customerClassSmall).Set(0)
+	WebhookPgNotifyBroadcastTotal.WithLabelValues("sent").Add(0)
 
 	families, err := reg.Gather()
 	if err != nil {

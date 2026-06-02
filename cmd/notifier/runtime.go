@@ -33,6 +33,8 @@ type runtimeDeps struct {
 	runDiscovery func(context.Context, *outbox.Store, roundrobinScheduler, worker.DiscoveryConfig) error
 }
 
+const pgNotifyQueueSize = 1024
+
 func defaultRuntimeDeps() runtimeDeps {
 	return runtimeDeps{
 		newScheduler: func() roundrobinScheduler { return roundrobin.New() },
@@ -89,16 +91,43 @@ func startDeliveryRuntimeWithDeps(
 
 	sched := deps.newScheduler()
 	notify := schedulerNotifier{
-		scheduler:  sched,
-		db:         db,
-		logger:     logger.With("component", "pg-notify"),
-		notifyChan: cfg.PgNotifyChannel,
-		enabled:    cfg.EnablePgNotifyWakeups,
+		scheduler: sched,
 	}
 	outboxStore := deps.newStore(db, cfg)
 	limiter := deps.newLimiter(cfg.HostConcurrencyCap)
 
 	var wg sync.WaitGroup
+	var broadcastDB *sql.DB
+	pgNotifyDSN := cfg.PgNotifyDSN
+	if pgNotifyDSN == "" {
+		pgNotifyDSN = dsn
+	}
+	if cfg.EnablePgNotifyWakeups && pgNotifyDSN != "" {
+		var err error
+		broadcastDB, err = sql.Open("postgres", pgNotifyDSN)
+		if err != nil {
+			cancel()
+			return nil, nil, fmt.Errorf("open pg_notify database: %w", err)
+		}
+		broadcastDB.SetMaxOpenConns(1)
+		broadcastDB.SetMaxIdleConns(1)
+		broadcaster := newPgNotifyBroadcaster(
+			broadcastDB,
+			logger.With("component", "pg-notify"),
+			cfg.PgNotifyChannel,
+			pgNotifyQueueSize,
+		)
+		notify.broadcaster = broadcaster
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := broadcaster.Run(runCtx)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				trySendRuntimeError(logger, errCh, fmt.Errorf("pg_notify broadcaster: %w", err))
+			}
+		}()
+	}
+
 	for i := 0; i < cfg.WorkerCount; i++ {
 		wg.Add(1)
 		go func(workerID int) {
@@ -128,11 +157,11 @@ func startDeliveryRuntimeWithDeps(
 		}
 	}()
 
-	if cfg.EnablePgNotifyWakeups && dsn != "" {
+	if cfg.EnablePgNotifyWakeups && pgNotifyDSN != "" {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err := runCustomerWakeListener(runCtx, logger.With("component", "pg-listener"), dsn, cfg.PgNotifyChannel, sched)
+			err := runCustomerWakeListener(runCtx, logger.With("component", "pg-listener"), pgNotifyDSN, cfg.PgNotifyChannel, sched)
 			if err != nil && !errors.Is(err, context.Canceled) {
 				trySendRuntimeError(logger, errCh, fmt.Errorf("wake listener: %w", err))
 			}
@@ -141,6 +170,11 @@ func startDeliveryRuntimeWithDeps(
 
 	go func() {
 		wg.Wait()
+		if broadcastDB != nil {
+			if err := broadcastDB.Close(); err != nil && logger != nil {
+				logger.Warn("pg_notify database close failed", "error", err)
+			}
+		}
 		close(done)
 		close(errCh)
 	}()

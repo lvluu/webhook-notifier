@@ -32,6 +32,7 @@ func main() {
 	emptyClaimBackoff := flag.Duration("empty-claim-backoff", 20*time.Millisecond, "pause after an empty claim cycle")
 	backlogSampleInterval := flag.Duration("pending-sample-interval", 5*time.Second, "sample interval for pending-delivery backlog gauge (0 disables)")
 	enablePgNotifyWakeups := flag.Bool("enable-pg-notify-wakeups", true, "use LISTEN/NOTIFY wakeups in addition to polling")
+	pgNotifyDSN := flag.String("pg-notify-db", "", "optional direct DATABASE_URL for LISTEN/NOTIFY connections")
 	pgNotifyChannel := flag.String("pg-notify-channel", "webhook_customer_ready", "LISTEN/NOTIFY channel for customer wakeups")
 	claimQueryMode := flag.String("claim-query-mode", "split", "claim query mode: split or legacy")
 	maxConns := flag.Int("max-conns", 0, "max DB connections (0 = workerCount + 10)")
@@ -99,6 +100,7 @@ func main() {
 	runtimeCfg.EmptyClaimBackoff = *emptyClaimBackoff
 	runtimeCfg.BacklogSampleInterval = *backlogSampleInterval
 	runtimeCfg.EnablePgNotifyWakeups = *enablePgNotifyWakeups
+	runtimeCfg.PgNotifyDSN = *pgNotifyDSN
 	runtimeCfg.PgNotifyChannel = *pgNotifyChannel
 	runtimeCfg.ClaimQueryMode = *claimQueryMode
 	runtimeCfg.Discovery.Interval = *discoveryInterval

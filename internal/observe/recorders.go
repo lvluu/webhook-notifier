@@ -197,3 +197,11 @@ func IncBreakerTrip(reason string) {
 	}
 	WebhookBreakerTripsTotal.WithLabelValues(reason).Add(1)
 }
+
+// IncPgNotifyBroadcast safely increments the remote wake broadcaster outcome.
+func IncPgNotifyBroadcast(result string) {
+	if !metricsRegistered() {
+		return
+	}
+	WebhookPgNotifyBroadcastTotal.WithLabelValues(result).Add(1)
+}
