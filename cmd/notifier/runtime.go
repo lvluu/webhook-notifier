@@ -95,6 +95,7 @@ func startDeliveryRuntimeWithDeps(
 	}
 	outboxStore := deps.newStore(db, cfg)
 	limiter := deps.newLimiter(cfg.HostConcurrencyCap)
+	httpClient := worker.NewHTTPClient(worker.DefaultHTTPConfig())
 
 	var wg sync.WaitGroup
 	var broadcastDB *sql.DB
@@ -134,7 +135,7 @@ func startDeliveryRuntimeWithDeps(
 			defer wg.Done()
 			w := worker.New(
 				sched,
-				worker.WithHTTPClient(worker.NewHTTPClient(worker.DefaultHTTPConfig())),
+				worker.WithHTTPClient(httpClient),
 				worker.WithHostLimiter(limiter),
 				worker.WithMinBatchHint(cfg.MinBatchHint),
 				worker.WithRequestTimeout(cfg.RequestTimeout),
