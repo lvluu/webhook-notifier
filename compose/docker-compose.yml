@@ -3,14 +3,17 @@ x-chaos-common: &chaos-common
     context: .
     dockerfile: Dockerfile
   depends_on:
-    - notifier
-    - webhook-receiver
+    notifier:
+      condition: service_healthy
+    webhook-receiver:
+      condition: service_started
   profiles:
     - chaos
 
 services:
   postgres:
     image: postgres:17-alpine
+    shm_size: 256m
     environment:
       POSTGRES_USER: notifier
       POSTGRES_PASSWORD: notifier
@@ -30,7 +33,7 @@ services:
     command:
       - postgres
       - -c
-      - max_connections=100
+      - max_connections=200
       - -c
       - shared_buffers=128MB
       - -c
@@ -55,8 +58,8 @@ services:
       DB_PASSWORD: notifier
       DB_NAME: notifier
       POOL_MODE: transaction
-      DEFAULT_POOL_SIZE: "25"
-      MAX_CLIENT_CONN: "200"
+      DEFAULT_POOL_SIZE: "80"
+      MAX_CLIENT_CONN: "400"
       LISTEN_PORT: "6432"
     depends_on:
       postgres:
@@ -75,9 +78,11 @@ services:
       - -metrics-addr
       - :9090
       - -workers
-      - "8"
+      - "16"
       - -min-batch
       - "4"
+      - -multi-pick
+      - "8"
       - -concurrency
       - "4"
       - -discovery-interval
@@ -94,7 +99,12 @@ services:
       - -claim-query-mode
       - split
       - -max-conns
-      - "12"
+      - "30"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/metrics"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
     depends_on:
       pgbouncer:
         condition: service_started
@@ -122,6 +132,11 @@ services:
       - 5ms
       - -latency-max
       - 15ms
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/metrics"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
     ports:
       - "8081:8080"
       - "9092:9091"
@@ -160,13 +175,13 @@ services:
       - -customer-base
       - whale
       - -customers
-      - "50"
+      - "5"
       - -class
       - "3"
       - -rate
-      - "500"
+      - "200"
       - -burst
-      - "2000"
+      - "200"
 
   chaos-small:
     <<: *chaos-common
@@ -179,7 +194,7 @@ services:
       - -customer-base
       - small
       - -customers
-      - "5000"
+      - "10000"
       - -class
       - "1"
       - -rate

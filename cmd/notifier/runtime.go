@@ -138,6 +138,7 @@ func startDeliveryRuntimeWithDeps(
 				worker.WithHTTPClient(httpClient),
 				worker.WithHostLimiter(limiter),
 				worker.WithMinBatchHint(cfg.MinBatchHint),
+				worker.WithMultiPickCount(cfg.MultiPickCount),
 				worker.WithRequestTimeout(cfg.RequestTimeout),
 				worker.WithEmptyClaimBackoff(cfg.EmptyClaimBackoff),
 				worker.WithLogger(logger.With("component", "worker", "worker_id", workerID)),

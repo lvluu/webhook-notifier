@@ -2,6 +2,7 @@
 package roundrobin
 
 import (
+	"container/list"
 	"context"
 	"sync"
 
@@ -15,19 +16,27 @@ const ClaimBatchSize uint32 = 64
 // roundRobin is a plain round-robin Scheduler over the set of Customers with
 // pending Deliveries (ADR-0001).
 //
-// State: an ordered slice of CustomerIDs and a cursor. Notify appends a
-// Customer when not already present; Pick returns the Customer at the cursor
-// and advances. Customers remain in rotation until explicitly removed via
-// Remove, so multiple workers can claim from the same Customer concurrently.
+// State: a doubly-linked list of CustomerIDs and a cursor pointer. A map
+// provides O(1) dedup and removal lookups so membership operations do not
+// degrade with active Customer count.
+//
+// Notify appends a Customer when not already present; Pick returns the
+// Customer at the cursor and advances. Customers remain in rotation until
+// explicitly removed via Remove, so multiple workers can claim from the same
+// Customer concurrently.
 type roundRobin struct {
-	mu        sync.Mutex
-	customers []scheduler.CustomerID
-	cursor    int
+	mu     sync.Mutex
+	list   *list.List
+	index  map[scheduler.CustomerID]*list.Element
+	cursor *list.Element
 }
 
-// New returns a round-robin Scheduler.
+// New returns a round-robin Scheduler with O(1) Notify and Remove.
 func New() scheduler.Scheduler {
-	return &roundRobin{}
+	return &roundRobin{
+		list:  list.New(),
+		index: make(map[scheduler.CustomerID]*list.Element),
+	}
 }
 
 // Pick returns the next Customer in rotation and advances the cursor.
@@ -42,21 +51,21 @@ func (r *roundRobin) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bo
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if len(r.customers) == 0 {
+	if r.list.Len() == 0 {
 		return "", 0, false, nil
 	}
 
-	if r.cursor >= len(r.customers) {
-		r.cursor = 0
+	if r.cursor == nil {
+		r.cursor = r.list.Front()
 	}
 
-	customer := r.customers[r.cursor]
-	r.cursor = (r.cursor + 1) % len(r.customers)
+	customerID := r.cursor.Value.(scheduler.CustomerID)
+	r.cursor = r.cursor.Next()
 
-	return customer, ClaimBatchSize, true, nil
+	return customerID, ClaimBatchSize, true, nil
 }
 
-// Remove removes the Customer from the rotation. No-op if not present.
+// Remove removes the Customer from the rotation. O(1). No-op if not present.
 func (r *roundRobin) Remove(customerID scheduler.CustomerID) {
 	if customerID == "" {
 		return
@@ -65,25 +74,21 @@ func (r *roundRobin) Remove(customerID scheduler.CustomerID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	for i, c := range r.customers {
-		if c == customerID {
-			if i < len(r.customers)-1 {
-				copy(r.customers[i:], r.customers[i+1:])
-			}
-			r.customers = r.customers[:len(r.customers)-1]
-			if i < r.cursor {
-				r.cursor--
-			}
-			if len(r.customers) > 0 && r.cursor >= len(r.customers) {
-				r.cursor = 0
-			}
-			return
-		}
+	elem, ok := r.index[customerID]
+	if !ok {
+		return
 	}
+
+	if r.cursor == elem {
+		r.cursor = elem.Next()
+	}
+
+	delete(r.index, customerID)
+	r.list.Remove(elem)
 }
 
 // Notify registers the Customer for round-robin rotation if not already
-// present. Idempotent.
+// present. Idempotent. O(1).
 func (r *roundRobin) Notify(customerID scheduler.CustomerID) {
 	if customerID == "" {
 		return
@@ -92,10 +97,9 @@ func (r *roundRobin) Notify(customerID scheduler.CustomerID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	for _, c := range r.customers {
-		if c == customerID {
-			return
-		}
+	if _, ok := r.index[customerID]; ok {
+		return
 	}
-	r.customers = append(r.customers, customerID)
+
+	r.index[customerID] = r.list.PushBack(customerID)
 }

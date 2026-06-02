@@ -52,22 +52,28 @@ func main() {
 		customerIDs[i] = fmt.Sprintf("%s-%04d", *customerBase, i+1)
 	}
 
-	logger.Info("registering customers", "count", *customerCount, "receiver", *receiverURL)
-	for _, cid := range customerIDs {
-		body, _ := json.Marshal(map[string]interface{}{
-			"id":    cid,
-			"class": *customerClass,
-			"url":   *receiverURL + "/hooks/" + cid,
-		})
-		resp, err := client.Post(*notifierURL+"/api/customers", "application/json", bytes.NewReader(body))
-		if err != nil {
-			logger.Error("register customer failed", "customer", cid, "error", err)
-			continue
-		}
-		if err := resp.Body.Close(); err != nil {
-			logger.Warn("close register response body", "customer", cid, "error", err)
-		}
+	logger.Info("seeding customers", "count", *customerCount, "receiver", *receiverURL)
+	body, _ := json.Marshal(map[string]interface{}{
+		"customer_base": *customerBase,
+		"count":         *customerCount,
+		"class":         *customerClass,
+		"receiver_url":  *receiverURL,
+	})
+	resp, err := client.Post(*notifierURL+"/setup-customers", "application/json", bytes.NewReader(body))
+	if err != nil {
+		logger.Error("setup-customers failed", "error", err)
+		os.Exit(1)
 	}
+	var result struct {
+		Created int `json:"created"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		logger.Error("setup-customers rejected", "status", resp.StatusCode)
+		os.Exit(1)
+	}
+	logger.Info("customers seeded", "created", result.Created)
 
 	logger.Info("customers registered, starting event emission",
 		"rate", rate, "burst", burst, "duration", duration, "class", *customerClass,
@@ -121,13 +127,12 @@ func main() {
 
 						resp, err := client.Post(*notifierURL+"/api/events", "application/json", bytes.NewReader(body))
 						if err != nil {
-							sent.Add(1)
 							return
 						}
-						if err := resp.Body.Close(); err != nil {
-							logger.Warn("close event response body", "customer", cid, "error", err)
+						_ = resp.Body.Close()
+						if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+							sent.Add(1)
 						}
-						sent.Add(1)
 					}()
 				}
 				batchWg.Wait()

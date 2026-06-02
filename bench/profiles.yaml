@@ -103,10 +103,10 @@ scenarios:
       fairness_ratio_limit: 1.05
       breaker_failure_threshold: 0
     stress:
-      worker_counts: [8, 16]
+      worker_counts: [16, 32]
       whale_deliveries: 2000
-      small_count: 50
-      small_deliveries: 100
+      small_count: 10000
+      small_deliveries: 1
       submit_interval: 1ms
       request_timeout: 1500ms
       min_batch_hint: 8

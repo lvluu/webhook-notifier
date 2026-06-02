@@ -27,6 +27,7 @@ func main() {
 	metricsAddr := flag.String("metrics-addr", ":9090", "metrics HTTP server address")
 	workerCount := flag.Int("workers", 64, "number of delivery workers")
 	minBatch := flag.Int("min-batch", 32, "minimum claim batch size per customer")
+	multiPick := flag.Int("multi-pick", 1, "customers to batch per claim query (1 = single-customer ClaimNextN, >1 = ClaimNextBatch)")
 	concurrency := flag.Int("concurrency", 16, "Host Concurrency Cap")
 	discoveryInterval := flag.Duration("discovery-interval", time.Second, "claimable customer discovery interval")
 	emptyClaimBackoff := flag.Duration("empty-claim-backoff", 20*time.Millisecond, "pause after an empty claim cycle")
@@ -98,6 +99,7 @@ func main() {
 	runtimeCfg := loadWorkerRuntimeConfig()
 	runtimeCfg.WorkerCount = *workerCount
 	runtimeCfg.MinBatchHint = *minBatch
+	runtimeCfg.MultiPickCount = *multiPick
 	runtimeCfg.HostConcurrencyCap = *concurrency
 	runtimeCfg.EmptyClaimBackoff = *emptyClaimBackoff
 	runtimeCfg.BacklogSampleInterval = *backlogSampleInterval

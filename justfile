@@ -69,7 +69,7 @@ tidy:
 
 # build production-like stack images
 stack-build:
-    {{compose_cmd}} build
+    {{compose_cmd}} {{all_profiles}} build
 
 # start low-resource dev stack with N notifier replicas behind Caddy
 stack-up n="1":
@@ -115,7 +115,7 @@ stack-status:
 
 # stop and remove the full stack, including volumes
 stack-down:
-    {{compose_cmd}} down -v
+    {{compose_cmd}} {{all_profiles}} down -v
 
 # follow stack logs, optionally for one service
 stack-logs service="":
