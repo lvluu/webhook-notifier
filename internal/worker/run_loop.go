@@ -13,8 +13,16 @@ import (
 )
 
 const (
-	idleBackoff = 50 * time.Millisecond
+	idleBackoff              = 50 * time.Millisecond
+	defaultEmptyClaimBackoff = 20 * time.Millisecond
 )
+
+func (w *Worker) emptyClaimDelay() time.Duration {
+	if w.EmptyClaimBackoff > 0 {
+		return w.EmptyClaimBackoff
+	}
+	return defaultEmptyClaimBackoff
+}
 
 // Run continuously claims scheduled Deliveries and processes them.
 func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
@@ -23,11 +31,6 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 	}
 	if w.Scheduler == nil {
 		return fmt.Errorf("scheduler is required")
-	}
-
-	var claimSem chan struct{}
-	if w.ClaimConcurrencyCap > 0 {
-		claimSem = make(chan struct{}, w.ClaimConcurrencyCap)
 	}
 
 	for {
@@ -51,24 +54,7 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 			continue
 		}
 
-		if claimSem != nil {
-			select {
-			case claimSem <- struct{}{}:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		claimLimit := w.MinBatchHint
-		if batchHint > 0 {
-			claimLimit = int(batchHint)
-		}
-		if claimLimit < 1 {
-			claimLimit = 1
-		}
-		deliveries, err := store.ClaimNextN(ctx, customerID, claimLimit)
-		if claimSem != nil {
-			<-claimSem
-		}
+		deliveries, err := store.ClaimNextN(ctx, customerID, max(int(batchHint), w.MinBatchHint))
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -89,6 +75,11 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 				w.Scheduler.Notify(customerID)
 			default:
 				w.Scheduler.Remove(customerID)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(w.emptyClaimDelay()):
 			}
 			continue
 		}

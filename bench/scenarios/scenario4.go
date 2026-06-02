@@ -473,12 +473,12 @@ This repo uses just bench-4 as the canonical task command for the issue #15 benc
 
 ## Acceptance Criteria
 
-| Criterion | Observed | Limit | Result |
-|---|---:|---:|---|
-| Scaling: %d workers vs %d workers | %.2fx | >= 4.00x | %s |
-| Throughput duplicate tuples | %d | 0 | %s |
-| Retry probe duplicate tuples | %d | 0 | %s |
-| Retry probe idempotency header stability | %s | true | %s |
+| Pillar | Criterion | Observed | Limit | Result |
+|---|---|---:|---:|---|
+| Scalability | Scaling: %d workers vs %d workers | %.2fx | >= 4.00x | %s |
+| Reliability | Throughput duplicate tuples | %d | 0 | %s |
+| Reliability | Retry probe duplicate tuples | %d | 0 | %s |
+| Reliability | Retry probe idempotency header stability | %s | true | %s |
 `,
 		retryProbe.Deliveries,
 		retryProbe.Received,

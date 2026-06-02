@@ -7,24 +7,29 @@ import (
 )
 
 type workerRuntimeConfig struct {
-	WorkerCount        int
-	MinBatchHint       int
-	HostConcurrencyCap int
-	RequestTimeout     time.Duration
-	DatabaseURL        string
-	NotifyChannel      string
-	EnablePGNotify     bool
-	Discovery          worker.DiscoveryConfig
+	WorkerCount           int
+	MinBatchHint          int
+	HostConcurrencyCap    int
+	RequestTimeout        time.Duration
+	EmptyClaimBackoff     time.Duration
+	BacklogSampleInterval time.Duration
+	EnablePgNotifyWakeups bool
+	PgNotifyChannel       string
+	ClaimQueryMode        string
+	Discovery             worker.DiscoveryConfig
 }
 
 func loadWorkerRuntimeConfig() workerRuntimeConfig {
 	return workerRuntimeConfig{
-		WorkerCount:        64,
-		MinBatchHint:       32,
-		HostConcurrencyCap: 16,
-		RequestTimeout:     30 * time.Second,
-		NotifyChannel:      "claimable_customers",
-		EnablePGNotify:     true,
+		WorkerCount:           64,
+		MinBatchHint:          32,
+		HostConcurrencyCap:    16,
+		RequestTimeout:        30 * time.Second,
+		EmptyClaimBackoff:     20 * time.Millisecond,
+		BacklogSampleInterval: 5 * time.Second,
+		EnablePgNotifyWakeups: true,
+		PgNotifyChannel:       "webhook_customer_ready",
+		ClaimQueryMode:        "split",
 		Discovery: worker.DiscoveryConfig{
 			Interval:     time.Second,
 			EmptyBackoff: 5 * time.Second,

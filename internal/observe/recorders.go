@@ -1,23 +1,35 @@
 package observe
 
+const (
+	customerClassSmall  = "small"
+	customerClassWhale  = "whale"
+	customerClassPaused = "paused"
+)
+
+var customerClasses = []string{
+	customerClassSmall,
+	customerClassWhale,
+	customerClassPaused,
+}
+
 // CustomerClassFromValue derives the customer_class label from a class value.
 func CustomerClassFromValue(class uint32) string {
 	switch {
 	case class >= 3:
-		return "whale"
+		return customerClassWhale
 	case class == 0:
-		return "paused"
+		return customerClassPaused
 	default:
-		return "small"
+		return customerClassSmall
 	}
 }
 
 // IncDelivery safely increments WebhookDeliveriesTotal, skipping if nil.
-func IncDelivery(status string) {
+func IncDelivery(status string, customerClass string) {
 	if !metricsRegistered() {
 		return
 	}
-	WebhookDeliveriesTotal.WithLabelValues(status).Add(1)
+	WebhookDeliveriesTotal.WithLabelValues(status, customerClass).Add(1)
 }
 
 // ObserveDeliveryLatency safely observes WebhookDeliveryLatencySeconds, skipping if nil.
@@ -26,6 +38,46 @@ func ObserveDeliveryLatency(customerClass string, seconds float64) {
 		return
 	}
 	WebhookDeliveryLatencySeconds.WithLabelValues(customerClass).Observe(seconds)
+}
+
+// ObserveQueueWait safely observes WebhookQueueWaitSeconds, skipping if nil.
+func ObserveQueueWait(customerClass string, seconds float64) {
+	if !metricsRegistered() {
+		return
+	}
+	WebhookQueueWaitSeconds.WithLabelValues(customerClass).Observe(seconds)
+}
+
+// IncAttempt safely increments WebhookAttemptTotal, skipping if nil.
+func IncAttempt(outcome string) {
+	if !metricsRegistered() {
+		return
+	}
+	WebhookAttemptTotal.WithLabelValues(outcome).Add(1)
+}
+
+// ObservePostDuration safely observes WebhookPostDurationSeconds, skipping if nil.
+func ObservePostDuration(customerClass string, seconds float64) {
+	if !metricsRegistered() {
+		return
+	}
+	WebhookPostDurationSeconds.WithLabelValues(customerClass).Observe(seconds)
+}
+
+// IncDeliveriesInFlight safely increments WebhookDeliveriesInFlight, skipping if nil.
+func IncDeliveriesInFlight() {
+	if !metricsRegistered() {
+		return
+	}
+	WebhookDeliveriesInFlight.Inc()
+}
+
+// DecDeliveriesInFlight safely decrements WebhookDeliveriesInFlight, skipping if nil.
+func DecDeliveriesInFlight() {
+	if !metricsRegistered() {
+		return
+	}
+	WebhookDeliveriesInFlight.Dec()
 }
 
 // IncDlq safely increments WebhookDlqTotal, skipping if nil.
@@ -90,6 +142,22 @@ func IncClaimEmpty() {
 		return
 	}
 	WebhookClaimEmptyTotal.Add(1)
+}
+
+// SetPendingDeliveries safely sets the current queue backlog gauge.
+func SetPendingDeliveries(customerClass string, n float64) {
+	if !metricsRegistered() {
+		return
+	}
+	WebhookPendingDeliveries.WithLabelValues(customerClass).Set(n)
+}
+
+// SetPendingOldestAge safely sets the oldest pending delivery age gauge.
+func SetPendingOldestAge(seconds float64) {
+	if !metricsRegistered() {
+		return
+	}
+	WebhookPendingOldestAgeSeconds.Set(seconds)
 }
 
 // ObserveIngestFanout safely observes WebhookIngestFanoutPerEvent, skipping if nil.

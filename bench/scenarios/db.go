@@ -13,11 +13,10 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
+	"github.com/lvluu/webhook-notifier/internal/pgdsn"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
-
-	"github.com/lvluu/webhook-notifier/internal/pgdsn"
 )
 
 // openBenchDatabase returns an isolated Postgres database for benchmark runs.
@@ -33,6 +32,7 @@ func openBenchDatabase(ctx context.Context) (*sql.DB, func(), error) {
 			source = "DATABASE_URL"
 		}
 		if dsn == "" {
+			// #nosec G101 -- local benchmark reuse default only; production supplies DATABASE_URL.
 			dsn = "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable"
 			source = "default-local"
 		}
@@ -99,7 +99,10 @@ func openBenchDatabase(ctx context.Context) (*sql.DB, func(), error) {
 }
 
 func openBenchDatabaseAtDSN(ctx context.Context, dsn string, migrate bool) (*sql.DB, func(), error) {
+	// Keep JIT off for bench runs so timings stay comparable across repeated
+	// invocations. Runtime service connections do not use this setting.
 	dsn = pgdsn.WithSessionSetting(dsn, "jit", "off")
+
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open postgres: %w", err)
