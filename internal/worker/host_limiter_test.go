@@ -271,3 +271,79 @@ func TestHostLimiter_NeverExceedsCapWith50Deliveries(t *testing.T) {
 		t.Errorf("max concurrent in-flight: got %d, want <= %d", maxInFlight, cap)
 	}
 }
+
+func TestHostLimiter_TryAcquireSucceedsWhenCapacityAvailable(t *testing.T) {
+	t.Parallel()
+
+	hl := worker.NewHostLimiter(worker.HostLimiterConfig{
+		MaxPerHost:     2,
+		AcquireTimeout: 1 * time.Second,
+		RequeueDelay:   100 * time.Millisecond,
+	})
+
+	release1, err := hl.TryAcquire("partner.example.com")
+	if err != nil {
+		t.Fatalf("TryAcquire 1: %v", err)
+	}
+
+	release2, err := hl.TryAcquire("partner.example.com")
+	if err != nil {
+		t.Fatalf("TryAcquire 2: %v", err)
+	}
+
+	release1()
+	release2()
+}
+
+func TestHostLimiter_TryAcquireFailsImmediatelyAtCapacity(t *testing.T) {
+	t.Parallel()
+
+	hl := worker.NewHostLimiter(worker.HostLimiterConfig{
+		MaxPerHost:     1,
+		AcquireTimeout: 5 * time.Second,
+		RequeueDelay:   10 * time.Millisecond,
+	})
+
+	release1, err := hl.TryAcquire("partner.example.com")
+	if err != nil {
+		t.Fatalf("TryAcquire 1: %v", err)
+	}
+	defer release1()
+
+	started := time.Now()
+	_, err = hl.TryAcquire("partner.example.com")
+	if err == nil {
+		t.Fatal("expected error when capacity is full")
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Errorf("TryAcquire should return immediately when full, took %v", elapsed)
+	}
+}
+
+func TestHostLimiter_TryAcquireDoesNotConsumeSlotOnFailure(t *testing.T) {
+	t.Parallel()
+
+	hl := worker.NewHostLimiter(worker.HostLimiterConfig{
+		MaxPerHost:     1,
+		AcquireTimeout: 1 * time.Second,
+		RequeueDelay:   10 * time.Millisecond,
+	})
+
+	release1, err := hl.TryAcquire("partner.example.com")
+	if err != nil {
+		t.Fatalf("TryAcquire 1: %v", err)
+	}
+
+	_, err = hl.TryAcquire("partner.example.com")
+	if err == nil {
+		t.Fatal("expected error when capacity is full")
+	}
+
+	release1()
+
+	release2, err := hl.TryAcquire("partner.example.com")
+	if err != nil {
+		t.Fatalf("TryAcquire after release should succeed: %v", err)
+	}
+	release2()
+}

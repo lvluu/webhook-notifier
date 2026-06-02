@@ -86,6 +86,24 @@ func (h *HostLimiter) Acquire(ctx context.Context, host string) (release func(),
 	}, nil
 }
 
+// TryAcquire attempts to acquire a slot for host without blocking. On success
+// it returns a release function. On capacity exhaustion it returns an error
+// immediately without consuming a slot.
+func (h *HostLimiter) TryAcquire(host string) (release func(), err error) {
+	sem := h.semFor(host)
+	if !sem.TryAcquire(1) {
+		return nil, fmt.Errorf("host limiter acquire %s: capacity reached", host)
+	}
+
+	released := false
+	return func() {
+		if !released {
+			released = true
+			sem.Release(1)
+		}
+	}, nil
+}
+
 // RequeueDelay returns the configured delay for requeuing a Delivery that could
 // not acquire a host slot.
 func (h *HostLimiter) RequeueDelay() time.Duration {
