@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 )
@@ -75,6 +77,109 @@ func newBusinessHandler(logger *slog.Logger, ing ingestSubmitter, db *sql.DB) ht
 
 	mux.Handle("/events", eventsHandler)
 	mux.Handle("/api/events", eventsHandler)
+
+	mux.HandleFunc("/setup-customers", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if db == nil {
+			http.Error(w, "database not available", http.StatusInternalServerError)
+			return
+		}
+
+		var cmd struct {
+			CustomerBase string `json:"customer_base"`
+			Count        int    `json:"count"`
+			Class        uint32 `json:"class"`
+			ReceiverURL  string `json:"receiver_url"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		if cmd.Count < 1 || cmd.Count > 50000 {
+			http.Error(w, "count must be 1-50000", http.StatusBadRequest)
+			return
+		}
+		if cmd.CustomerBase == "" || cmd.ReceiverURL == "" {
+			http.Error(w, "customer_base and receiver_url are required", http.StatusBadRequest)
+			return
+		}
+
+		const txBatch = 500
+		var totalOK int
+		paths := []string{"/hooks/fast", "/hooks/slow", "/hooks/flaky"}
+		for start := 0; start < cmd.Count; start += txBatch {
+			end := min(start+txBatch, cmd.Count)
+
+			tx, err := db.BeginTx(r.Context(), nil)
+			if err != nil {
+				logger.Error("begin setup transaction", "error", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+
+			var sb strings.Builder
+			sb.WriteString("INSERT INTO customers (id, class) VALUES ")
+			custArgs := make([]any, 0, (end-start)*2)
+			for i := start; i < end; i++ {
+				if i > start {
+					sb.WriteString(", ")
+				}
+				base := (i - start) * 2
+				_, _ = fmt.Fprintf(&sb, "($%d, $%d)", base+1, base+2)
+				cid := fmt.Sprintf("%s-%04d", cmd.CustomerBase, i+1)
+				custArgs = append(custArgs, cid, cmd.Class)
+			}
+			sb.WriteString(" ON CONFLICT (id) DO UPDATE SET class = EXCLUDED.class")
+			if _, err := tx.ExecContext(r.Context(), sb.String(), custArgs...); err != nil {
+				_ = tx.Rollback()
+				logger.Error("batch insert customers", "error", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+
+			var whSb strings.Builder
+			whSb.WriteString("INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active) VALUES ")
+			custCount := end - start
+			whArgs := make([]any, 0, custCount*len(paths)*4)
+			row := 0
+			for i := start; i < end; i++ {
+				cid := fmt.Sprintf("%s-%04d", cmd.CustomerBase, i+1)
+				for _, path := range paths {
+					if row > 0 {
+						whSb.WriteString(", ")
+					}
+					base := row * 4
+					_, _ = fmt.Fprintf(&whSb, "($%d, $%d, $%d, $%d, true)", base+1, base+2, base+3, base+4)
+					whArgs = append(whArgs, cid, cmd.ReceiverURL+path, "", fmt.Sprintf("{%s}", "subscriber.created"))
+					row++
+				}
+			}
+			whSb.WriteString(" ON CONFLICT (customer_id, url) DO UPDATE SET active = true, event_types = EXCLUDED.event_types")
+			if _, err := tx.ExecContext(r.Context(), whSb.String(), whArgs...); err != nil {
+				_ = tx.Rollback()
+				logger.Error("batch insert webhooks", "error", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+
+			if err := tx.Commit(); err != nil {
+				_ = tx.Rollback()
+				logger.Error("commit setup batch", "error", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			totalOK += custCount
+		}
+
+		logger.Info("setup-customers complete", "base", cmd.CustomerBase, "count", totalOK, "class", cmd.Class)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]int{"created": totalOK})
+	})
 
 	mux.HandleFunc("/api/customers", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

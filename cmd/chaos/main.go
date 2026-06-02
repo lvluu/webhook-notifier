@@ -52,56 +52,28 @@ func main() {
 		customerIDs[i] = fmt.Sprintf("%s-%04d", *customerBase, i+1)
 	}
 
-	logger.Info("registering customers", "count", *customerCount, "receiver", *receiverURL)
-	var registeredIDs []string
-	const batchSize = 200
-	const maxRetries = 3
-	for start := 0; start < len(customerIDs); start += batchSize {
-		end := min(start+batchSize, len(customerIDs))
-		batch := make([]map[string]interface{}, 0, end-start)
-		for _, cid := range customerIDs[start:end] {
-			batch = append(batch, map[string]interface{}{
-				"id":    cid,
-				"class": *customerClass,
-				"url":   *receiverURL,
-			})
-		}
-		body, _ := json.Marshal(batch)
-
-		var ok bool
-		for retry := range maxRetries {
-			if retry > 0 {
-				time.Sleep(500 * time.Millisecond)
-			}
-			resp, err := client.Post(*notifierURL+"/api/customers/batch", "application/json", bytes.NewReader(body))
-			if err != nil {
-				logger.Warn("batch register attempt failed", "error", err, "batch_start", start, "retry", retry)
-				continue
-			}
-			var result struct {
-				Registered int `json:"registered"`
-			}
-			_ = json.NewDecoder(resp.Body).Decode(&result)
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusCreated {
-				registeredIDs = append(registeredIDs, customerIDs[start:end]...)
-				ok = true
-			}
-			break
-		}
-		if !ok {
-			logger.Error("batch register failed after retries", "batch_start", start)
-		}
-		if (start/batchSize+1)%25 == 0 {
-			logger.Info("registration progress", "done", start+len(batch), "total", len(customerIDs))
-		}
+	logger.Info("seeding customers", "count", *customerCount, "receiver", *receiverURL)
+	body, _ := json.Marshal(map[string]interface{}{
+		"customer_base": *customerBase,
+		"count":         *customerCount,
+		"class":         *customerClass,
+		"receiver_url":  *receiverURL,
+	})
+	resp, err := client.Post(*notifierURL+"/setup-customers", "application/json", bytes.NewReader(body))
+	if err != nil {
+		logger.Error("setup-customers failed", "error", err)
+		os.Exit(1)
 	}
-	if len(registeredIDs) == 0 {
-		logger.Error("no customers registered, using all IDs")
-		registeredIDs = customerIDs
+	var result struct {
+		Created int `json:"created"`
 	}
-	customerIDs = registeredIDs
-	logger.Info("registration complete — all customers seeded", "ok", len(customerIDs), "total", *customerCount)
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		logger.Error("setup-customers rejected", "status", resp.StatusCode)
+		os.Exit(1)
+	}
+	logger.Info("customers seeded", "created", result.Created)
 
 	logger.Info("customers registered, starting event emission",
 		"rate", rate, "burst", burst, "duration", duration, "class", *customerClass,
