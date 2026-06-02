@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // fakeDriver and fakeConn implement enough of the database/sql/driver contract
@@ -27,6 +29,13 @@ type fakeConn struct {
 }
 type fakeRows struct {
 	sent bool
+}
+
+type backlogDriver struct{}
+type backlogConn struct{}
+type backlogRows struct {
+	index int
+	rows  [][]driver.Value
 }
 
 func (fakeDriver) Open(_ string) (driver.Conn, error)  { return fakeConn{}, nil }
@@ -46,20 +55,54 @@ func (r *fakeRows) Next(dest []driver.Value) error {
 	return nil
 }
 
-func init() { sql.Register("fake", fakeDriver{}) }
+func (backlogDriver) Open(_ string) (driver.Conn, error) { return backlogConn{}, nil }
+func (backlogConn) Prepare(_ string) (driver.Stmt, error) {
+	return nil, errors.New("prepare is not supported")
+}
+func (backlogConn) Close() error { return nil }
+func (backlogConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("transactions are not supported")
+}
+func (backlogConn) QueryContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+	return &backlogRows{rows: [][]driver.Value{
+		{int64(0), int64(4), float64(5)},
+		{int64(1), int64(2), float64(7)},
+		{int64(2), int64(3), float64(11)},
+		{int64(3), int64(6), float64(9)},
+		{int64(4), int64(1), float64(3)},
+	}}, nil
+}
+func (*backlogRows) Columns() []string { return []string{"class", "count", "oldest_age"} }
+func (*backlogRows) Close() error      { return nil }
+func (r *backlogRows) Next(dest []driver.Value) error {
+	if r.index >= len(r.rows) {
+		return io.EOF
+	}
+	copy(dest, r.rows[r.index])
+	r.index++
+	return nil
+}
+
+func init() {
+	sql.Register("fake", fakeDriver{})
+	sql.Register("backlog-fake", backlogDriver{})
+}
 
 func TestRegisterMetrics_registers_metric_families(t *testing.T) {
 	ResetMetricsForTest()
 	reg := prometheus.NewRegistry()
 	RegisterMetrics(reg)
 	// Force Vec metrics to materialise a series so Gather includes them.
-	WebhookDeliveriesTotal.WithLabelValues("succeeded").Add(0)
+	WebhookDeliveriesTotal.WithLabelValues("succeeded", customerClassSmall).Add(0)
 	WebhookDeliveryLatencySeconds.WithLabelValues("small").Observe(0)
+	WebhookQueueWaitSeconds.WithLabelValues(customerClassSmall).Observe(0)
+	WebhookAttemptTotal.WithLabelValues("succeeded").Add(0)
+	WebhookPostDurationSeconds.WithLabelValues(customerClassSmall).Observe(0)
 	WebhookDlqTotal.WithLabelValues("exhausted").Add(0)
 	WebhookHostSemaphoreWaitSeconds.WithLabelValues("example.com").Observe(0)
 	WebhookBreakerState.WithLabelValues("webhook_1", "closed").Set(1)
 	WebhookBreakerTripsTotal.WithLabelValues("retryable_5xx").Add(0)
-	WebhookPendingDeliveries.Set(0)
+	WebhookPendingDeliveries.WithLabelValues(customerClassSmall).Set(0)
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -74,7 +117,7 @@ func TestMetricsEndpoint_returns_Prometheus_text(t *testing.T) {
 	ResetMetricsForTest()
 	reg := prometheus.NewRegistry()
 	RegisterMetrics(reg)
-	WebhookDeliveriesTotal.WithLabelValues("succeeded").Add(1)
+	WebhookDeliveriesTotal.WithLabelValues("succeeded", customerClassSmall).Add(1)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
@@ -143,8 +186,13 @@ func TestMetricsEndpoint_returns_nonzero_after_seed(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	RegisterMetrics(reg)
 
-	WebhookDeliveriesTotal.WithLabelValues("succeeded").Add(3)
+	WebhookDeliveriesTotal.WithLabelValues("succeeded", customerClassSmall).Add(3)
 	WebhookDeliveryLatencySeconds.WithLabelValues("small").Observe(0.5)
+	WebhookQueueWaitSeconds.WithLabelValues(customerClassSmall).Observe(0.5)
+	WebhookAttemptTotal.WithLabelValues("succeeded").Add(3)
+	WebhookPostDurationSeconds.WithLabelValues(customerClassSmall).Observe(0.1)
+	WebhookDeliveriesInFlight.Inc()
+	WebhookDeliveriesInFlight.Dec()
 	WebhookAttemptsPerDelivery.Observe(2)
 	WebhookDlqTotal.WithLabelValues("exhausted").Add(1)
 	WebhookSchedulerPickDurationSeconds.Observe(0.001)
@@ -152,7 +200,8 @@ func TestMetricsEndpoint_returns_nonzero_after_seed(t *testing.T) {
 	WebhookClaimDurationSeconds.Observe(0.1)
 	WebhookClaimBatchSize.Observe(5)
 	WebhookClaimEmptyTotal.Add(2)
-	WebhookPendingDeliveries.Set(7)
+	WebhookPendingDeliveries.WithLabelValues(customerClassSmall).Set(7)
+	WebhookPendingOldestAgeSeconds.Set(12)
 	WebhookActiveCustomers.Set(4)
 	WebhookIngestFanoutPerEvent.Observe(3)
 	SetBreakerState("webhook_1", "open")
@@ -180,9 +229,13 @@ func TestMetricsEndpoint_returns_nonzero_after_seed(t *testing.T) {
 			t.Fatalf("/metrics response missing %q", sub)
 		}
 	}
-	requireContains(`webhook_deliveries_total{status="succeeded"} 3`)
+	requireContains(`webhook_deliveries_total{customer_class="small",status="succeeded"} 3`)
 	// Vec histograms include the customer_class label before le, so match the full label set.
 	requireContains(`webhook_delivery_latency_seconds_bucket{customer_class="small",le="0.5"}`)
+	requireContains(`webhook_queue_wait_seconds_bucket{customer_class="small",le="0.5"}`)
+	requireContains(`webhook_attempt_total{outcome="succeeded"} 3`)
+	requireContains(`webhook_post_duration_seconds_bucket{customer_class="small",le="0.1"}`)
+	requireContains(`webhook_deliveries_in_flight 0`)
 	requireContains(`webhook_attempts_per_delivery_bucket{le="2"}`)
 	requireContains(`webhook_dlq_total{reason="exhausted"} 1`)
 	requireContains(`webhook_scheduler_pick_duration_seconds_bucket{le="1e-05"}`)
@@ -190,7 +243,8 @@ func TestMetricsEndpoint_returns_nonzero_after_seed(t *testing.T) {
 	requireContains(`webhook_claim_duration_seconds_bucket`)
 	requireContains(`webhook_claim_batch_size_bucket`)
 	requireContains(`webhook_claim_empty_total 2`)
-	requireContains(`webhook_pending_deliveries 7`)
+	requireContains(`webhook_pending_deliveries{customer_class="small"} 7`)
+	requireContains(`webhook_pending_oldest_age_seconds 12`)
 	requireContains(`webhook_active_customers 4`)
 	requireContains(`webhook_ingest_fanout_per_event_bucket`)
 	requireContains(`webhook_breaker_state{state="open",webhook_id="webhook_1"} 1`)
@@ -213,5 +267,42 @@ func TestCustomerClassFromValue(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("CustomerClassFromValue(%d) = %q, want %q", tt.class, got, tt.want)
 		}
+	}
+}
+
+func TestSamplePendingDeliveries_aggregates_customer_classes(t *testing.T) {
+	ResetMetricsForTest()
+	reg := prometheus.NewRegistry()
+	RegisterMetrics(reg)
+
+	db, err := sql.Open("backlog-fake", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := samplePendingDeliveries(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		customerClass string
+		want          float64
+	}{
+		{customerClassSmall, 5},
+		{customerClassWhale, 7},
+		{customerClassPaused, 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.customerClass, func(t *testing.T) {
+			got := testutil.ToFloat64(WebhookPendingDeliveries.WithLabelValues(tt.customerClass))
+			if got != tt.want {
+				t.Fatalf("pending deliveries: got %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	if got := testutil.ToFloat64(WebhookPendingOldestAgeSeconds); got != 11 {
+		t.Fatalf("oldest pending age: got %v, want 11", got)
 	}
 }
