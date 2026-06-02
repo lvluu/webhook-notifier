@@ -55,6 +55,7 @@ func main() {
 	logger.Info("registering customers", "count", *customerCount, "receiver", *receiverURL)
 	var registeredIDs []string
 	const batchSize = 200
+	const maxRetries = 3
 	for start := 0; start < len(customerIDs); start += batchSize {
 		end := min(start+batchSize, len(customerIDs))
 		batch := make([]map[string]interface{}, 0, end-start)
@@ -66,21 +67,33 @@ func main() {
 			})
 		}
 		body, _ := json.Marshal(batch)
-		resp, err := client.Post(*notifierURL+"/api/customers/batch", "application/json", bytes.NewReader(body))
-		if err != nil {
-			logger.Error("batch register failed", "error", err, "batch_start", start)
-			continue
+
+		var ok bool
+		for retry := range maxRetries {
+			if retry > 0 {
+				time.Sleep(500 * time.Millisecond)
+			}
+			resp, err := client.Post(*notifierURL+"/api/customers/batch", "application/json", bytes.NewReader(body))
+			if err != nil {
+				logger.Warn("batch register attempt failed", "error", err, "batch_start", start, "retry", retry)
+				continue
+			}
+			var result struct {
+				Registered int `json:"registered"`
+			}
+			_ = json.NewDecoder(resp.Body).Decode(&result)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusCreated {
+				registeredIDs = append(registeredIDs, customerIDs[start:end]...)
+				ok = true
+			}
+			break
 		}
-		var result struct {
-			Registered int `json:"registered"`
+		if !ok {
+			logger.Error("batch register failed after retries", "batch_start", start)
 		}
-		_ = json.NewDecoder(resp.Body).Decode(&result)
-		_ = resp.Body.Close()
-		if resp.StatusCode == http.StatusCreated {
-			registeredIDs = append(registeredIDs, customerIDs[start:end]...)
-		}
-		if result.Registered > 0 && result.Registered != len(batch) {
-			logger.Warn("partial batch registration", "registered", result.Registered, "batch", len(batch))
+		if (start/batchSize+1)%25 == 0 {
+			logger.Info("registration progress", "done", start+len(batch), "total", len(customerIDs))
 		}
 	}
 	if len(registeredIDs) == 0 {
@@ -88,7 +101,7 @@ func main() {
 		registeredIDs = customerIDs
 	}
 	customerIDs = registeredIDs
-	logger.Info("customers registered", "ok", len(customerIDs), "total", *customerCount)
+	logger.Info("registration complete — all customers seeded", "ok", len(customerIDs), "total", *customerCount)
 
 	logger.Info("customers registered, starting event emission",
 		"rate", rate, "burst", burst, "duration", duration, "class", *customerClass,

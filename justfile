@@ -69,7 +69,7 @@ tidy:
 
 # build production-like stack images
 stack-build:
-    {{compose_cmd}} build
+    {{compose_cmd}} {{all_profiles}} build
 
 # start low-resource dev stack with N notifier replicas behind Caddy
 stack-up n="1":
