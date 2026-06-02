@@ -126,14 +126,14 @@ func main() {
 							Data:       data,
 						})
 
-				resp, err := client.Post(*notifierURL+"/api/events", "application/json", bytes.NewReader(body))
-					if err != nil {
-						return
-					}
-					_ = resp.Body.Close()
-					if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-						sent.Add(1)
-					}
+						resp, err := client.Post(*notifierURL+"/api/events", "application/json", bytes.NewReader(body))
+						if err != nil {
+							return
+						}
+						_ = resp.Body.Close()
+						if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+							sent.Add(1)
+						}
 					}()
 				}
 				batchWg.Wait()
