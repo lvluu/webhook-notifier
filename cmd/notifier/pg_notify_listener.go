@@ -29,6 +29,8 @@ func (n schedulerNotifier) Notify(customerID string) {
 		return
 	}
 
+	// scheduler.Scheduler.Notify does not accept a context; this best-effort
+	// wakeup uses a short timeout so it cannot block the ingest path for long.
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	if _, err := n.db.ExecContext(ctx, `SELECT pg_notify($1, $2)`, n.notifyChan, customerID); err != nil && n.logger != nil {
@@ -49,7 +51,11 @@ func runCustomerWakeListener(ctx context.Context, logger *slog.Logger, dsn strin
 			logger.Warn("postgres listener event", "event", event, "error", err)
 		}
 	})
-	defer listener.Close()
+	defer func() {
+		if err := listener.Close(); err != nil && logger != nil {
+			logger.Warn("postgres listener close failed", "error", err)
+		}
+	}()
 
 	if err := listener.Listen(notifyChan); err != nil {
 		return err

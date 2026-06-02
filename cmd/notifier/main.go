@@ -104,6 +104,8 @@ func main() {
 	runtimeCfg.Discovery.Interval = *discoveryInterval
 	observe.StartPendingDeliveriesSampler(runCtx, dbConn, runtimeCfg.BacklogSampleInterval, logger.With("component", "pending-backlog"))
 
+	// Ingest only needs a notifier handle; this object also broadcasts
+	// pg_notify wakeups so other notifier replicas can wake immediately.
 	deliveryRuntime, runtimeErrCh, err := startDeliveryRuntime(runCtx, logger, dbConn, dsn, runtimeCfg)
 	if err != nil {
 		logger.Error("failed to start delivery runtime", "error", err)

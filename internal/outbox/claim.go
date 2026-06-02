@@ -225,7 +225,7 @@ func (s *Store) claimNextNLegacy(ctx context.Context, customerID string, limit i
 func (s *Store) claimNextNWithoutBreaker(ctx context.Context, customerID string, limit int) ([]Delivery, error) {
 	claimStarted := time.Now()
 
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+	rows, err := s.db.QueryContext(ctx, `
 		WITH ready_candidate AS (
 			SELECT d.id, d.attempt_count
 			FROM deliveries d
@@ -283,7 +283,7 @@ func (s *Store) claimNextNWithoutBreaker(ctx context.Context, customerID string,
 		JOIN webhooks w ON w.id = d.webhook_id
 		LEFT JOIN customers cust ON cust.id = d.customer_id
 		ORDER BY d.next_attempt_at, d.created_at, d.id
-		`), customerID, s.claimLease.Milliseconds(), limit)
+		`, customerID, s.claimLease.Milliseconds(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim without breaker: %w", err)
 	}
@@ -483,7 +483,48 @@ func (s *Store) discoverClaimableCustomersLegacy(ctx context.Context, afterCusto
 
 // HasClaimableWork reports whether the customer has any deliveries that are
 // currently eligible for claim, matching ClaimNextN and discovery semantics.
+// The split and legacy query modes share this semantic check on purpose even
+// though their claim/discovery SQL shapes differ.
 func (s *Store) HasClaimableWork(ctx context.Context, customerID string) (bool, error) {
+	if s.claimMode == ClaimQueryModeLegacy {
+		return s.hasClaimableWorkLegacy(ctx, customerID)
+	}
+	return s.hasClaimableWorkSplit(ctx, customerID)
+}
+
+func (s *Store) hasClaimableWorkSplit(ctx context.Context, customerID string) (bool, error) {
+	var exists bool
+	breakerEligible := sqlBreakerEligiblePredicate("w", "d")
+	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT EXISTS (
+			SELECT 1
+			FROM deliveries d
+			WHERE d.customer_id = $1
+			  AND (
+			      (
+			          d.status IN ('pending', 'failed_retry')
+			          AND d.next_attempt_at <= now()
+			          AND NOT EXISTS (SELECT 1 FROM delivery_claims dc WHERE dc.delivery_id = d.id)
+			      )
+			      OR EXISTS (
+			          SELECT 1
+			          FROM delivery_claims dc
+			          WHERE dc.delivery_id = d.id
+			            AND dc.claimed_at < now() - ($2 * interval '1 millisecond')
+			      )
+			  )
+			  AND EXISTS (
+			      SELECT 1
+			      FROM webhooks w
+			      WHERE w.id = d.webhook_id
+			        AND %s
+			  )
+		)
+	`, breakerEligible), customerID, s.claimLease.Milliseconds()).Scan(&exists)
+	return exists, err
+}
+
+func (s *Store) hasClaimableWorkLegacy(ctx context.Context, customerID string) (bool, error) {
 	var exists bool
 	claimable := sqlClaimablePredicate("d", "dc")
 	breakerEligible := sqlBreakerEligiblePredicate("w", "d")

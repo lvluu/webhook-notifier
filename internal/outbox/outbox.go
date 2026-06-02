@@ -53,6 +53,7 @@ const (
 	// ClaimQueryModeSplit uses branch-specific scans for ready vs stale claims.
 	ClaimQueryModeSplit ClaimQueryMode = "split"
 	// ClaimQueryModeLegacy uses the combined claimable predicate.
+	// Kept for benchmark comparison and rollback, not as the preferred runtime path.
 	ClaimQueryModeLegacy ClaimQueryMode = "legacy"
 )
 
