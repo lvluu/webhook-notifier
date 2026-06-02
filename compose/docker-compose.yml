@@ -161,7 +161,7 @@ services:
       - -customers
       - "50"
       - -class
-      - "1"
+      - "3"
       - -rate
       - "250"
       - -burst
