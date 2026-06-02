@@ -53,21 +53,28 @@ func main() {
 	}
 
 	logger.Info("registering customers", "count", *customerCount, "receiver", *receiverURL)
-	for _, cid := range customerIDs {
-		body, _ := json.Marshal(map[string]interface{}{
-			"id":    cid,
-			"class": *customerClass,
-			"url":   *receiverURL + "/hooks/" + cid,
-		})
-		resp, err := client.Post(*notifierURL+"/api/customers", "application/json", bytes.NewReader(body))
+	var regOK int
+	const batchSize = 200
+	for start := 0; start < len(customerIDs); start += batchSize {
+		end := min(start+batchSize, len(customerIDs))
+		batch := make([]map[string]interface{}, 0, end-start)
+		for _, cid := range customerIDs[start:end] {
+			batch = append(batch, map[string]interface{}{
+				"id":    cid,
+				"class": *customerClass,
+				"url":   *receiverURL + "/hooks/" + cid,
+			})
+		}
+		body, _ := json.Marshal(batch)
+		resp, err := client.Post(*notifierURL+"/api/customers/batch", "application/json", bytes.NewReader(body))
 		if err != nil {
-			logger.Error("register customer failed", "customer", cid, "error", err)
+			logger.Error("batch register failed", "error", err, "batch_start", start)
 			continue
 		}
-		if err := resp.Body.Close(); err != nil {
-			logger.Warn("close register response body", "customer", cid, "error", err)
-		}
+		_ = resp.Body.Close()
+		regOK += len(batch)
 	}
+	logger.Info("customers registered", "ok", regOK, "total", *customerCount)
 
 	logger.Info("customers registered, starting event emission",
 		"rate", rate, "burst", burst, "duration", duration, "class", *customerClass,
@@ -119,15 +126,14 @@ func main() {
 							Data:       data,
 						})
 
-						resp, err := client.Post(*notifierURL+"/api/events", "application/json", bytes.NewReader(body))
-						if err != nil {
-							sent.Add(1)
-							return
-						}
-						if err := resp.Body.Close(); err != nil {
-							logger.Warn("close event response body", "customer", cid, "error", err)
-						}
+				resp, err := client.Post(*notifierURL+"/api/events", "application/json", bytes.NewReader(body))
+					if err != nil {
+						return
+					}
+					_ = resp.Body.Close()
+					if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 						sent.Add(1)
+					}
 					}()
 				}
 				batchWg.Wait()

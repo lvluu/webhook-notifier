@@ -3,8 +3,10 @@ x-chaos-common: &chaos-common
     context: .
     dockerfile: Dockerfile
   depends_on:
-    - notifier
-    - webhook-receiver
+    notifier:
+      condition: service_healthy
+    webhook-receiver:
+      condition: service_started
   profiles:
     - chaos
 
@@ -97,6 +99,11 @@ services:
       - split
       - -max-conns
       - "20"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/metrics"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
     depends_on:
       pgbouncer:
         condition: service_started
@@ -124,6 +131,11 @@ services:
       - 5ms
       - -latency-max
       - 15ms
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/metrics"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
     ports:
       - "8081:8080"
       - "9092:9091"
