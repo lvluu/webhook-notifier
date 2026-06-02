@@ -18,7 +18,7 @@ type recordingPgNotifyExecutor struct {
 }
 
 func (e *recordingPgNotifyExecutor) ExecContext(ctx context.Context, _ string, args ...any) (sql.Result, error) {
-	customerID, _ := args[1].(string)
+	customerID, _ := args[len(args)-1].(string)
 	e.mu.Lock()
 	e.calls = append(e.calls, customerID)
 	e.mu.Unlock()
@@ -61,10 +61,7 @@ func TestPgNotifyBroadcaster_CoalescesPendingCustomer(t *testing.T) {
 	waitForStartedCustomer(t, executor.started, "cus_1")
 	close(release)
 
-	time.Sleep(10 * time.Millisecond)
-	if got := executor.callCount(); got != 1 {
-		t.Fatalf("pg_notify calls: got %d, want 1", got)
-	}
+	waitForCallCount(t, executor, 1)
 }
 
 func TestPgNotifyBroadcaster_CoalescesCustomerDuringCooldown(t *testing.T) {
@@ -88,10 +85,7 @@ func TestPgNotifyBroadcaster_CoalescesCustomerDuringCooldown(t *testing.T) {
 
 	now = now.Add(pgNotifyBroadcastCooldown - time.Nanosecond)
 	broadcaster.Notify("cus_1")
-	time.Sleep(10 * time.Millisecond)
-	if got := executor.callCount(); got != 1 {
-		t.Fatalf("pg_notify calls during cooldown: got %d, want 1", got)
-	}
+	waitForCallCount(t, executor, 1)
 
 	now = now.Add(2 * time.Nanosecond)
 	broadcaster.Notify("cus_1")

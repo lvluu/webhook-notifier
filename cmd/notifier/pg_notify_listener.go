@@ -91,7 +91,6 @@ func (b *pgNotifyBroadcaster) Notify(customerID string) {
 
 	select {
 	case b.queue <- customerID:
-		b.lastQueuedByCustomer[customerID] = now
 		b.pending[customerID] = struct{}{}
 	default:
 		observe.IncPgNotifyBroadcast("dropped")
@@ -113,6 +112,15 @@ func (b *pgNotifyBroadcaster) broadcast(parent context.Context, customerID strin
 	defer func() {
 		b.mu.Lock()
 		delete(b.pending, customerID)
+		b.lastQueuedByCustomer[customerID] = b.now()
+		if len(b.lastQueuedByCustomer) > 1024 {
+			deadline := b.now().Add(-10 * b.cooldown)
+			for id, last := range b.lastQueuedByCustomer {
+				if last.Before(deadline) {
+					delete(b.lastQueuedByCustomer, id)
+				}
+			}
+		}
 		b.mu.Unlock()
 	}()
 
