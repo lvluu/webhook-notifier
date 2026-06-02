@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -44,7 +44,7 @@ func newPostgresDB(t *testing.T, ctx context.Context) *sql.DB {
 		t.Fatalf("connection string: %v", err)
 	}
 
-	db, err := sql.Open("postgres", connString)
+	db, err := sql.Open("pgx", connString)
 	if err != nil {
 		t.Fatalf("open postgres: %v", err)
 	}
@@ -93,7 +93,7 @@ func insertWebhook(t *testing.T, ctx context.Context, db *sql.DB, customerID str
 		INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active)
 		VALUES ($1, 'https://partner.example/webhook', 'test-secret', $2, $3)
 		RETURNING id
-	`, customerID, pq.Array(eventTypes), active).Scan(&id)
+	`, customerID, eventTypes, active).Scan(&id)
 	if err != nil {
 		t.Fatalf("insert webhook: %v", err)
 	}
@@ -112,7 +112,7 @@ func insertWebhookWithURL(t *testing.T, ctx context.Context, db *sql.DB, custome
 		INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active)
 		VALUES ($1, $2, 'test-secret', $3, $4)
 		RETURNING id
-	`, customerID, url, pq.Array(eventTypes), active).Scan(&id)
+	`, customerID, url, eventTypes, active).Scan(&id)
 	if err != nil {
 		t.Fatalf("insert webhook: %v", err)
 	}

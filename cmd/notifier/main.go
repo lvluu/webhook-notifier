@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,7 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/lvluu/webhook-notifier/internal/ingest"
@@ -63,11 +63,13 @@ func main() {
 		// #nosec G101 -- local Docker Compose default only; production supplies DATABASE_URL.
 		dsn = "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable"
 	}
-	dbConn, err := sql.Open("postgres", dsn)
+	connConfig, err := pgx.ParseConfig(dsn)
 	if err != nil {
-		logger.Error("failed to open database", "error", err)
+		logger.Error("failed to parse database config", "error", err)
 		os.Exit(1)
 	}
+	connConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	dbConn := stdlib.OpenDB(*connConfig)
 	if *maxConns > 0 {
 		dbConn.SetMaxOpenConns(*maxConns)
 		dbConn.SetMaxIdleConns(*maxConns)

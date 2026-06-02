@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
-
-	"github.com/lib/pq"
 )
 
 type batchBase struct {
@@ -96,7 +94,7 @@ func (s *Store) MarkSucceededBatch(ctx context.Context, items []BatchMarkItem) e
 			RETURNING delivery_id
 		)
 		SELECT COUNT(*) FROM inserted
-	`, pq.Array(base.ids), pq.Array(base.statusCodes), pq.Array(base.durationsMs)).Scan(&marked)
+	`, base.ids, base.statusCodes, base.durationsMs).Scan(&marked)
 	if err != nil {
 		return fmt.Errorf("batch mark succeeded: %w", err)
 	}
@@ -188,7 +186,7 @@ func (s *Store) MarkRetryBatch(ctx context.Context, items []BatchMarkItem) error
 			RETURNING delivery_id
 		)
 		SELECT COUNT(*) FROM inserted
-	`, pq.Array(retryBatch.ids), pq.Array(retryBatch.statusCodes), pq.Array(retryBatch.durationsMs), pq.Array(retryBatch.errorClasses), pq.Array(retryBatch.delaysMs)).Scan(&marked)
+	`, retryBatch.ids, retryBatch.statusCodes, retryBatch.durationsMs, retryBatch.errorClasses, retryBatch.delaysMs).Scan(&marked)
 	if err != nil {
 		return fmt.Errorf("batch mark retry: %w", err)
 	}
@@ -293,7 +291,7 @@ func (s *Store) MarkDeadBatch(ctx context.Context, items []BatchMarkItem) error 
 		SELECT
 			(SELECT COUNT(*) FROM attempts_inserted),
 			(SELECT COUNT(*) FROM dead_letters_inserted)
-	`, pq.Array(deadBatch.ids), pq.Array(deadBatch.statusCodes), pq.Array(deadBatch.durationsMs), pq.Array(deadBatch.errorClasses), pq.Array(deadBatch.reasons)).Scan(&attemptsMarked, &deadLettersMarked)
+	`, deadBatch.ids, deadBatch.statusCodes, deadBatch.durationsMs, deadBatch.errorClasses, deadBatch.reasons).Scan(&attemptsMarked, &deadLettersMarked)
 	if err != nil {
 		return fmt.Errorf("batch mark dead: %w", err)
 	}

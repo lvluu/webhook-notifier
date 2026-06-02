@@ -7,9 +7,11 @@ import (
 	"time"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgtype"
 	"golang.org/x/sync/singleflight"
 )
+
+var defaultPGMap = pgtype.NewMap()
 
 // Webhook is a destination URL and its configuration for a Customer.
 type Webhook struct {
@@ -120,7 +122,7 @@ func (r *Registry) queryDB(ctx context.Context, customerID string, eventType str
 	var hooks []Webhook
 	for rows.Next() {
 		var h Webhook
-		if err := rows.Scan(&h.ID, &h.CustomerID, &h.URL, &h.SecretEncrypted, pq.Array(&h.EventTypes), &h.Active); err != nil {
+		if err := rows.Scan(&h.ID, &h.CustomerID, &h.URL, &h.SecretEncrypted, defaultPGMap.SQLScanner(&h.EventTypes), &h.Active); err != nil {
 			return nil, fmt.Errorf("scan webhook: %w", err)
 		}
 		hooks = append(hooks, h)

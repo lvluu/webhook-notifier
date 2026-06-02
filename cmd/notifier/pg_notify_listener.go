@@ -3,12 +3,13 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
 	"github.com/lvluu/webhook-notifier/internal/observe"
 )
 
@@ -142,42 +143,48 @@ func runCustomerWakeListener(ctx context.Context, logger *slog.Logger, dsn strin
 		return nil
 	}
 
-	reconnectMin := 2 * time.Second
-	reconnectMax := 30 * time.Second
-	listener := pq.NewListener(dsn, reconnectMin, reconnectMax, func(event pq.ListenerEventType, err error) {
-		if err != nil && logger != nil {
-			logger.Warn("postgres listener event", "event", event, "error", err)
-		}
-	})
-	defer func() {
-		if err := listener.Close(); err != nil && logger != nil {
-			logger.Warn("postgres listener close failed", "error", err)
-		}
-	}()
-
-	if err := listener.Listen(notifyChan); err != nil {
-		return err
-	}
-
-	pingTicker := time.NewTicker(30 * time.Second)
-	defer pingTicker.Stop()
+	const reconnectDelay = time.Second
 
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case n := <-listener.Notify:
-			if n == nil {
-				continue
+		if err := listenOnce(ctx, logger, dsn, notifyChan, sched); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
-			customerID := strings.TrimSpace(n.Extra)
-			if customerID != "" {
-				sched.Notify(customerID)
+			if logger != nil {
+				logger.Warn("listener disconnected, reconnecting", "error", err)
 			}
-		case <-pingTicker.C:
-			if err := listener.Ping(); err != nil && logger != nil {
-				logger.Warn("postgres listener ping failed", "error", err)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(reconnectDelay):
 			}
+		}
+	}
+}
+
+func listenOnce(ctx context.Context, logger *slog.Logger, dsn string, notifyChan string, sched roundrobinScheduler) error {
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer conn.Close(ctx)
+
+	if _, err := conn.Exec(ctx, "LISTEN "+pgx.Identifier{notifyChan}.Sanitize()); err != nil {
+		return fmt.Errorf("listen %s: %w", notifyChan, err)
+	}
+
+	if logger != nil {
+		logger.Info("listening for postgres notifications", "channel", notifyChan)
+	}
+
+	for {
+		notification, err := conn.WaitForNotification(ctx)
+		if err != nil {
+			return fmt.Errorf("wait for notification: %w", err)
+		}
+		customerID := strings.TrimSpace(notification.Payload)
+		if customerID != "" {
+			sched.Notify(customerID)
 		}
 	}
 }

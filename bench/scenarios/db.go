@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/lvluu/webhook-notifier/internal/pgdsn"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -87,7 +87,7 @@ func openBenchDatabaseAtDSN(ctx context.Context, dsn string, migrate bool) (*sql
 	// invocations. Runtime service connections do not use this setting.
 	dsn = pgdsn.WithSessionSetting(dsn, "jit", "off")
 
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open postgres: %w", err)
 	}

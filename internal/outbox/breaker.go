@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"time"
-
-	"github.com/lib/pq"
 )
 
 func (s *Store) withInFlightDelivery(ctx context.Context, deliveryID string, mutate func(*sql.Tx, int, string) error) error {
@@ -138,7 +136,7 @@ func batchDeliveryWebhookIDs(ctx context.Context, tx *sql.Tx, deliveryIDs []stri
 		SELECT id::text, webhook_id::text
 		FROM deliveries
 		WHERE id = ANY($1)
-	`, pq.Array(deliveryIDs))
+	`, deliveryIDs)
 	if err != nil {
 		return nil, fmt.Errorf("load delivery webhook ids: %w", err)
 	}

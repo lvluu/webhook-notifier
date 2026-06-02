@@ -104,7 +104,7 @@ func startDeliveryRuntimeWithDeps(
 	}
 	if cfg.EnablePgNotifyWakeups && pgNotifyDSN != "" {
 		var err error
-		broadcastDB, err = sql.Open("postgres", pgNotifyDSN)
+		broadcastDB, err = sql.Open("pgx", pgNotifyDSN)
 		if err != nil {
 			cancel()
 			return nil, nil, fmt.Errorf("open pg_notify database: %w", err)

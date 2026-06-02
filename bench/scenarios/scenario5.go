@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
@@ -460,7 +459,7 @@ func countPendingDeliveriesForCustomers(ctx context.Context, db *sql.DB, custome
 		FROM deliveries
 		WHERE customer_id = ANY($1)
 		  AND status NOT IN ('succeeded', 'dead')
-	`, pq.Array(customerIDs)).Scan(&n); err != nil {
+	`, customerIDs).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count pending deliveries: %w", err)
 	}
 	return n, nil

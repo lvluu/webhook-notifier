@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/registry"
@@ -349,7 +349,7 @@ func newPostgresDB(t *testing.T, ctx context.Context) *sql.DB {
 		t.Fatalf("connection string: %v", err)
 	}
 
-	db, err := sql.Open("postgres", connString)
+	db, err := sql.Open("pgx", connString)
 	if err != nil {
 		t.Fatalf("open postgres: %v", err)
 	}
@@ -396,7 +396,7 @@ func insertWebhook(t *testing.T, ctx context.Context, db *sql.DB, customerID, ur
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active)
 		VALUES ($1, $2, 'test-secret', $3, $4)
-	`, customerID, url, pq.Array(eventTypes), active)
+	`, customerID, url, eventTypes, active)
 	if err != nil {
 		t.Fatalf("insert webhook: %v", err)
 	}
