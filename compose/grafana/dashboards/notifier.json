@@ -1,7 +1,7 @@
 {
   "title": "Webhook Notifier",
   "uid": "notifier",
-  "version": 4,
+  "version": 7,
   "schemaVersion": 39,
   "timezone": "browser",
   "refresh": "5s",
@@ -11,10 +11,27 @@
   },
   "panels": [
     {
+      "title": "Overview",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
       "title": "Terminal Success Rate",
       "description": "Succeeded terminal outcomes as percentage of total terminal outcomes over the selected window. Higher is better; lower values indicate reliability regression.",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
       "targets": [
         {
           "expr": "100 * clamp_max(sum(increase(webhook_deliveries_total{status=\"succeeded\"}[$__rate_interval])) / clamp_min(sum(increase(webhook_deliveries_total{status=~\"succeeded|dead\"}[$__rate_interval])), 1), 1)",
@@ -30,267 +47,538 @@
       }
     },
     {
-      "title": "Latency SLO <= 3s (By Category)",
-      "description": "Percent of deliveries completed within 3 seconds, split by class. Higher is better; this is the explicit latency SLO attainment view.",
+      "title": "Throughput By Customer Class",
+      "description": "Terminal delivery throughput split by customer class. Compare classes during mixed load to confirm small Customers continue making progress.",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
       "targets": [
         {
-          "expr": "100 * (sum by (customer_class) (rate(webhook_delivery_latency_seconds_bucket{le=\"3.0\"}[$__rate_interval])) / clamp_min(sum by (customer_class) (rate(webhook_delivery_latency_seconds_count[$__rate_interval])), 1e-9)) or on(customer_class) vector(0)",
+          "expr": "sum by (customer_class) (rate(webhook_deliveries_total[$__rate_interval]))",
           "legendFormat": "{{customer_class}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "percent",
-          "max": 100,
-          "min": 0
+          "unit": "ops"
         }
       }
     },
     {
-      "title": "Delivery Rate By Terminal Status",
-      "description": "Completed group by terminal status (succeeded/dead). Shows Prometheus rate() averaged over the rate interval (~60s), not true deliveries per second. Use for trend direction, not peak benchmarking. A sustained drop signals workers cannot drain the queue fast enough.",
+      "title": "Queue Wait P95 By Customer Class",
+      "description": "P95 time from enqueue to first Attempt. This is the direct scheduling fairness signal; lower is better.",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
       "targets": [
         {
-          "expr": "sum by (status) (rate(webhook_deliveries_total[$__rate_interval]))",
-          "legendFormat": "{{status}}"
-        }
-      ],
-      "fieldConfig": {"defaults": {"unit": "ops"}}
-    },
-    {
-      "title": "DLQ Rate (bad above 0)",
-      "description": "Rate of deliveries entering DLQ by reason. Lower is better; any sustained non-zero rate indicates reliability issues requiring investigation.",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
-      "targets": [
-        {
-          "expr": "sum by (reason) (rate(webhook_dlq_total[1m])) or vector(0)",
-          "legendFormat": "{{reason}}"
+          "expr": "histogram_quantile(0.95, sum by (customer_class, le) (rate(webhook_queue_wait_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{customer_class}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "ops",
-          "custom": {"thresholdsStyle": {"mode": "line"}},
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green", "value": null},
-              {"color": "red", "value": 0.01}
-            ]
-          }
+          "unit": "s"
         }
       }
-    },
-    {
-      "title": "Retry Pressure (Extra Attempts)",
-      "description": "Average extra attempts per terminal delivery. Lower is better; values above zero indicate increasing retry load.",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 16},
-      "targets": [
-        {
-          "expr": "clamp_min((sum(rate(webhook_attempts_per_delivery_sum[$__rate_interval])) / clamp_min(sum(rate(webhook_attempts_per_delivery_count[$__rate_interval])), 1e-9)) - 1, 0)",
-          "legendFormat": "extra attempts"
-        }
-      ],
-      "fieldConfig": {"defaults": {"unit": "short"}}
-    },
-    {
-      "title": "Receiver Requests",
-      "description": "Inbound requests observed by the webhook receiver. Higher is only better when delivery rate keeps up; compare both to spot downstream bottlenecks or dropped throughput.",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 16},
-      "targets": [
-        {
-          "expr": "rate(webhook_requests_received_total[1m])",
-          "legendFormat": "received"
-        }
-      ],
-      "fieldConfig": {"defaults": {"unit": "rps"}}
-    },
-    {
-      "title": "Delivery Latency P95 By Customer Class (warn 2s, bad 5s)",
-      "description": "P95 end-to-end delivery lifetime by customer class. Lower is better; use this to verify small customers are not starved during whale traffic.",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.95, sum by (customer_class, le) (rate(webhook_delivery_latency_seconds_bucket[1m])))",
-          "legendFormat": "{{customer_class}} p95"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {"thresholdsStyle": {"mode": "line"}},
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green", "value": null},
-              {"color": "orange", "value": 2},
-              {"color": "red", "value": 5}
-            ]
-          }
-        }
-      }
-    },
-    {
-      "title": "Host Limiter Wait P95 (warn 100ms, bad 500ms)",
-      "description": "P95 wait time to acquire per-host concurrency slots. Lower is better; high values indicate downstream host throttling or insufficient host capacity.",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.95, sum by (host, le) (rate(webhook_host_semaphore_wait_seconds_bucket[1m])))",
-          "legendFormat": "{{host}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {"thresholdsStyle": {"mode": "line"}},
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green", "value": null},
-              {"color": "orange", "value": 0.1},
-              {"color": "red", "value": 0.5}
-            ]
-          }
-        }
-      }
-    },
-    {
-      "title": "Claim Duration",
-      "description": "Latency of DB claim transactions (p50/p95/p99). Lower is better; spikes usually indicate database or lock contention under load.",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(webhook_claim_duration_seconds_bucket[1m])))",
-          "legendFormat": "p50"
-        },
-        {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(webhook_claim_duration_seconds_bucket[1m])))",
-          "legendFormat": "p95"
-        },
-        {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(webhook_claim_duration_seconds_bucket[1m])))",
-          "legendFormat": "p99"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {"thresholdsStyle": {"mode": "line"}},
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green", "value": null},
-              {"color": "orange", "value": 0.05},
-              {"color": "red", "value": 0.2}
-            ]
-          }
-        }
-      }
-    },
-    {
-      "title": "Database Pool",
-      "description": "Notifier database connection pool usage. Lower in-use pressure is better; high open or in-use counts near max indicate database connection pressure.",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
-      "targets": [
-        {
-          "expr": "sum(webhook_pg_pool_open)",
-          "legendFormat": "open"
-        },
-        {
-          "expr": "sum(webhook_pg_pool_in_use)",
-          "legendFormat": "in use"
-        },
-        {
-          "expr": "sum(webhook_pg_pool_idle)",
-          "legendFormat": "idle"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {"thresholdsStyle": {"mode": "line"}},
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green", "value": null},
-              {"color": "orange", "value": 75},
-              {"color": "red", "value": 90}
-            ]
-          }
-        }
-      }
-    },
-    {
-      "title": "Claim Batch Size",
-      "description": "Average number of deliveries claimed per DB round trip. Higher is generally better up to the configured ceiling; very low values reduce throughput efficiency at high traffic.",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40},
-      "targets": [
-        {
-          "expr": "sum(rate(webhook_claim_batch_size_sum[1m])) / sum(rate(webhook_claim_batch_size_count[1m]))",
-          "legendFormat": "avg"
-        }
-      ],
-      "fieldConfig": {"defaults": {"unit": "short"}}
     },
     {
       "title": "Pending Deliveries",
       "description": "Current number of pending or retryable deliveries in the outbox. This is the live backlog depth, sampled from the database over time.",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
       "targets": [
         {
-          "expr": "webhook_pending_deliveries",
-          "legendFormat": "pending deliveries"
+          "expr": "max by (customer_class) (webhook_pending_deliveries)",
+          "legendFormat": "{{customer_class}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "custom": {"thresholdsStyle": {"mode": "line"}},
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green", "value": null},
-              {"color": "orange", "value": 100},
-              {"color": "red", "value": 1000}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
             ]
           }
         }
       }
     },
     {
-      "title": "Notifier Instances And Workers",
-      "description": "Live notifier instance count plus configured worker goroutines (total and per instance). Use this to confirm horizontal scaling versus in-process concurrency; higher only helps if the service stays healthy.",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 48},
-      "targets": [
+      "title": "Reliability",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "panels": [
         {
-          "expr": "count(up{job=\"notifier\"})",
-          "legendFormat": "notifier instances"
+          "title": "DLQ Rate (bad above 0)",
+          "description": "Rate of deliveries entering DLQ by reason. Lower is better; any sustained non-zero rate indicates reliability issues requiring investigation.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 18
+          },
+          "targets": [
+            {
+              "expr": "sum by (reason) (rate(webhook_dlq_total[1m])) or vector(0)",
+              "legendFormat": "{{reason}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "thresholdsStyle": {
+                  "mode": "line"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.01
+                  }
+                ]
+              }
+            }
+          }
         },
         {
-          "expr": "sum(webhook_workers_configured)",
-          "legendFormat": "configured workers total"
+          "title": "Attempt Outcome Breakdown",
+          "description": "HTTP Attempt rate split by classified outcome. Use this to identify downstream failures driving retries and circuit breaker pressure.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 18
+          },
+          "targets": [
+            {
+              "expr": "sum by (outcome) (rate(webhook_attempt_total[$__rate_interval]))",
+              "legendFormat": "{{outcome}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops"
+            }
+          }
         },
         {
-          "expr": "webhook_workers_configured",
-          "legendFormat": "workers {{instance}}"
+          "title": "Oldest Pending Delivery",
+          "description": "Age of the oldest pending or retryable delivery. Rising age indicates delayed work or starvation even when queue depth is stable.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 18
+          },
+          "targets": [
+            {
+              "expr": "max(webhook_pending_oldest_age_seconds)",
+              "legendFormat": "oldest pending"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s"
+            }
+          }
         }
-      ],
-      "fieldConfig": {"defaults": {"unit": "short"}}
+      ]
+    },
+    {
+      "title": "Fairness",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "panels": [
+        {
+          "title": "Delivery Latency P95 By Customer Class (warn 2s, bad 5s)",
+          "description": "P95 end-to-end delivery lifetime by customer class. Lower is better; use this to verify small customers are not starved during whale traffic.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 19
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum by (customer_class, le) (rate(webhook_delivery_latency_seconds_bucket[1m])))",
+              "legendFormat": "{{customer_class}} p95"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "thresholdsStyle": {
+                  "mode": "line"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 2
+                  },
+                  {
+                    "color": "red",
+                    "value": 5
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "title": "POST Duration P95 By Customer Class",
+          "description": "P95 downstream HTTP POST duration split by customer class. Separates Integration Partner latency from queue and retry overhead.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 19
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum by (customer_class, le) (rate(webhook_post_duration_seconds_bucket[$__rate_interval])))",
+              "legendFormat": "{{customer_class}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "Scalability",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "panels": [
+        {
+          "title": "Deliveries In Flight",
+          "description": "Current number of Deliveries being processed. Compare against configured workers to identify worker saturation.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 20
+          },
+          "targets": [
+            {
+              "expr": "max(webhook_deliveries_in_flight)",
+              "legendFormat": "in flight"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short"
+            }
+          }
+        },
+        {
+          "title": "Notifier Instances And Workers",
+          "description": "Live notifier instance count plus configured worker goroutines (total and per instance). Use this to confirm horizontal scaling versus in-process concurrency; higher only helps if the service stays healthy.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 20
+          },
+          "targets": [
+            {
+              "expr": "count(up{job=\"notifier\"})",
+              "legendFormat": "notifier instances"
+            },
+            {
+              "expr": "sum(webhook_workers_configured)",
+              "legendFormat": "configured workers total"
+            },
+            {
+              "expr": "webhook_workers_configured",
+              "legendFormat": "workers {{instance}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short"
+            }
+          }
+        },
+        {
+          "title": "Claim Duration",
+          "description": "Latency of DB claim transactions (p50/p95/p99). Lower is better; spikes usually indicate database or lock contention under load.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 20
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.5, sum by (le) (rate(webhook_claim_duration_seconds_bucket[1m])))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(webhook_claim_duration_seconds_bucket[1m])))",
+              "legendFormat": "p95"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(webhook_claim_duration_seconds_bucket[1m])))",
+              "legendFormat": "p99"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "thresholdsStyle": {
+                  "mode": "line"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 0.05
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.2
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "title": "Claim Batch Size",
+          "description": "Average number of deliveries claimed per DB round trip. Higher is generally better up to the configured ceiling; very low values reduce throughput efficiency at high traffic.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 28
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(webhook_claim_batch_size_sum[1m])) / sum(rate(webhook_claim_batch_size_count[1m]))",
+              "legendFormat": "avg"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short"
+            }
+          }
+        },
+        {
+          "title": "Database Pool",
+          "description": "Notifier database connection pool usage. Lower in-use pressure is better; high open or in-use counts near max indicate database connection pressure.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 16,
+            "x": 8,
+            "y": 28
+          },
+          "targets": [
+            {
+              "expr": "sum(webhook_pg_pool_open)",
+              "legendFormat": "open"
+            },
+            {
+              "expr": "sum(webhook_pg_pool_in_use)",
+              "legendFormat": "in use"
+            },
+            {
+              "expr": "sum(webhook_pg_pool_idle)",
+              "legendFormat": "idle"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "thresholdsStyle": {
+                  "mode": "line"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 75
+                  },
+                  {
+                    "color": "red",
+                    "value": 90
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "Partner Protection",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "panels": [
+        {
+          "title": "Receiver Requests",
+          "description": "Inbound requests observed by the webhook receiver. Higher is only better when delivery rate keeps up; compare both to spot downstream bottlenecks or dropped throughput.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 21
+          },
+          "targets": [
+            {
+              "expr": "rate(webhook_requests_received_total[1m])",
+              "legendFormat": "received"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "rps"
+            }
+          }
+        },
+        {
+          "title": "Host Limiter Wait P95 (warn 100ms, bad 500ms)",
+          "description": "P95 wait time to acquire per-host concurrency slots. Lower is better; high values indicate downstream host throttling or insufficient host capacity.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 21
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum by (host, le) (rate(webhook_host_semaphore_wait_seconds_bucket[1m])))",
+              "legendFormat": "{{host}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "thresholdsStyle": {
+                  "mode": "line"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 0.1
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.5
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
     }
   ]
 }

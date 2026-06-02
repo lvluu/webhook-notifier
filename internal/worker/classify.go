@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/lvluu/webhook-notifier/internal/observe"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/retry"
 )
@@ -28,6 +29,10 @@ type deliveryOutcome struct {
 // touching the database. Separated from Process so the Run loop can batch
 // multiple outcomes into a single round trip per outcome kind.
 func (w *Worker) classifyDelivery(ctx context.Context, d outbox.Delivery) deliveryOutcome {
+	observe.IncDeliveriesInFlight()
+	defer observe.DecDeliveriesInFlight()
+
+	customerClass := observe.CustomerClassFromValue(d.CustomerClass)
 	if w.HostLimiter != nil {
 		u, parseErr := url.Parse(d.URL)
 		if parseErr != nil {
@@ -62,6 +67,9 @@ func (w *Worker) classifyDelivery(ctx context.Context, d outbox.Delivery) delive
 	}
 
 	started := time.Now()
+	if d.AttemptNumber == 1 {
+		observe.ObserveQueueWait(customerClass, started.Sub(d.CreatedAt).Seconds())
+	}
 	resp, err := w.Send(ctx, Delivery{
 		EventID:       d.EventID,
 		DeliveryID:    d.ID,
@@ -73,6 +81,7 @@ func (w *Worker) classifyDelivery(ctx context.Context, d outbox.Delivery) delive
 		AttemptNumber: d.AttemptNumber,
 	})
 	duration := time.Since(started)
+	observe.ObservePostDuration(customerClass, duration.Seconds())
 	lifetime = time.Since(d.CreatedAt)
 
 	if resp != nil {
@@ -88,6 +97,7 @@ func (w *Worker) classifyDelivery(ctx context.Context, d outbox.Delivery) delive
 	}
 
 	delay, terminal, reason := w.RetryPolicy.NextWithKey(d.AttemptNumber, d.PreviousDelay, resp, err, d.ID, lifetime)
+	observe.IncAttempt(reason)
 
 	if reason == retry.ReasonSucceeded {
 		return deliveryOutcome{

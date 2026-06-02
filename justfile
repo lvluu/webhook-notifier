@@ -5,6 +5,7 @@ database_url := env_var_or_default("DATABASE_URL", "postgres://notifier:notifier
 migrate      := "go run -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.17.1"
 stack_services := "postgres pgbouncer notifier caddy webhook-receiver"
 observe_services := "prometheus grafana"
+all_profiles := "--profile observe --profile chaos --profile retention"
 compose_cmd := "docker compose -f compose/docker-compose.yml --project-directory ."
 
 # list available recipes
@@ -81,6 +82,10 @@ stack-up-host n="3":
 # start observability stack on top of the low-resource dev stack
 stack-observe:
     {{compose_cmd}} --profile observe up -d {{observe_services}}
+
+# start the full local demo stack, including observability, chaos, and retention
+stack-all n="1":
+    {{compose_cmd}} {{all_profiles}} up -d --scale notifier={{n}}
 
 # start opt-in chaos load aligned to the smaller affordable mix:
 # 50 whales @ 250/s + 5k small @ 50/s (~300 events/s total)
