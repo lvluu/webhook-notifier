@@ -62,7 +62,7 @@ func main() {
 			batch = append(batch, map[string]interface{}{
 				"id":    cid,
 				"class": *customerClass,
-				"url":   *receiverURL + "/hooks/" + cid,
+				"url":   *receiverURL,
 			})
 		}
 		body, _ := json.Marshal(batch)

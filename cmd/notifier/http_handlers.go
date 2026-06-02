@@ -195,7 +195,7 @@ func upsertCustomer(ctx context.Context, db *sql.DB, id string, class uint32, ur
 	return tx.Commit()
 }
 
-func upsertCustomerTx(ctx context.Context, tx *sql.Tx, id string, class uint32, url string) error {
+func upsertCustomerTx(ctx context.Context, tx *sql.Tx, id string, class uint32, baseURL string) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO customers (id, class)
 		VALUES ($1, $2)
@@ -205,12 +205,18 @@ func upsertCustomerTx(ctx context.Context, tx *sql.Tx, id string, class uint32, 
 		return err
 	}
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active)
-		VALUES ($1, $2, '', ARRAY['subscriber.created', 'order.created', 'payment.received'], true)
-		ON CONFLICT (customer_id, url) DO UPDATE
-		SET active = true,
-		    event_types = EXCLUDED.event_types
-	`, id, url)
-	return err
+	paths := []string{"/hooks/fast", "/hooks/slow", "/hooks/flaky"}
+	for _, path := range paths {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active)
+			VALUES ($1, $2, '', ARRAY['subscriber.created', 'order.created', 'payment.received'], true)
+			ON CONFLICT (customer_id, url) DO UPDATE
+			SET active = true,
+			    event_types = EXCLUDED.event_types
+		`, id, baseURL+path)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
