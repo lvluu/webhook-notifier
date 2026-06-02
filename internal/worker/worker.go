@@ -45,6 +45,7 @@ type DeliveryStore interface {
 	ClaimNextN(ctx context.Context, customerID string, limit int) ([]outbox.Delivery, error)
 	ClaimNextBatch(ctx context.Context, customerIDs []string, limit int) ([]outbox.Delivery, error)
 	HasClaimableWork(ctx context.Context, customerID string) (bool, error)
+	HasClaimableWorkBatch(ctx context.Context, customerIDs []string) (map[string]bool, error)
 	MarkSucceeded(ctx context.Context, deliveryID string, statusCode int, duration time.Duration) error
 	MarkRetry(ctx context.Context, deliveryID string, statusCode int, errorClass string, delay time.Duration, duration time.Duration) error
 	MarkDead(ctx context.Context, deliveryID string, statusCode int, errorClass string, reason string, duration time.Duration) error

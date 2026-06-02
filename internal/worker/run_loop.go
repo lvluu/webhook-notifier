@@ -125,8 +125,42 @@ func (w *Worker) claimMulti(ctx context.Context, store DeliveryStore) ([]outbox.
 		return nil, fmt.Errorf("claim batch: %w", err)
 	}
 
+	// Track which customers actually produced deliveries.
+	claimedSet := make(map[string]struct{}, len(deliveries))
+	for _, d := range deliveries {
+		claimedSet[d.CustomerID] = struct{}{}
+	}
+
+	// Find customers that had zero deliveries claimed.
+	var empties []string
 	for _, cid := range customerIDs {
-		w.Scheduler.Notify(cid)
+		if _, ok := claimedSet[cid]; ok {
+			w.Scheduler.Notify(cid)
+		} else {
+			empties = append(empties, cid)
+		}
+	}
+
+	if len(empties) > 0 {
+		hasWork, checkErr := store.HasClaimableWorkBatch(ctx, empties)
+		if checkErr != nil {
+			w.Logger.Warn(
+				"claimability batch check failed; keeping customers in rotation",
+				"empty_count", len(empties),
+				"error", checkErr,
+			)
+			for _, cid := range empties {
+				w.Scheduler.Notify(cid)
+			}
+		} else {
+			for _, cid := range empties {
+				if hasWork[cid] {
+					w.Scheduler.Notify(cid)
+				} else {
+					w.Scheduler.Remove(cid)
+				}
+			}
+		}
 	}
 
 	return deliveries, nil

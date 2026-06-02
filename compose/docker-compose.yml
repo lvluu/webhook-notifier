@@ -78,6 +78,8 @@ services:
       - "8"
       - -min-batch
       - "4"
+      - -multi-pick
+      - "8"
       - -concurrency
       - "4"
       - -discovery-interval

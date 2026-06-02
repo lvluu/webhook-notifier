@@ -588,6 +588,52 @@ func (s *Store) HasClaimableWork(ctx context.Context, customerID string) (bool, 
 	return s.hasClaimableWorkSplit(ctx, customerID)
 }
 
+// HasClaimableWorkBatch is a multi-customer variant of HasClaimableWork that
+// issues a single query. The returned map contains only customers that have
+// at least one claimable Delivery; absent keys should be removed from
+// rotation.
+func (s *Store) HasClaimableWorkBatch(ctx context.Context, customerIDs []string) (map[string]bool, error) {
+	if len(customerIDs) == 0 {
+		return nil, nil
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		WITH claimable AS (
+			SELECT DISTINCT d.customer_id
+			FROM deliveries d
+			LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
+			WHERE d.customer_id = ANY($1)
+			  AND d.status IN ('pending', 'failed_retry')
+			  AND d.next_attempt_at <= now()
+			  AND dc.delivery_id IS NULL
+			UNION
+			SELECT DISTINCT d.customer_id
+			FROM delivery_claims dc
+			JOIN deliveries d ON d.id = dc.delivery_id
+			WHERE d.customer_id = ANY($1)
+			  AND dc.claimed_at < now() - ($2 * interval '1 millisecond')
+		)
+		SELECT customer_id FROM claimable
+	`, customerIDs, s.claimLease.Milliseconds())
+	if err != nil {
+		return nil, fmt.Errorf("has claimable work batch: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make(map[string]bool, len(customerIDs))
+	for rows.Next() {
+		var cid string
+		if err := rows.Scan(&cid); err != nil {
+			return nil, fmt.Errorf("scan claimable work batch: %w", err)
+		}
+		result[cid] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate claimable work batch: %w", err)
+	}
+	return result, nil
+}
+
 func (s *Store) hasClaimableWorkSplit(ctx context.Context, customerID string) (bool, error) {
 	var exists bool
 	breakerEligible := sqlBreakerEligiblePredicate("w", "d")

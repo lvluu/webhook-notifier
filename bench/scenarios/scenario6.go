@@ -309,6 +309,10 @@ func (s *scenario6InstrumentedStore) ClaimNextBatch(ctx context.Context, custome
 	return deliveries, nil
 }
 
+func (s *scenario6InstrumentedStore) HasClaimableWorkBatch(ctx context.Context, customerIDs []string) (map[string]bool, error) {
+	return s.Store.HasClaimableWorkBatch(ctx, customerIDs)
+}
+
 func (s *scenario6InstrumentedStore) ClaimStats() scenario6ClaimStats {
 	calls := s.claimCalls.Load()
 	avgBatch := 0.0

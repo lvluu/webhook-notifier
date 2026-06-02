@@ -157,6 +157,10 @@ func (r *recordingDeliveryStore) ClaimNextBatch(context.Context, []string, int) 
 	return nil, nil
 }
 
+func (r *recordingDeliveryStore) HasClaimableWorkBatch(context.Context, []string) (map[string]bool, error) {
+	return nil, nil
+}
+
 func (r *recordingDeliveryStore) HasClaimableWork(context.Context, string) (bool, error) {
 	return false, nil
 }
@@ -207,6 +211,10 @@ func (s *removeOnEmptyClaimStore) ClaimNextN(context.Context, string, int) ([]ou
 }
 
 func (s *removeOnEmptyClaimStore) ClaimNextBatch(context.Context, []string, int) ([]outbox.Delivery, error) {
+	return nil, nil
+}
+
+func (s *removeOnEmptyClaimStore) HasClaimableWorkBatch(context.Context, []string) (map[string]bool, error) {
 	return nil, nil
 }
 
