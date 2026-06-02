@@ -10,7 +10,8 @@ import (
 	"os"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 )
@@ -90,10 +91,12 @@ func openArchiveDB(databaseURL string) (*sql.DB, error) {
 	if databaseURL == "" {
 		databaseURL = envDefault("DATABASE_URL", "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable")
 	}
-	db, err := sql.Open("postgres", databaseURL)
+	connConfig, err := pgx.ParseConfig(databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("sql open: %w", err)
+		return nil, fmt.Errorf("parse database config: %w", err)
 	}
+	connConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	db := stdlib.OpenDB(*connConfig)
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(30 * time.Minute)

@@ -30,6 +30,7 @@ var (
 	WebhookIngestFanoutPerEvent         prometheus.Histogram
 	WebhookBreakerState                 *prometheus.GaugeVec
 	WebhookBreakerTripsTotal            *prometheus.CounterVec
+	WebhookPgNotifyBroadcastTotal       *prometheus.CounterVec
 	metricsRegistrationWarned           atomic.Bool
 )
 
@@ -57,6 +58,7 @@ func ResetMetricsForTest() {
 	WebhookIngestFanoutPerEvent = nil
 	WebhookBreakerState = nil
 	WebhookBreakerTripsTotal = nil
+	WebhookPgNotifyBroadcastTotal = nil
 	metricsRegistrationWarned.Store(false)
 }
 
@@ -189,6 +191,11 @@ func initMetrics(reg prometheus.Registerer) {
 		Help: "Total number of webhook circuit breaker trips, by reason.",
 	}, []string{"reason"})
 
+	WebhookPgNotifyBroadcastTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "webhook_pg_notify_broadcast_total",
+		Help: "Total number of remote Customer wake hints handled by the pg_notify broadcaster.",
+	}, []string{"result"})
+
 	reg.MustRegister(
 		WebhookDeliveriesTotal,
 		WebhookDeliveryLatencySeconds,
@@ -210,5 +217,6 @@ func initMetrics(reg prometheus.Registerer) {
 		WebhookIngestFanoutPerEvent,
 		WebhookBreakerState,
 		WebhookBreakerTripsTotal,
+		WebhookPgNotifyBroadcastTotal,
 	)
 }

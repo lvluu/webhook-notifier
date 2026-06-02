@@ -14,6 +14,7 @@ type workerRuntimeConfig struct {
 	EmptyClaimBackoff     time.Duration
 	BacklogSampleInterval time.Duration
 	EnablePgNotifyWakeups bool
+	PgNotifyDSN           string
 	PgNotifyChannel       string
 	ClaimQueryMode        string
 	Discovery             worker.DiscoveryConfig

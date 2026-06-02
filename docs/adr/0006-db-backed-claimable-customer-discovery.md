@@ -265,5 +265,9 @@ concurrent index creation if the table is already large.
 - If benchmark results show discovery overhead or fairness drift is unacceptable,
   revisit either a materialized claimable Customer table or the ID-block claim
   alternative as a separate ADR.
-- `LISTEN/NOTIFY` may later reduce discovery latency, but must not replace
-  periodic DB discovery.
+- `LISTEN/NOTIFY` is layered on top of periodic DB discovery as an advisory
+  fast path. Successful ingest wakes its local Scheduler synchronously and
+  enqueues a bounded remote wake hint. Hints are coalesced per Customer for
+  100ms and sent through a dedicated direct Postgres connection so they do not
+  contend with PgBouncer sessions used by queue traffic. Dropped or failed hints
+  are safe because periodic DB discovery remains the recovery path.

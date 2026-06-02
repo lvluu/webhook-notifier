@@ -64,7 +64,7 @@ just stack-up
 This starts:
 
 - Postgres 17 with migrations applied during first container initialization.
-- PgBouncer in transaction-pooling mode between notifier replicas and Postgres.
+- PgBouncer in session-pooling mode between notifier replicas and Postgres.
 - One scaled `notifier` replica by default.
 - Caddy on `localhost:8080` as the host-facing ingress for `POST /api/customers` and `POST /api/events`.
 - A webhook receiver fixture on `localhost:8081`, with receiver metrics on `localhost:9092`.
@@ -93,7 +93,7 @@ just stack-smoke
 This adds:
 
 - Postgres 17 with migrations applied during first container initialization.
-- PgBouncer in transaction-pooling mode between notifier replicas and Postgres.
+- PgBouncer in session-pooling mode between notifier replicas and Postgres.
 - Three scaled `notifier` replicas when you opt in.
 - Caddy on `localhost:8080` as the host-facing ingress for `POST /api/customers` and `POST /api/events`.
 - A webhook receiver fixture on `localhost:8081`, with receiver metrics on `localhost:9092`.
@@ -108,7 +108,7 @@ just stack-chaos 3         # opt-in aggressive subscriber.created whale/small lo
 just stack-down            # remove containers and volumes
 ```
 
-Prometheus discovers scaled notifier replicas through Docker DNS and scrapes each replica's `:9090` metrics endpoint directly when you start the optional observability profile. Caddy only fronts the business ingest API; it is not another notifier process and does not change worker scale. The opt-in chaos load emits `subscriber.created` Events from Whale Customers (`weight=3`) and Small Customers (`weight=1`) so fairness and queue-depth metrics map directly to the assignment scenario.
+Prometheus discovers scaled notifier replicas through Docker DNS and scrapes each replica's `:9090` metrics endpoint directly when you start the optional observability profile. Caddy only fronts the business ingest API; it is not another notifier process and does not change worker scale. Notifier replicas keep transactional traffic behind PgBouncer, while advisory `LISTEN/NOTIFY` connections use direct Postgres connections so wake hints do not compete for pooled sessions. The opt-in chaos load emits `subscriber.created` Events from Whale Customers (`weight=3`) and Small Customers (`weight=1`) so fairness and queue-depth metrics map directly to the assignment scenario.
 
 ## Configuration
 

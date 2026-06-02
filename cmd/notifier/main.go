@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,7 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/lvluu/webhook-notifier/internal/ingest"
@@ -32,6 +32,7 @@ func main() {
 	emptyClaimBackoff := flag.Duration("empty-claim-backoff", 20*time.Millisecond, "pause after an empty claim cycle")
 	backlogSampleInterval := flag.Duration("pending-sample-interval", 5*time.Second, "sample interval for pending-delivery backlog gauge (0 disables)")
 	enablePgNotifyWakeups := flag.Bool("enable-pg-notify-wakeups", true, "use LISTEN/NOTIFY wakeups in addition to polling")
+	pgNotifyDSN := flag.String("pg-notify-db", "", "optional direct DATABASE_URL for LISTEN/NOTIFY connections")
 	pgNotifyChannel := flag.String("pg-notify-channel", "webhook_customer_ready", "LISTEN/NOTIFY channel for customer wakeups")
 	claimQueryMode := flag.String("claim-query-mode", "split", "claim query mode: split or legacy")
 	maxConns := flag.Int("max-conns", 0, "max DB connections (0 = workerCount + 10)")
@@ -62,11 +63,13 @@ func main() {
 		// #nosec G101 -- local Docker Compose default only; production supplies DATABASE_URL.
 		dsn = "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable"
 	}
-	dbConn, err := sql.Open("postgres", dsn)
+	connConfig, err := pgx.ParseConfig(dsn)
 	if err != nil {
-		logger.Error("failed to open database", "error", err)
+		logger.Error("failed to parse database config", "error", err)
 		os.Exit(1)
 	}
+	connConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	dbConn := stdlib.OpenDB(*connConfig)
 	if *maxConns > 0 {
 		dbConn.SetMaxOpenConns(*maxConns)
 		dbConn.SetMaxIdleConns(*maxConns)
@@ -99,6 +102,7 @@ func main() {
 	runtimeCfg.EmptyClaimBackoff = *emptyClaimBackoff
 	runtimeCfg.BacklogSampleInterval = *backlogSampleInterval
 	runtimeCfg.EnablePgNotifyWakeups = *enablePgNotifyWakeups
+	runtimeCfg.PgNotifyDSN = *pgNotifyDSN
 	runtimeCfg.PgNotifyChannel = *pgNotifyChannel
 	runtimeCfg.ClaimQueryMode = *claimQueryMode
 	runtimeCfg.Discovery.Interval = *discoveryInterval

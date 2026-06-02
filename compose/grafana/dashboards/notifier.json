@@ -498,6 +498,28 @@
               }
             }
           }
+        },
+        {
+          "title": "Remote Wake Hints",
+          "description": "Advisory cross-replica Scheduler wake hints by broadcaster outcome. Sent and coalesced are expected; failed or dropped hints indicate degraded reactivity, with periodic DB discovery remaining the recovery path.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 36
+          },
+          "targets": [
+            {
+              "expr": "sum by (result) (rate(webhook_pg_notify_broadcast_total[1m]))",
+              "legendFormat": "{{result}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops"
+            }
+          }
         }
       ]
     },
