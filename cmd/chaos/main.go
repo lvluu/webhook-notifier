@@ -53,7 +53,7 @@ func main() {
 	}
 
 	logger.Info("registering customers", "count", *customerCount, "receiver", *receiverURL)
-	var regOK int
+	var registeredIDs []string
 	const batchSize = 200
 	for start := 0; start < len(customerIDs); start += batchSize {
 		end := min(start+batchSize, len(customerIDs))
@@ -71,10 +71,24 @@ func main() {
 			logger.Error("batch register failed", "error", err, "batch_start", start)
 			continue
 		}
+		var result struct {
+			Registered int `json:"registered"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&result)
 		_ = resp.Body.Close()
-		regOK += len(batch)
+		if resp.StatusCode == http.StatusCreated {
+			registeredIDs = append(registeredIDs, customerIDs[start:end]...)
+		}
+		if result.Registered > 0 && result.Registered != len(batch) {
+			logger.Warn("partial batch registration", "registered", result.Registered, "batch", len(batch))
+		}
 	}
-	logger.Info("customers registered", "ok", regOK, "total", *customerCount)
+	if len(registeredIDs) == 0 {
+		logger.Error("no customers registered, using all IDs")
+		registeredIDs = customerIDs
+	}
+	customerIDs = registeredIDs
+	logger.Info("customers registered", "ok", len(customerIDs), "total", *customerCount)
 
 	logger.Info("customers registered, starting event emission",
 		"rate", rate, "burst", burst, "duration", duration, "class", *customerClass,
