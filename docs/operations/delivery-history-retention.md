@@ -48,8 +48,8 @@ WITH terminal_candidates AS (
     FROM deliveries d
     LEFT JOIN dead_letters dl ON dl.delivery_id = d.id
     WHERE d.status IN ('succeeded', 'dead')
-      AND COALESCE(dl.final_at, d.updated_at) < now() - interval '24 hours'
-    ORDER BY COALESCE(dl.final_at, d.updated_at), d.id
+      AND d.updated_at < now() - interval '24 hours'
+    ORDER BY d.updated_at, d.id
     LIMIT 500
     FOR UPDATE OF d SKIP LOCKED
 )

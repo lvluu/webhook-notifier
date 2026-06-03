@@ -1022,6 +1022,69 @@ func TestArchiveTerminalDeliveriesMovesOldTerminalRowsToHistory(t *testing.T) {
 	assertDeliveryHistory(t, ctx, db, oldDeadID, "dead", sql.NullString{String: retry.ReasonTerminal4xx, Valid: true}, 1)
 }
 
+func TestArchiveTerminalDeliveriesOrdersByUpdatedAt(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	store := outbox.New(db)
+
+	var oldIDs []string
+	for i := 0; i < 3; i++ {
+		customerID := fmt.Sprintf("cus_ord_old_%d", i)
+		deliveryID := submitOneDelivery(t, ctx, db, customerID)
+		claimed, ok, err := store.ClaimNext(ctx, customerID)
+		if err != nil {
+			t.Fatalf("ClaimNext old %d: %v", i, err)
+		}
+		if !ok {
+			t.Fatalf("ClaimNext old %d: no delivery", i)
+		}
+		if i < 2 {
+			if err := store.MarkSucceeded(ctx, claimed.ID, http.StatusOK, 10*time.Millisecond); err != nil {
+				t.Fatalf("MarkSucceeded old %d: %v", i, err)
+			}
+		} else {
+			if err := store.MarkDead(ctx, claimed.ID, http.StatusNotFound, retry.ReasonTerminal4xx, retry.ReasonTerminal4xx, 10*time.Millisecond); err != nil {
+				t.Fatalf("MarkDead old %d: %v", i, err)
+			}
+		}
+		oldIDs = append(oldIDs, deliveryID)
+		retention.AgeTerminalDelivery(t, ctx, db, deliveryID, 48*time.Hour)
+	}
+
+	var recentIDs []string
+	for i := 0; i < 2; i++ {
+		customerID := fmt.Sprintf("cus_ord_recent_%d", i)
+		deliveryID := submitOneDelivery(t, ctx, db, customerID)
+		claimed, ok, err := store.ClaimNext(ctx, customerID)
+		if err != nil {
+			t.Fatalf("ClaimNext recent %d: %v", i, err)
+		}
+		if !ok {
+			t.Fatalf("ClaimNext recent %d: no delivery", i)
+		}
+		if err := store.MarkSucceeded(ctx, claimed.ID, http.StatusOK, 10*time.Millisecond); err != nil {
+			t.Fatalf("MarkSucceeded recent %d: %v", i, err)
+		}
+		recentIDs = append(recentIDs, deliveryID)
+		retention.AgeTerminalDelivery(t, ctx, db, deliveryID, 1*time.Hour)
+	}
+
+	archived, err := store.ArchiveTerminalDeliveries(ctx, 24*time.Hour, 3)
+	if err != nil {
+		t.Fatalf("ArchiveTerminalDeliveries: %v", err)
+	}
+	if archived != 3 {
+		t.Fatalf("archived count: got %d, want 3 (oldest 3 eligible rows)", archived)
+	}
+
+	for _, id := range oldIDs {
+		assertDeliveryMissing(t, ctx, db, id)
+	}
+	for _, id := range recentIDs {
+		assertDeliveryStatus(t, ctx, db, id, string(outbox.StatusSucceeded))
+	}
+}
+
 func TestBatchMarkErrorsWhenDeliveryIsNotInFlight(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)
