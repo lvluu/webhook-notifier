@@ -97,6 +97,18 @@ services:
           memory: 64m
 
   webhook-receiver:
+    command:
+      - webhook-receiver
+      - -addr
+      - :8080
+      - -metrics-addr
+      - :9091
+      - -latency-min
+      - 5ms
+      - -latency-max
+      - 15ms
+      - -failure-rate
+      - "0.02"
     profiles:
       - ""
       - observe
@@ -301,8 +313,8 @@ services:
       - -c
       - |
         while true; do
-          delivery-history-retention \
-            -db postgres://notifier:notifier@pgbouncer:6432/notifier?sslmode=disable \
+        delivery-history-retention \
+          -db postgres://notifier:${PG_PASSWORD:-notifier}@pgbouncer:6432/notifier?sslmode=disable \
             -retention 24h \
             -batch-size 500 \
             -enrichment deferred;
