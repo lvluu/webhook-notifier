@@ -38,8 +38,8 @@ func (s *Store) ArchiveTerminalDeliveriesWithMode(ctx context.Context, retention
 			FROM deliveries d
 			LEFT JOIN dead_letters dl ON dl.delivery_id = d.id
 			WHERE d.status IN ('succeeded', 'dead')
-			  AND COALESCE(dl.final_at, d.updated_at) < now() - ($1 * interval '1 millisecond')
-			ORDER BY COALESCE(dl.final_at, d.updated_at), d.id
+			  AND d.updated_at < now() - ($1 * interval '1 millisecond')
+			ORDER BY d.updated_at, d.id
 			LIMIT $2
 			FOR UPDATE OF d SKIP LOCKED
 		),`
