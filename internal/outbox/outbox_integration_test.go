@@ -217,6 +217,164 @@ func TestClaimNextConcurrentWorkersDoNotDoubleClaim(t *testing.T) {
 	}
 }
 
+func TestClaimNextBatchDeduplicatesInputCustomers(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	deliveryID := submitOneDelivery(t, ctx, db, "cus_duplicate_batch")
+	store := outbox.New(db)
+
+	deliveries, err := store.ClaimNextBatch(ctx, []string{
+		"cus_duplicate_batch",
+		"cus_duplicate_batch",
+		"cus_duplicate_batch",
+	}, 4)
+	if err != nil {
+		t.Fatalf("ClaimNextBatch: %v", err)
+	}
+	if len(deliveries) != 1 {
+		t.Fatalf("claimed deliveries: got %d, want 1", len(deliveries))
+	}
+	if deliveries[0].ID != deliveryID {
+		t.Fatalf("claimed delivery ID: got %s, want %s", deliveries[0].ID, deliveryID)
+	}
+
+	var claimCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM delivery_claims WHERE delivery_id = $1`, deliveryID).Scan(&claimCount); err != nil {
+		t.Fatalf("count delivery claims: %v", err)
+	}
+	if claimCount != 1 {
+		t.Fatalf("delivery claim count: got %d, want 1", claimCount)
+	}
+}
+
+// TestClaimNextBatchPerCustomerLimitPreventsWhaleMonopoly proves that a single
+// high-volume Customer cannot fill an entire multi-customer claim batch and
+// starve a co-claimed sparse Customer. The whale's Deliveries are submitted
+// first, so they sort older than the small Customer's single Delivery on the
+// (next_attempt_at, created_at, id) claim ordering. Without a per-Customer cap
+// on the candidate pool, the whale's oldest rows would consume the whole batch
+// limit at the final ORDER BY ... LIMIT cut and the small Customer would claim
+// nothing. With the per-Customer cap the whale contributes at most its fair
+// share, leaving room for the small Customer in the same batch.
+func TestClaimNextBatchPerCustomerLimitPreventsWhaleMonopoly(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	const whaleDeliveries = 8
+	const batchLimit = 4
+
+	whaleFirst := submitOneDelivery(t, ctx, db, "cus_whale")
+	for range whaleDeliveries - 1 {
+		if _, err := appendDeliveryForExistingWebhook(t, ctx, db, whaleFirst); err != nil {
+			t.Fatalf("append whale delivery: %v", err)
+		}
+	}
+
+	smallID := submitOneDelivery(t, ctx, db, "cus_small")
+
+	store := outbox.New(db)
+	deliveries, err := store.ClaimNextBatch(ctx, []string{"cus_whale", "cus_small"}, batchLimit)
+	if err != nil {
+		t.Fatalf("ClaimNextBatch: %v", err)
+	}
+
+	whaleClaimed := 0
+	smallClaimed := false
+	for _, d := range deliveries {
+		switch d.CustomerID {
+		case "cus_whale":
+			whaleClaimed++
+		case "cus_small":
+			smallClaimed = true
+			if d.ID != smallID {
+				t.Fatalf("small delivery ID: got %s, want %s", d.ID, smallID)
+			}
+		default:
+			t.Fatalf("unexpected customer in batch: %s", d.CustomerID)
+		}
+	}
+
+	if !smallClaimed {
+		t.Fatalf("small Customer was starved: claimed %d deliveries, all from whale; want the small Customer's delivery included", len(deliveries))
+	}
+
+	// Fair share with 2 input customers and a batch limit of 4 is 2 per customer.
+	if maxWhalePerBatch := batchLimit / 2; whaleClaimed > maxWhalePerBatch {
+		t.Fatalf("whale claimed %d in one batch; per-customer cap should hold it to %d", whaleClaimed, maxWhalePerBatch)
+	}
+}
+
+// TestClaimNextBatchAndRequeueConcurrentNoDeadlock stresses the claim and
+// requeue paths together to guard against lock-order inversion. Claiming locks
+// deliveries (FOR UPDATE SKIP LOCKED) before inserting delivery_claims; requeue
+// goes through withInFlightDelivery, which must acquire the same
+// deliveries-then-claims order. With the breaker enabled the claim path also
+// touches webhooks. If any of these acquire row locks in a conflicting order,
+// Postgres aborts a transaction with SQLSTATE 40P01 (deadlock detected). The
+// test fails on any deadlock error.
+func TestClaimNextBatchAndRequeueConcurrentNoDeadlock(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	const customerCount = 4
+	const deliveriesPerCustomer = 6
+
+	customerIDs := make([]string, 0, customerCount)
+	for c := range customerCount {
+		customerID := fmt.Sprintf("cus_deadlock_%d", c)
+		customerIDs = append(customerIDs, customerID)
+		first := submitOneDelivery(t, ctx, db, customerID)
+		for range deliveriesPerCustomer - 1 {
+			if _, err := appendDeliveryForExistingWebhook(t, ctx, db, first); err != nil {
+				t.Fatalf("append delivery for %s: %v", customerID, err)
+			}
+		}
+	}
+
+	store := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
+		FailureThreshold: 3,
+		InitialCooldown:  time.Second,
+		MaxCooldown:      time.Second,
+	}), outbox.WithClaimLease(50*time.Millisecond))
+
+	deadline := time.Now().Add(2 * time.Second)
+	var deadlocks atomic.Int64
+	var wg sync.WaitGroup
+
+	assertNoDeadlock := func(label string, err error) {
+		if err == nil {
+			return
+		}
+		if strings.Contains(err.Error(), "40P01") || strings.Contains(err.Error(), "deadlock detected") {
+			deadlocks.Add(1)
+			t.Errorf("%s: deadlock: %v", label, err)
+		}
+	}
+
+	// Claimers race to claim the whole set repeatedly.
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for time.Now().Before(deadline) {
+				deliveries, err := store.ClaimNextBatch(ctx, customerIDs, customerCount*deliveriesPerCustomer)
+				assertNoDeadlock("claim", err)
+				// Requeue everything claimed so the rows churn back into the pool.
+				for _, d := range deliveries {
+					assertNoDeadlock("requeue", store.Requeue(ctx, d.ID, 0))
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	if n := deadlocks.Load(); n > 0 {
+		t.Fatalf("observed %d deadlock(s) across concurrent claim/requeue", n)
+	}
+}
+
 func TestClaimNextRecoversStaleInFlightDelivery(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)
