@@ -57,7 +57,7 @@ type benchProfileConfig struct {
 	RetryMaxAttempts           int           `yaml:"retry_max_attempts"`
 	RetryBaseDelay             durationValue `yaml:"retry_base_delay"`
 	RetryCapDelay              durationValue `yaml:"retry_cap_delay"`
-	FairnessRatioLimit      float64       `yaml:"fairness_ratio_limit"`
+	FairnessRatioLimit         float64       `yaml:"fairness_ratio_limit"`
 }
 
 type durationValue time.Duration

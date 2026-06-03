@@ -312,7 +312,7 @@ func runScenario8DensePhase(ctx context.Context, db *sql.DB, profile scenario8Pr
 	distribution := scenario8PerReplicaDistributionVerdict(perReplica, scenario8ReplicaIDs(replicaCount))
 	throughput := float64(expected)
 	if duration > 0 {
-		throughput = throughput / duration.Seconds()
+		throughput /= duration.Seconds()
 	}
 
 	duplicates := countDuplicateAttemptTuples(recordings)
@@ -372,6 +372,7 @@ func startScenario8Replicas(ctx context.Context, db *sql.DB, profile scenario8Pr
 			return nil, err
 		}
 
+		//nolint:gosec // Scenario 8 intentionally launches local notifier OS processes with benchmark-controlled args.
 		cmd := exec.CommandContext(ctx,
 			"go", "run", "./cmd/notifier",
 			"-db", dsn,
@@ -388,6 +389,7 @@ func startScenario8Replicas(ctx context.Context, db *sql.DB, profile scenario8Pr
 			"NOTIFIER_REPLICA_ID="+replicaID,
 			"SCENARIO8_RECEIVER_ADDR="+receiverAddr,
 		)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 		replica := &scenario8Replica{
 			id:          replicaID,
@@ -418,7 +420,12 @@ func stopScenario8Replicas(replicas []*scenario8Replica) {
 		if replica == nil || replica.cmd == nil || replica.cmd.Process == nil {
 			continue
 		}
-		_ = replica.cmd.Process.Signal(syscall.SIGTERM)
+		pgid, err := syscall.Getpgid(replica.cmd.Process.Pid)
+		if err == nil {
+			_ = syscall.Kill(-pgid, syscall.SIGTERM)
+		} else {
+			_ = replica.cmd.Process.Signal(syscall.SIGTERM)
+		}
 		done := make(chan struct{})
 		go func(cmd *exec.Cmd) {
 			_ = cmd.Wait()
@@ -427,7 +434,11 @@ func stopScenario8Replicas(replicas []*scenario8Replica) {
 		select {
 		case <-done:
 		case <-time.After(3 * time.Second):
-			_ = replica.cmd.Process.Kill()
+			if err == nil {
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			} else {
+				_ = replica.cmd.Process.Kill()
+			}
 			<-done
 		}
 	}

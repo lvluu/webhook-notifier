@@ -27,17 +27,19 @@ func main() {
 	var err error
 	switch scenario {
 	case "scenario1":
+		// Legacy: fairness proof folded into Scenario 6 reporting.
 		err = scenarios.RunScenario1(ctx)
 	case "scenario2":
-		// Legacy scenario — folded into partner_resilience.go. Kept wired for reference until retirement.
+		// Legacy: transient/recovering partner proof folded into Partner Resilience Phase A.
 		err = scenarios.RunScenario2(ctx)
 	case "scenario3":
-		// Legacy scenario — folded into partner_resilience.go. Kept wired for reference until retirement.
+		// Legacy: terminal 4xx fast-fail proof folded into Partner Resilience Phase B.
 		err = scenarios.RunScenario3(ctx)
 	case "scenario4":
+		// Legacy: horizontal scale/idempotency proof folded into Scenario 8 dense phase.
 		err = scenarios.RunScenario4(ctx)
 	case "scenario5":
-		// Legacy scenario — folded into partner_resilience.go. Kept wired for reference until retirement.
+		// Legacy: dead-partner breaker proof folded into Partner Resilience Phase C.
 		err = scenarios.RunScenario5(ctx)
 	case "scenario6":
 		err = scenarios.RunScenario6(ctx)

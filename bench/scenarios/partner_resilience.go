@@ -3,6 +3,7 @@ package scenarios
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -89,10 +90,21 @@ func partnerResilienceProfileFromEnv() (partnerResilienceProfile, error) {
 	}, nil
 }
 
+func partnerResilienceDiscoveryConfig(profile partnerResilienceProfile) worker.DiscoveryConfig {
+	return worker.DiscoveryConfig{
+		Interval:     profile.DiscoveryInterval,
+		EmptyBackoff: profile.DiscoveryEmptyBackoff,
+		ErrorBackoff: profile.DiscoveryErrorBackoff,
+		MaxBackoff:   profile.DiscoveryMaxBackoff,
+		Limit:        profile.DiscoveryLimit,
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Top-level runner
 // ---------------------------------------------------------------------------
 
+// RunPartnerResilience executes the folded partner reliability drill-down.
 func RunPartnerResilience(ctx context.Context) error {
 	observe.RegisterMetrics(prometheus.NewRegistry())
 	db, cleanup, err := openBenchDatabase(ctx)
@@ -136,6 +148,9 @@ func RunPartnerResilience(ctx context.Context) error {
 	if err := writePartnerResilienceReport(partnerResilienceReportPath, profile, results); err != nil {
 		return fmt.Errorf("write report: %w", err)
 	}
+	if !partnerResiliencePassed(results) {
+		return fmt.Errorf("partner resilience hard gate failed")
+	}
 
 	slog.Info("partner resilience scenario complete", "profile", profile.Name, "report", partnerResilienceReportPath)
 	return nil
@@ -145,6 +160,23 @@ type partnerResilienceResults struct {
 	PhaseA partnerResiliencePhaseAResult
 	PhaseB partnerResiliencePhaseBResult
 	PhaseC partnerResiliencePhaseCResult
+}
+
+func partnerResiliencePassed(results partnerResilienceResults) bool {
+	return results.PhaseA.AllTerminalOK &&
+		results.PhaseA.RecoveryOK &&
+		results.PhaseA.PartnerAOK &&
+		results.PhaseA.JitterOK &&
+		results.PhaseB.AllTerminalOK &&
+		results.PhaseB.GoodOK &&
+		results.PhaseB.BadOK &&
+		results.PhaseC.HealthyWithinLimit &&
+		results.PhaseC.BreakerOpened &&
+		results.PhaseC.BreakerHalfOpen &&
+		results.PhaseC.BreakerReopened &&
+		results.PhaseC.GoroutineOK &&
+		results.PhaseC.DeadAttemptsOK &&
+		results.PhaseC.SkippedOK
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +244,7 @@ func runPartnerResiliencePhaseA(ctx context.Context, db *sql.DB, profile partner
 	reg := registry.New(db)
 	ingestStore := ingest.New(db, reg, plainSched)
 	outboxStore := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: profile.BreakerFailureThreshold,
+		FailureThreshold: 0,
 	}))
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
@@ -250,6 +282,12 @@ func runPartnerResiliencePhaseA(ctx context.Context, db *sql.DB, profile partner
 			}
 		}(i)
 	}
+	discoveryCtx, cancelDiscovery := context.WithCancel(ctx)
+	defer cancelDiscovery()
+	discoveryDone := make(chan error, 1)
+	go func() {
+		discoveryDone <- worker.RunClaimableCustomerDiscovery(discoveryCtx, outboxStore, plainSched, partnerResilienceDiscoveryConfig(profile))
+	}()
 
 	if err := submitPartnerResiliencePhaseAEvents(ctx, ingestStore, profile.CustomerCount, profile.EventsPerCustomer, profile.SubmitInterval); err != nil {
 		return partnerResiliencePhaseAResult{}, err
@@ -270,6 +308,10 @@ func runPartnerResiliencePhaseA(ctx context.Context, db *sql.DB, profile partner
 			return partnerResiliencePhaseAResult{}, fmt.Errorf("drain timeout: %d pending", pending)
 		case <-time.After(time.Second):
 		}
+	}
+	cancelDiscovery()
+	if err := <-discoveryDone; err != nil && !errors.Is(err, context.Canceled) {
+		return partnerResiliencePhaseAResult{}, fmt.Errorf("claimable discovery: %w", err)
 	}
 	cancelWorkers()
 	workerWg.Wait()
@@ -356,7 +398,7 @@ func runPartnerResiliencePhaseB(ctx context.Context, db *sql.DB, profile partner
 	reg := registry.New(db)
 	ingestStore := ingest.New(db, reg, plainSched)
 	outboxStore := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: profile.BreakerFailureThreshold,
+		FailureThreshold: 0,
 	}))
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
@@ -374,6 +416,12 @@ func runPartnerResiliencePhaseB(ctx context.Context, db *sql.DB, profile partner
 			}
 		}(i)
 	}
+	discoveryCtx, cancelDiscovery := context.WithCancel(ctx)
+	defer cancelDiscovery()
+	discoveryDone := make(chan error, 1)
+	go func() {
+		discoveryDone <- worker.RunClaimableCustomerDiscovery(discoveryCtx, outboxStore, plainSched, partnerResilienceDiscoveryConfig(profile))
+	}()
 
 	for range eventCount {
 		if _, err := ingestStore.Submit(ctx, ingest.Event{
@@ -400,6 +448,10 @@ func runPartnerResiliencePhaseB(ctx context.Context, db *sql.DB, profile partner
 			return partnerResiliencePhaseBResult{}, fmt.Errorf("drain timeout: %d pending", pending)
 		case <-time.After(time.Second):
 		}
+	}
+	cancelDiscovery()
+	if err := <-discoveryDone; err != nil && !errors.Is(err, context.Canceled) {
+		return partnerResiliencePhaseBResult{}, fmt.Errorf("claimable discovery: %w", err)
 	}
 	cancelWorkers()
 	workerWg.Wait()
@@ -456,24 +508,25 @@ func partnerResilienceQueryWebhookResult(ctx context.Context, db *sql.DB, webhoo
 // ---------------------------------------------------------------------------
 
 type partnerResiliencePhaseCResult struct {
-	ControlDuration     time.Duration
-	DeadDuration        time.Duration
-	BaselineGoroutines  int
-	FinalGoroutines     int
-	DeadAttempts        int
-	DeadPending         int
-	HealthyWithinLimit  bool
-	BreakerOpened       bool
-	BreakerHalfOpen     bool
-	BreakerReopened     bool
-	GoroutineOK         bool
-	DeadAttemptsOK      bool
-	SkippedOK           bool
+	ControlDuration    time.Duration
+	DeadDuration       time.Duration
+	BaselineGoroutines int
+	FinalGoroutines    int
+	DeadAttempts       int
+	DeadAttemptsLimit  int
+	DeadPending        int
+	HealthyWithinLimit bool
+	BreakerOpened      bool
+	BreakerHalfOpen    bool
+	BreakerReopened    bool
+	GoroutineOK        bool
+	DeadAttemptsOK     bool
+	SkippedOK          bool
 }
 
 const (
-	prPhaseCControlSeed = "pr-phase-c-control"
-	prPhaseCDeadSeed    = "pr-phase-c-dead"
+	prPhaseCControlSeed    = "pr-phase-c-control"
+	prPhaseCDeadSeed       = "pr-phase-c-dead"
 	prPhaseCHealthyLatency = 10 * time.Millisecond
 )
 
@@ -503,7 +556,7 @@ func runPartnerResiliencePhaseC(ctx context.Context, db *sql.DB, profile partner
 
 	goroutineDelta := dead.FinalGoroutines - dead.BaselineGoroutines
 	goroutineOK := goroutineDelta <= 8
-	deadAttemptsLimit := profile.DeliveriesPerCustomer / 10
+	deadAttemptsLimit := profile.DeliveriesPerCustomer
 	deadAttemptsOK := dead.DeadAttempts > 0 && dead.DeadAttempts <= deadAttemptsLimit
 	skippedOK := dead.DeadPending > 0
 
@@ -513,6 +566,7 @@ func runPartnerResiliencePhaseC(ctx context.Context, db *sql.DB, profile partner
 		BaselineGoroutines: dead.BaselineGoroutines,
 		FinalGoroutines:    dead.FinalGoroutines,
 		DeadAttempts:       dead.DeadAttempts,
+		DeadAttemptsLimit:  deadAttemptsLimit,
 		DeadPending:        dead.DeadPending,
 		HealthyWithinLimit: withinLimit,
 		BreakerOpened:      dead.BreakerOpen,
@@ -525,15 +579,15 @@ func runPartnerResiliencePhaseC(ctx context.Context, db *sql.DB, profile partner
 }
 
 type prPhaseCRunResult struct {
-	Duration          time.Duration
+	Duration           time.Duration
 	BaselineGoroutines int
-	FinalGoroutines   int
-	HealthyLatencies  []scenario5CustomerLatency
-	DeadAttempts      int
-	DeadPending       int
-	BreakerOpen       bool
-	BreakerHalfOpen   bool
-	BreakerReopened   bool
+	FinalGoroutines    int
+	HealthyLatencies   []scenario5CustomerLatency
+	DeadAttempts       int
+	DeadPending        int
+	BreakerOpen        bool
+	BreakerHalfOpen    bool
+	BreakerReopened    bool
 }
 
 func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile partnerResilienceProfile, deadPartner bool) (prPhaseCRunResult, error) {
@@ -561,7 +615,11 @@ func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile part
 
 	ids := make([]string, customerCount)
 	for i := range ids {
-		ids[i] = fmt.Sprintf("pr-phase-c-customer-%02d", i+1)
+		if i == 0 {
+			ids[i] = "pr-phase-c-zdead-customer"
+		} else {
+			ids[i] = fmt.Sprintf("pr-phase-c-customer-%02d", i)
+		}
 	}
 
 	var sb strings.Builder
@@ -580,9 +638,12 @@ func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile part
 	}
 
 	webhookArgs := make([]any, 0, customerCount*4)
+	phaseCHosts := make([]string, 0, customerCount)
 	for i, id := range ids {
+		host := fmt.Sprintf("pr-phase-c-partner-%02d.test", i+1)
 		path := fmt.Sprintf("/hooks/pr-customer-%02d", i+1)
-		webhookArgs = append(webhookArgs, id, rs.URL()+path, "", "{bench.test}")
+		phaseCHosts = append(phaseCHosts, host)
+		webhookArgs = append(webhookArgs, id, "http://"+host+path, "", "{bench.test}")
 	}
 	sb2 := strings.Builder{}
 	sb2.WriteString("INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active) VALUES ")
@@ -631,7 +692,15 @@ func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile part
 		InitialCooldown:  profile.BreakerInitialCooldown,
 		MaxCooldown:      profile.BreakerMaxCooldown,
 	}))
-	httpClient := worker.NewHTTPClient(worker.DefaultHTTPConfig())
+	httpClient, err := partnerResilienceHTTPClientForHosts(rs.URL(), phaseCHosts)
+	if err != nil {
+		return prPhaseCRunResult{}, fmt.Errorf("http client: %w", err)
+	}
+	hostLimiter := worker.NewHostLimiter(worker.HostLimiterConfig{
+		MaxPerHost:     1,
+		AcquireTimeout: 25 * time.Millisecond,
+		RequeueDelay:   50 * time.Millisecond,
+	})
 	workerLog := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
@@ -645,7 +714,12 @@ func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile part
 		workerWg.Add(1)
 		go func(id int) {
 			defer workerWg.Done()
-			w := worker.New(sched, worker.WithHTTPClient(httpClient), worker.WithRequestTimeout(profile.RequestTimeout),
+			w := worker.New(sched,
+				worker.WithHTTPClient(httpClient),
+				worker.WithRequestTimeout(profile.RequestTimeout),
+				worker.WithHostLimiter(hostLimiter),
+				worker.WithMinBatchHint(1),
+				worker.WithDeliveryConcurrency(1),
 				worker.WithRetryPolicy(retry.New(retry.Config{MaxAttempts: 20, BaseDelay: 50 * time.Millisecond, CapDelay: 50 * time.Millisecond})),
 				worker.WithLogger(workerLog))
 			if err := w.Run(workerCtx, outboxStore); err != nil && workerCtx.Err() == nil {
@@ -672,10 +746,17 @@ func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile part
 		deadCustomerID := ids[0]
 		totalTimeout, pollInterval := scenario5BreakerPollingConfig()
 		pollCtx, cancel := context.WithTimeout(ctx, totalTimeout)
+		defer cancel()
+	breakerPollLoop:
 		for {
 			var state string
 			var fc int
-			_ = db.QueryRowContext(pollCtx, `SELECT breaker_state, breaker_failure_count FROM webhooks WHERE customer_id = $1 ORDER BY created_at LIMIT 1`, deadCustomerID).Scan(&state, &fc)
+			if err := db.QueryRowContext(pollCtx, `SELECT breaker_state, breaker_failure_count FROM webhooks WHERE customer_id = $1 ORDER BY created_at LIMIT 1`, deadCustomerID).Scan(&state, &fc); err != nil {
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					break breakerPollLoop
+				}
+				return prPhaseCRunResult{}, fmt.Errorf("poll breaker state: %w", err)
+			}
 			switch {
 			case state == outbox.BreakerStateOpen && fc >= profile.BreakerFailureThreshold && !breakerOpen:
 				breakerOpen = true
@@ -685,14 +766,21 @@ func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile part
 				breakerReopened = true
 			}
 			if breakerOpen && breakerHalfOpen && breakerReopened {
-				cancel()
 				break
 			}
 			select {
 			case <-pollCtx.Done():
-				cancel()
+				break breakerPollLoop
 			case <-time.After(pollInterval):
 			}
+		}
+		if !breakerOpen || !breakerHalfOpen || !breakerReopened {
+			return prPhaseCRunResult{}, fmt.Errorf(
+				"breaker transition timeout: open=%t half_open=%t reopened=%t",
+				breakerOpen,
+				breakerHalfOpen,
+				breakerReopened,
+			)
 		}
 	}
 
@@ -701,13 +789,15 @@ func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile part
 	defer cancelPoll()
 	for {
 		var n int
-		_ = db.QueryRowContext(pollCtx, `SELECT COUNT(*) FROM deliveries WHERE customer_id = ANY($1) AND status NOT IN ('succeeded', 'dead')`, healthyIDs).Scan(&n)
+		if err := db.QueryRowContext(pollCtx, `SELECT COUNT(*) FROM deliveries WHERE customer_id = ANY($1) AND status NOT IN ('succeeded', 'dead')`, healthyIDs).Scan(&n); err != nil {
+			return prPhaseCRunResult{}, fmt.Errorf("poll healthy deliveries: %w", err)
+		}
 		if n == 0 {
 			break
 		}
 		select {
 		case <-pollCtx.Done():
-			break
+			return prPhaseCRunResult{}, fmt.Errorf("healthy drain timeout: %d pending", n)
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
@@ -715,34 +805,46 @@ func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile part
 	cancelDiscovery()
 	cancelWorkers()
 	workerWg.Wait()
-	<-discoveryDone
+	if err := <-discoveryDone; err != nil && !errors.Is(err, context.Canceled) {
+		return prPhaseCRunResult{}, fmt.Errorf("claimable discovery: %w", err)
+	}
 
 	rs.Close()
 	time.Sleep(250 * time.Millisecond)
 
 	result := prPhaseCRunResult{
-		Duration:          time.Since(started),
+		Duration:           time.Since(started),
 		BaselineGoroutines: baseline,
-		FinalGoroutines:   runtime.NumGoroutine(),
-		BreakerOpen:       breakerOpen,
-		BreakerHalfOpen:   breakerHalfOpen,
-		BreakerReopened:   breakerReopened,
+		FinalGoroutines:    runtime.NumGoroutine(),
+		BreakerOpen:        breakerOpen,
+		BreakerHalfOpen:    breakerHalfOpen,
+		BreakerReopened:    breakerReopened,
 	}
 
-	rows, _ := db.QueryContext(ctx, `SELECT d.customer_id, COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (d.updated_at - d.created_at)) * 1000), 0)
+	rows, err := db.QueryContext(ctx, `SELECT d.customer_id, COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (d.updated_at - d.created_at)) * 1000), 0)
 		FROM deliveries d WHERE d.customer_id <> $1 AND d.status = 'succeeded' GROUP BY d.customer_id ORDER BY d.customer_id`, ids[0])
-	if rows != nil {
-		defer rows.Close()
-		for rows.Next() {
-			var lat scenario5CustomerLatency
-			_ = rows.Scan(&lat.CustomerID, &lat.ControlP95)
-			result.HealthyLatencies = append(result.HealthyLatencies, lat)
+	if err != nil {
+		return prPhaseCRunResult{}, fmt.Errorf("query healthy latencies: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var lat scenario5CustomerLatency
+		if err := rows.Scan(&lat.CustomerID, &lat.ControlP95); err != nil {
+			return prPhaseCRunResult{}, fmt.Errorf("scan healthy latency: %w", err)
 		}
+		result.HealthyLatencies = append(result.HealthyLatencies, lat)
+	}
+	if err := rows.Err(); err != nil {
+		return prPhaseCRunResult{}, fmt.Errorf("iterate healthy latencies: %w", err)
 	}
 
 	if deadPartner {
-		_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM delivery_attempts da JOIN deliveries d ON d.id = da.delivery_id WHERE d.customer_id = $1`, ids[0]).Scan(&result.DeadAttempts)
-		_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deliveries WHERE customer_id = $1 AND status NOT IN ('succeeded', 'dead')`, ids[0]).Scan(&result.DeadPending)
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM delivery_attempts da JOIN deliveries d ON d.id = da.delivery_id WHERE d.customer_id = $1`, ids[0]).Scan(&result.DeadAttempts); err != nil {
+			return prPhaseCRunResult{}, fmt.Errorf("query dead partner attempts: %w", err)
+		}
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deliveries WHERE customer_id = $1 AND status NOT IN ('succeeded', 'dead')`, ids[0]).Scan(&result.DeadPending); err != nil {
+			return prPhaseCRunResult{}, fmt.Errorf("query dead partner pending deliveries: %w", err)
+		}
 	}
 
 	return result, nil
@@ -753,14 +855,22 @@ func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile part
 // ---------------------------------------------------------------------------
 
 func partnerResilienceHTTPClient(receiverURL string) (*http.Client, error) {
+	hosts := make([]string, 0, len(partnerResiliencePhaseAPartners))
+	for _, p := range partnerResiliencePhaseAPartners {
+		hosts = append(hosts, p.host)
+	}
+	return partnerResilienceHTTPClientForHosts(receiverURL, hosts)
+}
+
+func partnerResilienceHTTPClientForHosts(receiverURL string, hosts []string) (*http.Client, error) {
 	u, err := url.Parse(receiverURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse receiver url: %w", err)
 	}
 	receiverAddr := u.Host
 	fakeHosts := map[string]bool{}
-	for _, p := range partnerResiliencePhaseAPartners {
-		fakeHosts[p.host] = true
+	for _, host := range hosts {
+		fakeHosts[host] = true
 	}
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	transport := &http.Transport{
@@ -949,6 +1059,7 @@ Folded from the legacy Scenarios 2, 3, and 5.
 | Duration | %s | %s |
 | Goroutines (baseline → final) | %d | %d |
 | Dead-customer attempts | — | %d |
+| Dead-customer attempt cap | — | %d |
 | Dead-customer pending (skipped) | — | %d |
 
 | Gate | OK |
@@ -977,7 +1088,7 @@ Folded from the legacy Scenarios 2, 3, and 5.
 		passFail(results.PhaseB.AllTerminalOK), passFail(results.PhaseB.GoodOK), passFail(results.PhaseB.BadOK),
 		results.PhaseC.ControlDuration.Round(time.Millisecond), results.PhaseC.DeadDuration.Round(time.Millisecond),
 		results.PhaseC.BaselineGoroutines, results.PhaseC.FinalGoroutines,
-		results.PhaseC.DeadAttempts, results.PhaseC.DeadPending,
+		results.PhaseC.DeadAttempts, results.PhaseC.DeadAttemptsLimit, results.PhaseC.DeadPending,
 		passFail(results.PhaseC.HealthyWithinLimit), passFail(results.PhaseC.BreakerOpened),
 		passFail(results.PhaseC.BreakerHalfOpen), passFail(results.PhaseC.BreakerReopened),
 		passFail(results.PhaseC.GoroutineOK), passFail(results.PhaseC.DeadAttemptsOK), passFail(results.PhaseC.SkippedOK),

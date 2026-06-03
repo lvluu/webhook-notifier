@@ -61,8 +61,8 @@ func scenario3ProfileFromEnv() (scenario3Profile, error) {
 	}, nil
 }
 
-// Legacy scenario — folded into partner_resilience.go. Kept for reference until retirement.
-// RunScenario3 executes Scenario 3: terminal classification fast-fail.
+// RunScenario3 executes the legacy Scenario 3, folded into
+// partner_resilience.go and kept for reference until retirement.
 func RunScenario3(ctx context.Context) error {
 	db, cleanup, err := openBenchDatabase(ctx)
 	if err != nil {

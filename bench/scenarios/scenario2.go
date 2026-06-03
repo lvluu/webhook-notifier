@@ -3,6 +3,7 @@ package scenarios
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -50,9 +51,8 @@ type scenario2Profile struct {
 	BreakerFailureThreshold int
 }
 
-// Legacy scenario — folded into partner_resilience.go. Kept for reference until retirement.
-// RunScenario2 executes Scenario 2: transient and recovering Integration
-// Partners under Event x Webhook fanout.
+// RunScenario2 executes the legacy Scenario 2, folded into
+// partner_resilience.go and kept for reference until retirement.
 func RunScenario2(ctx context.Context) error {
 	db, cleanup, err := openBenchDatabase(ctx)
 	if err != nil {
@@ -137,6 +137,18 @@ func RunScenario2(ctx context.Context) error {
 			}
 		}(i)
 	}
+	discoveryCtx, cancelDiscovery := context.WithCancel(ctx)
+	defer cancelDiscovery()
+	discoveryDone := make(chan error, 1)
+	go func() {
+		discoveryDone <- worker.RunClaimableCustomerDiscovery(discoveryCtx, outboxStore, plainSched, worker.DiscoveryConfig{
+			Interval:     50 * time.Millisecond,
+			EmptyBackoff: 50 * time.Millisecond,
+			ErrorBackoff: 50 * time.Millisecond,
+			MaxBackoff:   250 * time.Millisecond,
+			Limit:        100,
+		})
+	}()
 	slog.Info("started workers", "profile", profile.Name, "count", workers)
 
 	if err := submitScenario2Events(ctx, ingestStore, profile.CustomerCount, profile.EventsPerCustomer, profile.SubmitInterval); err != nil {
@@ -161,6 +173,10 @@ func RunScenario2(ctx context.Context) error {
 		}
 	}
 
+	cancelDiscovery()
+	if err := <-discoveryDone; err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("claimable discovery: %w", err)
+	}
 	cancelWorkers()
 	workerWg.Wait()
 

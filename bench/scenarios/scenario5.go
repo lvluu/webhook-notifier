@@ -126,9 +126,8 @@ type scenario5RunResult struct {
 	BreakerFinalSnapshot    scenario5BreakerSnapshot
 }
 
-// Legacy scenario — folded into partner_resilience.go. Kept for reference until retirement.
-// RunScenario5 executes Scenario 5: a dead partner that trips the breaker
-// without degrading healthy Customers.
+// RunScenario5 executes the legacy Scenario 5, folded into
+// partner_resilience.go and kept for reference until retirement.
 func RunScenario5(ctx context.Context) error {
 	observe.RegisterMetrics(prometheus.NewRegistry())
 	db, cleanup, err := openBenchDatabase(ctx)

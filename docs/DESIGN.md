@@ -387,7 +387,7 @@ Each scenario lives in `cmd/bench` and emits a markdown report under `bench/resu
 | --- | --- | --- | --- |
 | **6. Production-like sparse-Customer workload** | 1 Whale + 10,000 Small Customers (1 event each). MultiPickCount=32. Worker counts {16, 32}. | Throughput scales with workers. Small P95 first-attempt latency under 6s at 16 workers and under 3s at 32 workers. Zero duplicate `(delivery_id, attempt_number)` tuples. | Multi-customer claim batching (`ClaimNextBatch`), sparse-Customer fairness, horizontal scalability. |
 | **8. Horizontal scalability (multi-replica)** | Real notifier OS processes sharing one Postgres outbox. Sparse: 10k Small Customers × 1 Event, round-robin ingest. Dense: 100 Customers × 1k Deliveries, direct DB seed. | All Deliveries terminal, zero duplicate tuples, throughput improvement from 1→N replicas, sparse Small P95 within Scenario 6 threshold, no zero-work replica. | Multi-replica claim atomicity, replica identity distribution, sparse-discovery + dense-drain behaviour. |
-| **Partner Resilience** | Phased reliability drill-down. Phase A: transient/recovering partners. Phase B: terminal 4xx fast-fail + DLQ. Phase C: dead-partner breaker isolation. | 100% terminal in each phase, recovery complete, no retry spike, breaker opens/half-opens/reopens, healthy Customers within 10% of control. | Retry policy, decorrelated jitter, terminal classification, breaker isolation, per-host isolation. |
+| **Partner Resilience** | Phased reliability drill-down. Phase A: transient/recovering partners. Phase B: terminal 4xx fast-fail + DLQ. Phase C: dead-partner breaker isolation. Phase A/B disable breaker tripping to isolate retry/classification behavior; Phase C enables the configured breaker threshold and uses distinct Integration Partner hostnames so the host limiter isolates only the dead partner. Retry/breaker phases run DB-backed claimable Customer discovery so delayed retries are rediscovered from Postgres. | 100% terminal in each phase, recovery complete, no retry spike, breaker opens/half-opens/reopens, healthy Customers within 10% of control. | Retry policy, decorrelated jitter, terminal classification, breaker isolation, per-host isolation. |
 
 #### Internal hardening
 
@@ -395,15 +395,15 @@ Each scenario lives in `cmd/bench` and emits a markdown report under `bench/resu
 | --- | --- | --- | --- |
 | **7. Mass breaker tripping** | All webhooks 5xx, batch breaker bookkeeping path. | All breakers open, goroutine count stable. | O(1) batch breaker SQL, mass-outage resilience. |
 
-#### Legacy (folded into Partner Resilience — kept for reference)
+#### Legacy/internal reference commands
 
-| Scenario | Setup | Pass criteria | Claims exercised |
+| Scenario | Setup | Replacement proof | Claims exercised |
 | --- | --- | --- | --- |
-| **1. Fairness under load + late-arrival** | 1 Whale (50k Deliveries burst) + 100 Smalls (5 each, 1/sec). At t=30s inject a brand-new Small. | Smalls p99 < 2s; late Small first-Delivery latency bounded to one RR cycle. | Steady-state fairness, scheduler reactivity. |
-| **2. Transient + recovering partners** | 10 Customers; 100 Events per Customer; 3 Webhooks each. Partner A healthy, B 30% 5xx, C 503 during outage. | 100% terminal; Partner-C recovery; Partner-A p99 < 2s; no retry spike. | Retry policy, decorrelated jitter, per-host isolation. |
-| **3. Terminal classification (4xx fast-fail)** | 1 Customer, 2 Webhooks: good + 404. 1000 Events. | 404 Webhook: 1 Attempt → dead. Good: all succeeded. | Terminal classification, no retry waste. |
-| **4. Horizontal scale + atomicity** | 10k Deliveries at worker count {1, 4, 8}. | Throughput scaling, zero duplicate tuples, stable idempotency headers. | Scalability, claim atomicity, idempotency. |
-| **5. Dead partner breaker + pool protection** | 10 Customers, one dead endpoint. | Breaker opens/half-opens/reopens, healthy P95 within 10% of control. | Breaker isolation, noisy-neighbor protection. |
+| **1. Fairness under load + late-arrival** | 1 Whale (50k Deliveries burst) + 100 Smalls (5 each, 1/sec). At t=30s inject a brand-new Small. | Scenario 6 First-Attempt Queue Latency reporting. | Steady-state fairness, scheduler reactivity. |
+| **2. Transient + recovering partners** | 10 Customers; 100 Events per Customer; 3 Webhooks each. Partner A healthy, B 30% 5xx, C 503 during outage. | Partner Resilience Phase A. | Retry policy, decorrelated jitter, per-host isolation. |
+| **3. Terminal classification (4xx fast-fail)** | 1 Customer, 2 Webhooks: good + 404. 1000 Events. | Partner Resilience Phase B. | Terminal classification, no retry waste. |
+| **4. Horizontal scale + atomicity** | 10k Deliveries at worker count {1, 4, 8}. | Scenario 8 dense phase. | Scalability, claim atomicity, idempotency. |
+| **5. Dead partner breaker + pool protection** | 10 Customers, one dead endpoint. | Partner Resilience Phase C. | Breaker isolation, noisy-neighbor protection. |
 
 ## What is deliberately out
 

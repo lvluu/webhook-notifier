@@ -22,7 +22,7 @@ BENCH_PROFILE=stress go run ./cmd/bench partner_resilience
 # Internal hardening
 BENCH_PROFILE=stress go run ./cmd/bench scenario7
 
-# Legacy scenarios (folded into partner_resilience — kept for reference)
+# Legacy scenarios (proof points folded into scenario6/scenario8/partner_resilience)
 BENCH_PROFILE=stress go run ./cmd/bench scenario1
 BENCH_PROFILE=stress go run ./cmd/bench scenario2
 BENCH_PROFILE=stress go run ./cmd/bench scenario3
@@ -67,15 +67,17 @@ When no path is provided, the benchmark writes the connection string to `/tmp/be
 - `scenario8` - true multi-replica horizontal scalability with sparse + dense phases.
 - `partner_resilience` - reliability drill-down: transient recovery, terminal 4xx fast-fail, dead-partner breaker isolation.
 
+`scenario8` launches real `go run ./cmd/notifier` replica process groups and tears down each process group after the phase completes. `partner_resilience` disables breaker tripping in Phase A/B so retry and terminal-classification behavior are isolated, then enables the configured breaker threshold in Phase C. Phase C uses distinct Integration Partner hostnames so the host limiter can isolate the dead partner while healthy partners continue. Its dead-partner attempt cap requires fewer Attempts than the seeded dead backlog, with pending/skipped Deliveries still present, proving the breaker stopped the dead partner before exhausting its queue. It runs DB-backed claimable Customer discovery alongside workers so delayed retries are rediscovered from Postgres, not only from ingest-time scheduler notifications.
+
 ### Internal hardening
 - `scenario7` - mass breaker tripping under batch mark (not part of the assignment-facing proof map).
 
-### Legacy (folded into partner_resilience — kept for reference)
-- `scenario1` - fairness under load with a late-arriving small customer.
-- `scenario2` - retry reliability and recovery under mixed partner failures.
-- `scenario3` - terminal 4xx classification with no retry waste.
-- `scenario4` - horizontal scale, claim atomicity, and idempotency stability.
-- `scenario5` - dead-partner circuit breaker and healthy-customer pool protection.
+### Legacy/internal reference commands
+- `scenario1` - fairness proof folded into Scenario 6 reporting.
+- `scenario2` - transient/recovering partner proof folded into Partner Resilience Phase A.
+- `scenario3` - terminal 4xx fast-fail proof folded into Partner Resilience Phase B.
+- `scenario4` - horizontal scale, duplicate tuple, and idempotency proof folded into Scenario 8 dense phase.
+- `scenario5` - dead-partner breaker isolation proof folded into Partner Resilience Phase C.
 
 ## What The Bench Suite Proves
 
