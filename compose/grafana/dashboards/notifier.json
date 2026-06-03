@@ -1,7 +1,7 @@
 {
   "title": "Webhook Notifier",
   "uid": "notifier",
-  "version": 7,
+  "version": 8,
   "schemaVersion": 39,
   "timezone": "browser",
   "refresh": "5s",
@@ -420,6 +420,38 @@
                     "color": "red",
                     "value": 0.2
                   }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "title": "Empty Claim Rate",
+          "description": "Percentage of claim queries that returned zero deliveries. High values (>50%) indicate worker contention or stale scheduler state; low values mean workers are hitting hot Customers.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 28
+          },
+          "targets": [
+            {
+              "expr": "100 * sum(rate(webhook_claim_empty_total[1m])) / clamp_min(sum(rate(webhook_claim_batch_size_count[1m])), 1)",
+              "legendFormat": "empty %"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "max": 100,
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 50 },
+                  { "color": "red", "value": 80 }
                 ]
               }
             }

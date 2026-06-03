@@ -2,7 +2,7 @@
 
 This document describes the design of the Webhook Notifier component: a service that consumes business Events from a multi-tenant platform and reliably delivers them to Integration Partners over HTTP POST, with horizontal scalability and fair scheduling across Customers of vastly different sizes.
 
-Vocabulary used here is defined in [CONTEXT.md](../CONTEXT.md). Architectural commitments are anchored in [ADR-0001](adr/0001-round-robin-fairness-with-pluggable-scheduler.md), [ADR-0002](adr/0002-postgres-as-queue-no-broker-for-poc.md), [ADR-0003](adr/0003-retry-policy-and-delivery-lifecycle.md), [ADR-0006](adr/0006-db-backed-claimable-customer-discovery.md), [ADR-0007](adr/0007-http-transport-and-response-body-drain.md), and [ADR-0008](adr/0008-persisted-webhook-circuit-breaker.md).
+Vocabulary used here is defined in [CONTEXT.md](../CONTEXT.md). Architectural commitments are anchored in [ADR-0001](adr/0001-round-robin-fairness-with-pluggable-scheduler.md), [ADR-0002](adr/0002-postgres-as-queue-no-broker-for-poc.md), [ADR-0003](adr/0003-retry-policy-and-delivery-lifecycle.md), [ADR-0004](adr/0004-requeue-without-attempt.md), [ADR-0005](adr/0005-subscription-registry-lru-ttl-cache.md), [ADR-0006](adr/0006-db-backed-claimable-customer-discovery.md), [ADR-0007](adr/0007-http-transport-and-response-body-drain.md), [ADR-0008](adr/0008-persisted-webhook-circuit-breaker.md), [ADR-0009](adr/0009-retry-max-age-expiration.md), [ADR-0010](adr/0010-terminal-delivery-retention-archive.md), [ADR-0011](adr/0011-delivery-claims-authoritative-claim-store.md), and [ADR-0012](adr/0012-pgbouncer-prepared-statements-and-pgxpool-deferral.md).
 For a step-by-step execution path and tuning checklist, see [WORKFLOW.md](WORKFLOW.md).
 
 ## Goals
@@ -44,8 +44,10 @@ flowchart LR
       EV[(events)]
       WH[(webhooks)]
       DV[(deliveries)]
+      CL[(delivery_claims)]
       AT[(delivery_attempts)]
       DL[(dead_letters)]
+      AH[(delivery_history)]
     end
 
     subgraph Partners
@@ -57,7 +59,8 @@ flowchart LR
     I -->|INSERT Event<br/>+ fan out Deliveries| EV
     I --> DV
     SC -->|next Customer| W
-    W -->|SELECT FOR UPDATE<br/>SKIP LOCKED| DV
+    W -->|claim CTE<br/>SKIP LOCKED| DV
+    W -->|insert claim| CL
     W --> S
     W --> RP
     W --> HS
@@ -66,24 +69,26 @@ flowchart LR
     W -->|HTTP POST| PB
     W -->|record| AT
     W -->|terminal| DL
+    W -->|archive| AH
     WH -.lookup.- W
 
     classDef store fill:#eef,stroke:#88a;
-    class EV,WH,DV,AT,DL store;
+    class EV,WH,DV,CL,AT,DL,AH store;
 ```
 
 ## Component responsibilities
 
 ### Deep modules (pure logic, isolated unit tests)
 
-- **Scheduler** — Given the set of Customers with pending Deliveries, returns the next Customer to serve. Smooth Weighted Round Robin (SWRR, Nginx-style) with `weight=1` default for every Customer (ADR-0001) — degenerates to plain RR until weights diverge. The interface is the load-bearing contract; the implementation (RR / SWRR / DRR) is the trade-off.
+- **Scheduler** — Given the set of Customers with pending Deliveries, returns the next Customer to serve. The default PoC service uses plain round-robin with `container/list.List` + `map` for O(1) Notify and Remove, so all Customers get equal share. The interface supports weighted scheduling for future tiered policy. A Smooth Weighted Round Robin (SWRR, Nginx-style) prototype exists, but it uses slice scans and rebuilds rather than the round-robin list+map structure, so divergent weights require profiling before production use. The interface is the load-bearing contract; the implementation (RR / SWRR / DRR) is the trade-off (ADR-0001).
   ```go
   type Scheduler interface {
       // Pick returns the next Customer to serve and an implementation-specific
-      // batch hint. The worker MAY claim up to batchHint Deliveries before
-      // yielding back. batchHint == 0 means "no work".
+      // batch hint. The worker combines this with its own MinBatchHint when
+      // deciding how many Deliveries to claim. batchHint == 0 means "no work".
       Pick(ctx context.Context) (id CustomerID, batchHint uint32, ok bool, err error)
       Notify(CustomerID) // wake the scheduler when work arrives
+      Remove(CustomerID) // stop tracking the Customer when it has no remaining work
   }
 
   // WeightSource resolves a Customer's fairness weight. Default impl returns 1
@@ -102,36 +107,38 @@ flowchart LR
 - **EventIngest** — Accepts an Event and synchronously fans out one Delivery row per matching Webhook in a single transaction. Same transaction = no Delivery is ever orphaned from its Event.
   Keep synchronous fanout for the PoC: the expected Webhook count per Customer is small, and the transaction freezes routing at Event acceptance time. If ingest-latency measurements later justify asynchronous fanout, persist an immutable routing snapshot or equivalent durable fanout intent with the Event before returning success. A background fanout worker must not resolve a mutable Webhook set later and silently change which Integration Partners receive the Event.
   Track Event ingest latency by fanout size. Until a product API SLO is defined, use provisional `p99 < 200ms` under realistic Webhook fanout as the threshold for reconsidering asynchronous fanout.
-- **Outbox** (the `deliveries` table) — The durable work queue. Workers claim with `SELECT ... FROM deliveries WHERE customer_id = $1 AND status IN ('pending') AND next_attempt_at <= now() FOR UPDATE SKIP LOCKED LIMIT $2` once the Scheduler has named a Customer; the `LIMIT` is a claim batch size used to amortize database work.
+- **Outbox** (the `deliveries` table) — The durable work queue. Workers claim Deliveries atomically through a CTE that selects ready rows (no active claim, `next_attempt_at <= now()`) and stale-claim rows (claim lease expired), locks them with `FOR UPDATE SKIP LOCKED`, and atomically inserts/updates a row in `delivery_claims` via `INSERT … ON CONFLICT DO UPDATE WHERE claimed_at < now() - lease`. This one-CTE claim eliminates the `in_flight` status column from the `deliveries` row, avoids dead-tuple bloat in the hot queue table, and recovers abandoned claims without a separate sweeper process (ADR-0011). The claim query optionally integrates circuit breaker filtering via a probe CTE that transitions `open` Webhooks to `half_open` for a single probe Delivery. For sparse-Customer workloads the store also exposes `ClaimNextBatch` so 10,000 small Customers do not pay one claim round-trip each. `ClaimNextBatch` de-duplicates its input Customer IDs and probes each Customer independently through a `CROSS JOIN LATERAL` over the distinct input set (rather than a single `customer_id = ANY($1)` scan), capping each Customer's contribution to a fair share of the batch limit (`batch limit / number of input Customers`, floored at 1) before a final time-ordered cut. The per-Customer cap bounds how many rows the claim locks `FOR UPDATE` — without it a single high-volume Customer could lock up to `N × batch limit` rows across `N` co-claimed Customers and monopolize the batch, starving co-picked Small Customers within that claim.
 - **WorkerPool** — N goroutines per process. Each loop:
   1. `id, batchHint, ok := Scheduler.Pick()` — get next Customer and how many Deliveries the worker may serve before yielding.
-  2. Claim up to the configured batch size for that Customer (single SQL statement). The PoC uses a default minimum batch of 32 Deliveries per pick and validates that throughput tuning against the Small Customer scheduling-latency SLO.
-  3. For each claimed Delivery, in order:
-     - Look up Webhook (cached).
-     - Acquire per-host semaphore (skip and requeue with short backoff if blocked > short timeout; yield back to Scheduler so a saturated partner does not stall fairness).
-     - `Signer.Sign()`, build HTTP request with idempotency headers.
-     - POST with a shared tuned HTTP client and per-Attempt request timeout.
-     - Drain and close the response body so the transport can reuse the connection.
-     - `RetryPolicy.Next()` decides outcome → mutate Delivery row + record an Attempt row.
-  4. Return to step 1.
+  2. Claim up to the configured batch size for that Customer (single CTE-based SQL statement, see Outbox). The PoC uses a default minimum batch of 32 Deliveries per pick and validates throughput against the Small Customer scheduling-latency SLO.
+  3. When `MultiPickCount > 1`, the worker collects up to N Customers from the Scheduler before issuing a single `ClaimNextBatch` call — one DB round-trip amortised across many sparse Customers (critical for the 10,000-small-Customer workload in Scenario 6). After the batch claim, `HasClaimableWorkBatch` checks whether empty-pick Customers truly have no work (another worker may have claimed their only row) and removes them from rotation if none remain.
+  4. For each claimed Delivery, in parallel (semaphore-capped goroutines):
+      - Look up Webhook (cached via SubscriptionRegistry).
+      - Try to acquire the per-host semaphore without blocking (skip and requeue with short backoff if unavailable; yield back to Scheduler so a saturated partner does not stall fairness).
+      - `Signer.Sign()`, build HTTP request with idempotency headers.
+      - POST with a shared tuned HTTP client and per-Attempt request timeout.
+      - Drain and close the response body so the transport can reuse the connection.
+      - `RetryPolicy.Next()` decides outcome.
+  5. Batch-mark all outcomes by kind in one SQL round-trip per outcome (`MarkSucceededBatch`, `MarkRetryBatch`, `MarkDeadBatch`) using `UNNEST` arrays + CTE transactions that delete `delivery_claims` rows and update `deliveries` atomically, including breaker state recording via set-based SQL (no per-item loops).
+  6. Return to step 1.
 - **SubscriptionRegistry** — Read-only `customer_id → []Webhook`. In-memory LRU with short TTL; cache miss falls back to PG. Avoids hot lookup on every Delivery.
-- **DLQ** (`dead_letters` table) — Terminal Deliveries with reason (`exhausted`, `terminal_4xx`, `terminal_network`).
-  Terminal `deliveries` rows are retained in the live queue for a configurable operational window, initially 24 hours, then archived to a time-partitioned history table and removed from `deliveries` so claim indexes do not accumulate unbounded terminal work.
+- **DLQ** (`dead_letters` table) — Terminal Deliveries with reason (`exhausted`, `terminal_4xx`, `terminal_network`). Written at MarkDead time alongside the `deliveries.status = 'dead'` update.
+  Terminal `deliveries` rows stay in the live queue for a configurable operational retention window (initially 24 hours), after which the archive process copies them into a time-partitioned `delivery_history` table and removes them from `deliveries` so claim indexes do not accumulate unbounded terminal rows (ADR-0010).
 - **Process-local HostLimiter** — `map[host]chan struct{}`. Enforces a per-process limit per Integration Partner hostname, default 20. This is the PoC's partial enforcement of the Host Concurrency Cap; a horizontally scaled production deployment needs fleet-wide coordination to preserve the partner-protection invariant.
 - **Webhook circuit breaker** — Persisted per-Webhook breaker state (`closed`, `open`, `half_open`) that keeps chronically failing Webhooks out of claim/discovery until a cooldown permits one probe. Complements RetryPolicy and the Host Concurrency Cap: RetryPolicy decides the outcome of an Attempt, HostLimiter limits local pressure on a hostname, and the breaker stops a broken Webhook from repeatedly occupying worker capacity across many Deliveries.
 
 ## Data model
 
 ```
-events                deliveries             delivery_attempts      dead_letters
-─────────────         ───────────────        ─────────────────      ───────────────
-id (uuid)             id (uuid)              delivery_id            delivery_id
-customer_id           event_id        ──fk─> id                     last_error
-type                  webhook_id             attempt_number         attempts
-payload (jsonb)       customer_id            status_code            reason
-created_at            status                 error_class            final_at
-                      attempt_count          duration_ms
-                      next_attempt_at        sent_at
+events                deliveries             delivery_claims        delivery_attempts      dead_letters
+─────────────         ───────────────        ──────────────         ─────────────────      ───────────────
+id (uuid)             id (uuid)              delivery_id (uuid PK)  delivery_id            delivery_id
+customer_id           event_id        ──fk─> id                     id                     last_error
+type                  webhook_id             attempt_number         attempt_number         attempts
+payload (jsonb)       customer_id            claimed_at             status_code            reason
+created_at            status                                        error_class            final_at
+                      attempt_count                                 duration_ms
+                      next_attempt_at                               sent_at
                       last_error
                       created_at
                       updated_at
@@ -152,34 +159,56 @@ breaker_opened_at
 breaker_next_probe_at
 breaker_cooldown_ms
 breaker_probe_delivery_id
+
+customers                              delivery_history (partitioned)
+──────────                             ─────────────────────────────
+id (uuid)                              delivery_id + final_at (PK)
+class (int, default 1, check >= 0)     event_id, webhook_id, customer_id
+plan_tier (text, nullable)             event_type, url_host
+                                       final_status, terminal_reason
+                                       attempt_count, first/last_attempt_at
+                                       last_status_code, last_error_class, last_error
+                                       delivery_created_at, final_at, archived_at
 ```
+
+`delivery_claims` is the authoritative claim store (ADR-0011). A Delivery is claimed when a row exists in `delivery_claims` with `claimed_at` within the claim lease window. The `deliveries.status` column no longer stores `in_flight`; claim queries join against `delivery_claims` to detect already-claimed rows. `deliveries.claimed_at` (a residual column from the initial schema) is no longer used as the claim source.
+
+`dead_letters` records terminal metadata at MarkDead time. The `deliveries` row persists with `status = 'dead'` until the archive process copies it into `delivery_history` (a time-partitioned table) and deletes it from the live queue (ADR-0010).
 
 Indexes:
 - `deliveries (customer_id, status, next_attempt_at)` — scheduler/worker hot path.
+- `deliveries (customer_id, next_attempt_at, created_at, id) WHERE status IN ('pending', 'failed_retry')` — ready-candidate claim scan (partial, index-friendly).
+- `delivery_claims (claimed_at, delivery_id)` — stale-claim scan.
 - `delivery_attempts (delivery_id, attempt_number)` — audit lookup.
+- `deliveries (customer_id, next_attempt_at) WHERE status IN ('pending', 'failed_retry')` — claimable-customer discovery scan.
 - `dead_letters (final_at desc)` — ops inspection.
+- `delivery_history (customer_id, final_at desc)` — historical lookup.
 
 ## Lifecycle: a Delivery from cradle to terminal state
 
 ```mermaid
 stateDiagram-v2
     [*] --> pending: EventIngest creates Delivery rows<br/>(one per matching Webhook)
-    pending --> in_flight: worker claims (SKIP LOCKED)
-    in_flight --> succeeded: 2xx
-    in_flight --> dead: terminal classification<br/>(4xx not 408/429,<br/> or attempts exhausted)
-    in_flight --> failed_retry: retryable failure
-    failed_retry --> pending: next_attempt_at reached<br/>(advances on the same row)
+    pending --> claimed: worker claims (atomic CTE<br/>INSERT delivery_claims<br/>SKIP LOCKED)
+    claimed --> succeeded: 2xx
+    claimed --> dead: terminal classification<br/>(4xx not 408/429,<br/> or attempts exhausted,<br/> or MaxAge expired)
+    claimed --> failed_retry: retryable failure
+    claimed --> pending: claim-lease expiry<br/>(stale_candidate reclaim)
+    failed_retry --> pending: next_attempt_at reached<br/>(becomes claimable again)
     succeeded --> [*]
     dead --> [*]
 ```
 
-`failed_retry` is a distinct state from `pending` so dashboards distinguish "never tried" from "in backoff".
+`claimed` is not a persisted `deliveries.status` value. It is represented by a row in the `delivery_claims` table (ADR-0011). When a claim is active the Delivery's `status` remains `pending` or `failed_retry`; the claim ownership lives in `delivery_claims`. Claim queries join against `delivery_claims` to detect already-claimed rows and project a synthetic `'in_flight'` status for the worker. Stale claims (older than `claimLease`) are reclaimed atomically by the claim query's `ON CONFLICT … DO UPDATE WHERE claimed_at < now() - lease` clause — no separate sweeper process.
 
 ## Reliability mechanics
 
 - **Outbox semantics**: Events and their derived Deliveries are written in the same transaction as the business write that emitted them. No business commit without scheduled delivery.
-- **Claim atomicity**: `SELECT ... FOR UPDATE SKIP LOCKED` ensures no two workers ever claim the same Delivery, even across multiple instances of the service.
-- **Crash recovery**: a worker that crashes mid-Delivery leaves the row in `in_flight` with `claimed_at`. A background sweeper (or a `claimed_at < now() - lease_ttl` predicate in the claim query) re-claims abandoned rows. PoC uses the latter — no separate sweeper process.
+- **Claim atomicity**: The claim CTE atomically selects candidate rows with `FOR UPDATE SKIP LOCKED` and inserts into `delivery_claims` using `INSERT … ON CONFLICT (delivery_id) DO UPDATE … WHERE delivery_claims.claimed_at < now() - lease`. The `ON CONFLICT` handles the race where two workers select the same candidate: one succeeds on INSERT, the other's DO UPDATE is blocked by the WHERE clause unless the existing claim is stale. `SKIP LOCKED` prevents queueing behind an in-progress claim on a different row.
+- **Crash recovery**: No separate sweeper process. The claim query handles recovery in two stages within the same CTE:
+  1. A `stale_candidate` CTE selects deliveries whose `delivery_claims.claimed_at` is older than the claim lease TTL (default 5 minutes).
+  2. The `INSERT … ON CONFLICT DO UPDATE WHERE delivery_claims.claimed_at < now() - lease` atomically reclaims the stale claim — a new worker can steal an abandoned claim without a separate timeout loop.
+- **Lock ordering**: every transaction that locks both `deliveries` and `delivery_claims` acquires `deliveries` first, then `delivery_claims`. The claim path locks `deliveries` with `FOR UPDATE SKIP LOCKED` before inserting/updating `delivery_claims`; `withInFlightDelivery` (used by `Requeue` and breaker state writes) locks the `deliveries` row before its `delivery_claims` row via ordered CTEs. A consistent acquisition order is required because the claim and requeue paths run concurrently on overlapping rows — an inverted order produces `SQLSTATE 40P01` deadlock aborts.
 - **Idempotency contract**: every Attempt carries `X-Delivery-Id` (stable across retries of one Delivery) and `X-Event-Id` (stable across all Deliveries derived from one Event). Partners dedupe on these.
 
 ## Security
@@ -192,6 +221,7 @@ stateDiagram-v2
 ## Scalability mechanics
 
 - **Stateless workers**: all coordination is through Postgres. Workers can be added or removed without coordination.
+- **PgBouncer transaction pool with prepared-statement tracking**: the local stack runs `edoburu/pgbouncer:v1.25.1-p0`, which is newer than PgBouncer 1.21 and supports protocol-level prepared statements in transaction pooling mode when `MAX_PREPARED_STATEMENTS` is non-zero. The notifier keeps the pgx default cached-statement execution mode instead of forcing simple protocol, so hot claim and mark CTEs can avoid repeated server parse/plan work while still using PgBouncer.
 - **Shared HTTP transport**: each Worker owns one tuned HTTP client with large idle connection pools and explicit transport timeouts (ADR-0007). Per-Attempt deadlines come from request contexts, not `http.Client.Timeout`, so response bodies can be drained before cancellation and idle connections can be reused.
 - **No leader**: the Scheduler is process-local. Postgres claim locking prevents duplicate Delivery processing across instances, but globally balanced Customer fairness requires every instance to discover the claimable Customer set from shared storage. DB-backed claimable Customer discovery is the chosen path in ADR-0006; it gives approximate cluster-wide fairness without a globally serialized Scheduler.
 - **Layered wakeups**: successful ingest wakes the local Scheduler synchronously and enqueues an advisory remote wake hint. A bounded broadcaster coalesces hints per Customer for 100ms and sends `pg_notify` through a dedicated direct Postgres connection; periodic DB-backed discovery remains the recovery path if a hint is dropped or Postgres notification is unavailable.
@@ -205,12 +235,13 @@ The single technical claim that drives most of the design: **the unit of fairnes
 - A Customer with more Webhooks produces more Deliveries but does not receive more scheduling capacity automatically. Webhook fanout increases backlog, not share. Explicit Customer weight is the only mechanism for differentiated scheduling capacity.
 - **Per-Customer concurrency cap is a complementary future safeguard.** Round-robin controls admission order, but slow Attempts from one Customer can still accumulate in flight and occupy worker capacity. Customer weight controls scheduling share; a concurrency cap would bound simultaneous resource use. It does not replace Customer-based scheduling.
 - A production per-Customer concurrency cap should be fleet-wide. A process-local layer may reduce coordination load, but cannot preserve the deployment-wide bound alone. It can reuse a lease-based distributed semaphore pattern keyed by Customer, independently of the Host Concurrency Cap keyed by Integration Partner.
-- **Weighted by default, equal by default.** Every Customer carries a `weight` (default `1`). The Scheduler is Smooth Weighted Round Robin (SWRR): with uniform weights it is plain RR; with diverging weights it allocates proportional, interleaved slots (no contiguous bursts for high-weight Customers). This makes the equal-share PoC and a future tiered policy the same code path — no rewrite when product introduces plan tiers, Whale throttling, or paid priority.
-- **Claim batch size is independent from Customer weight.** Weight controls how often a Customer is picked. Claim batch size controls database amortization per pick. The PoC uses a default minimum batch size of 32 and should tune it against the `< 2s` Small Customer scheduling-latency SLO rather than changing fairness policy to gain throughput.
-- **`MinBatchHint` tuning guidance.** `MinBatchHint` is the worker-side lower bound for claim batch size per pick. Higher values reduce claim-query frequency and often increase peak throughput, but can worsen fairness tail latency because one Customer can occupy a worker longer per turn. Lower values increase pick interleaving and usually improve fairness at the cost of extra DB overhead. In practice: start around `32` for throughput-focused runs, and `1`–`8` for fairness-sensitive mixed workloads; then tune empirically with benchmark reports.
+- **Weighted by default, equal by default.** Every Customer carries a `weight` (default `1`). The Scheduler interface is designed for Smooth Weighted Round Robin (SWRR): with uniform weights it degenerates to plain RR; with diverging weights it allocates proportional, interleaved slots (no contiguous bursts for high-weight Customers). The PoC runs plain RR (all weights equal) with an O(1) list+map implementation. Divergent weighted scheduling is supported by the interface but would need its own implementation tuned for the expected active-Customer count — the existing SWRR prototype uses slice scans and rebuilds, not the list+map structure.
+- **Claim batch size is independent from Customer weight.** Weight controls how often a Customer is picked. Claim batch size controls database amortization per pick. The PoC uses a default minimum batch size of 32 (`MinBatchHint`). In single-customer mode, the effective per-pick limit is `max(batchHint, MinBatchHint)`; in multi-customer mode, `batchHint` is ignored and the limit is `MultiPickCount × MinBatchHint`. Tune against the `< 2s` Small Customer scheduling-latency SLO rather than changing fairness policy to gain throughput.
+- **Cross-customer claim batching.** When `MultiPickCount > 1`, the worker collects up to N Customers from the Scheduler and issues a single `ClaimNextBatch` call — one DB round-trip amortised across many sparse Customers. After the batch claim, `HasClaimableWorkBatch` checks whether empty-pick Customers truly have no work (another worker may have claimed their only row) and removes them from rotation. This is critical for the 10,000-small-Customer workload (Scenario 6) where per-customer claim queries would otherwise dominate.
+- **`MinBatchHint` tuning guidance.** `MinBatchHint` is the worker-side lower bound for claim batch size per pick (default 32). In single-customer mode (`claimSingle`), the effective limit is `max(batchHint, MinBatchHint)` — the scheduler hint acts as a floor, not a ceiling; the worker never claims fewer than `MinBatchHint` deliveries from a picked Customer. In multi-customer mode (`claimMulti` / `MultiPickCount > 1`), the worker ignores `batchHint` entirely and uses `len(customerIDs) × MinBatchHint` as the total claim limit. Higher values reduce claim-query frequency and often increase peak throughput, but can worsen fairness tail latency because one Customer can occupy a worker longer per turn. Lower values increase pick interleaving and usually improve fairness at the cost of extra DB overhead. In practice: start around `32` for throughput-focused runs, and `1`–`8` for fairness-sensitive mixed workloads; then tune empirically with benchmark reports. Use `MultiPickCount > 1` to amortise DB round-trips across many sparse Customers without increasing per-Customer batch size.
 - The Host Concurrency Cap is **orthogonal** to per-Customer fairness. It protects partners. Without it, a Whale's per-cycle Delivery slots still get through, but in close succession against the same hostname — partners 429. The PoC's process-local HostLimiter requeues with a short `next_attempt_at` bump on local cap timeout and returns to the Scheduler, so a locally saturated partner never blocks Pick.
-- SWRR is sufficient because Deliveries have uniform cost (one HTTP POST each) and weights are per-Customer, not per-Delivery. DRR exists for variable-cost work units; if Deliveries ever become heterogeneous (e.g. payload-size-weighted), the Scheduler implementation swaps without touching the WorkerPool (ADR-0001).
-- SWRR is the PoC algorithm, not a permanent production commitment. Preserve the Customer-weight fairness contract and profile Scheduler CPU. If active-Customer growth makes SWRR material, replace it with an `O(1)` or `O(log n)` implementation while keeping the same scheduling-latency SLO.
+- SWRR is the current weighted-scheduling candidate because Deliveries have uniform cost (one HTTP POST each) and weights are per-Customer, not per-Delivery. DRR exists for variable-cost work units; if Deliveries ever become heterogeneous (e.g. payload-size-weighted), the Scheduler implementation swaps without touching the WorkerPool (ADR-0001).
+- The default PoC scheduler is plain round-robin (all Customers equal). It uses `container/list.List` + `map` for O(1) Notify and Remove — membership operations do not degrade with active Customer count. Divergent weighted scheduling is supported by the Scheduler interface but would need a separately profiled implementation; the existing SWRR prototype in `internal/scheduler/swrr/` uses slice-based structures.
 
 ### Weight source
 
@@ -236,7 +267,16 @@ type HostLimiter struct {
 func (h *HostLimiter) Acquire(ctx context.Context, host string) (release func(), err error) { ... }
 ```
 
-Workers acquire before POSTing. On acquisition timeout the Delivery is requeued with a short `next_attempt_at` bump — the worker frees up to serve another Customer. This keeps fairness intact when one process saturates its local allowance.
+Workers acquire before POSTing. If no slot is immediately available, the Delivery is requeued with a short `next_attempt_at` bump — the worker frees up to serve another Customer. This keeps fairness intact when one process saturates its local allowance.
+
+The cap sets the upper bound on concurrent in-flight Attempts per Integration
+Partner hostname. Approximate per-host throughput is `host_cap /
+partner_latency`: a cap of 20 supports about 200 Attempts/s at 100 ms p50
+partner latency, or about 400 Attempts/s at 50 ms. The default of 20 is sized
+as a conservative starting point for the 300 events/s PoC target when traffic is
+spread across multiple partner hostnames; concentrated traffic to one hostname
+needs either lower partner latency, a higher configured cap, or more host-level
+coordination capacity.
 
 The Host Concurrency Cap is a fleet-wide partner-protection invariant. The PoC's
 in-memory HostLimiter enforces only the local portion of that allowance. A
@@ -299,6 +339,8 @@ Each Webhook has a persisted circuit breaker (ADR-0008):
 - `open`: Deliveries for that Webhook are excluded from both claim and DB-backed claimable-Customer discovery. The queued work remains in the outbox; it just does not consume worker capacity.
 - `half_open`: after cooldown, the claim query atomically picks one Delivery as `breaker_probe_delivery_id`, transitions the Webhook to `half_open`, and claims only that Delivery as the probe. Probe success closes the breaker; probe failure reopens it and backs off the next cooldown.
 
+The breaker is **integrated into the claim/discovery SQL itself**, not applied as a separate filtering step after the claim returns. The claim CTE includes a `probe` CTE that atomically transitions `open` Webhooks to `half_open` and allows a single probe delivery to be claimed. Both the claim and discovery queries use `sqlBreakerEligiblePredicate` to exclude Webhooks that are `open` (unless their `breaker_next_probe_at` has elapsed), and the `claimed` CTE limits deliverable rows to Webhooks in `closed` state plus the designated probe. This keeps open breakers completely out of the work pool without extra round-trips.
+
 The breaker is deliberately per-Webhook, not per-host. A single Integration Partner hostname may serve many independent Webhooks, and one broken Webhook configuration should not suppress other Customers' healthy Webhooks on the same host. The Host Concurrency Cap remains the host-level protection mechanism.
 
 Default policy is conservative: 20 consecutive failures open the breaker, the first cooldown is 5 minutes, and repeated failed probes back off up to 15 minutes. The PoC uses consecutive failures rather than a sliding failure-rate window; that keeps the decision deterministic while still handling 100%-failing Integration Partner endpoints.
@@ -337,24 +379,40 @@ Dashboards and alerting are pair-session discussion: which p99 thresholds warran
 
 ### Benchmark scenarios
 
-Each scenario lives in `cmd/bench` and emits a markdown report under `bench/results/`. The five scenarios collectively cover all reliability/fairness/scalability claims.
+Each scenario lives in `cmd/bench` and emits a markdown report under `bench/results/`. The suite covers all reliability/fairness/scalability claims.
+
+#### Assignment-facing proofs
 
 | Scenario | Setup | Pass criteria | Claims exercised |
 | --- | --- | --- | --- |
-| **1. Fairness under load + late-arrival reactivity** | 1 Whale (50k Deliveries burst) + 100 Smalls (5 each, 1/sec). At t=30s inject a brand-new Small. | Smalls p99 < 2s; late Small first-Delivery latency bounded to one RR cycle. | Steady-state fairness, scheduler reactivity. |
-| **2. Transient + recovering partners** | 10 Customers; 100 Events per Customer by default; 3 Webhooks per Customer, one per fake partner hostname. Partner A is healthy, Partner B deterministically returns 5xx for 30% of Attempts, and Partner C returns 503 during a wall-clock outage window before recovering. | 100% terminal; Partner-C Deliveries whose first Attempt occurred during the outage succeed after recovery; Partner-A lifecycle p99 < 2s; no single post-recovery 1s retry bucket contains >25% of Partner-C retry Attempts. | Retry policy, decorrelated jitter (no thundering herd), per-host isolation, Event × Webhook fanout. |
-| **3. Terminal classification (fail-fast on 4xx)** | 1 Customer, 2 Webhooks: one good, one returning 404. 1000 Events. | Broken Webhook Deliveries: 1 Attempt each → `dead` with `reason=terminal_4xx`. Good Webhook: all `succeeded`. | Terminal classification, no retry waste on misconfig. |
-| **4. Horizontal scale + claim atomicity + idempotency** | 10k Deliveries at worker count {1, 4, 8}. Receiver records every `(delivery_id, attempt_number, X-Delivery-Id)` tuple. | Throughput at 8 ≥ 4× throughput at 1. Zero duplicate `(delivery_id, attempt_number)`. `X-Delivery-Id` stable across retries. | Scalability, claim atomicity, idempotency-header stability. |
-| **5. Dead partner circuit breaker + pool protection** | 10 Customers with one Webhook each. Customer 1 targets a hanging endpoint; Customers 2-10 target healthy 2xx endpoints. Compare against a control run with all healthy endpoints. | Dead Webhook opens breaker and later probes via half-open. Healthy Customers' p95 remains within 10% of control after breaker opening. Breaker trip metrics and goroutine return-to-baseline checks pass. | Breaker isolation, noisy-neighbor protection, worker pool resilience under dead partner conditions. |
+| **6. Production-like sparse-Customer workload** | 1 Whale + 10,000 Small Customers (1 event each). MultiPickCount=32. Worker counts {16, 32}. | Throughput scales with workers. Small P95 first-attempt latency under 6s at 16 workers and under 3s at 32 workers. Zero duplicate `(delivery_id, attempt_number)` tuples. | Multi-customer claim batching (`ClaimNextBatch`), sparse-Customer fairness, horizontal scalability. |
+| **8. Horizontal scalability (multi-replica)** | Real notifier OS processes sharing one Postgres outbox. Sparse: 10k Small Customers × 1 Event, round-robin ingest. Dense: 100 Customers × 1k Deliveries, direct DB seed. | All Deliveries terminal, zero duplicate tuples, throughput improvement from 1→N replicas, sparse Small P95 within Scenario 6 threshold, no zero-work replica. | Multi-replica claim atomicity, replica identity distribution, sparse-discovery + dense-drain behaviour. |
+| **Partner Resilience** | Phased reliability drill-down. Phase A: transient/recovering partners. Phase B: terminal 4xx fast-fail + DLQ. Phase C: dead-partner breaker isolation. Phase A/B disable breaker tripping to isolate retry/classification behavior; Phase C enables the configured breaker threshold and uses distinct Integration Partner hostnames so the host limiter isolates only the dead partner. Retry/breaker phases run DB-backed claimable Customer discovery so delayed retries are rediscovered from Postgres. | 100% terminal in each phase, recovery complete, no retry spike, breaker opens/half-opens/reopens, healthy Customers within 10% of control. | Retry policy, decorrelated jitter, terminal classification, breaker isolation, per-host isolation. |
+
+#### Internal hardening
+
+| Scenario | Setup | Pass criteria | Claims exercised |
+| --- | --- | --- | --- |
+| **7. Mass breaker tripping** | All webhooks 5xx, batch breaker bookkeeping path. | All breakers open, goroutine count stable. | O(1) batch breaker SQL, mass-outage resilience. |
+
+#### Legacy/internal reference commands
+
+| Scenario | Setup | Replacement proof | Claims exercised |
+| --- | --- | --- | --- |
+| **1. Fairness under load + late-arrival** | 1 Whale (50k Deliveries burst) + 100 Smalls (5 each, 1/sec). At t=30s inject a brand-new Small. | Scenario 6 First-Attempt Queue Latency reporting. | Steady-state fairness, scheduler reactivity. |
+| **2. Transient + recovering partners** | 10 Customers; 100 Events per Customer; 3 Webhooks each. Partner A healthy, B 30% 5xx, C 503 during outage. | Partner Resilience Phase A. | Retry policy, decorrelated jitter, per-host isolation. |
+| **3. Terminal classification (4xx fast-fail)** | 1 Customer, 2 Webhooks: good + 404. 1000 Events. | Partner Resilience Phase B. | Terminal classification, no retry waste. |
+| **4. Horizontal scale + atomicity** | 10k Deliveries at worker count {1, 4, 8}. | Scenario 8 dense phase. | Scalability, claim atomicity, idempotency. |
+| **5. Dead partner breaker + pool protection** | 10 Customers, one dead endpoint. | Partner Resilience Phase C. | Breaker isolation, noisy-neighbor protection. |
 
 ## What is deliberately out
 
-- **DRR implementation** — interface ready, implementation deferred (ADR-0001). PoC ships WRR with uniform weights.
-- **Plan-tier → weight policy** — the WRR + `WeightSource` plumbing is in place, but the actual tier table and admin UI to set non-uniform weights are out of PoC scope. Adding them is a config change, not a redesign.
+- **SWRR with divergent weights** — the Scheduler interface, `WeightSource` plumbing, and `customers.class` column are in place, but the PoC scheduler runs plain round-robin (all weights equal). Adding divergent weights is a config + scheduler-implementation change, not a redesign.
+- **Plan-tier → weight policy** — the `WeightSource` plumbing is in place, but the actual tier table and admin UI to set non-uniform weights are out of PoC scope. Adding them is a config change, not a redesign.
 - **Redis Streams per-Customer queues** — same Scheduler interface (ADR-0002).
-- **Per-Customer concurrency cap** — round-robin already paces; documented as natural addition under DRR.
-- **Many-Whale contention bench** — scenario 1 already proves the mechanism.
-- **Mid-flight worker crash chaos scenario** — recoverable by design (`claimed_at` predicate), demonstrated by an integration test rather than a bench scenario.
+- **Per-Customer concurrency cap** — round-robin already paces; documented as natural addition under future needs.
+- **Many-Whale contention bench** — scenario 1 already proves the mechanism. Scenario 6 proves the sparse-Customer path.
+- **Mid-flight worker crash chaos scenario** — recoverable by design (stale_candidate CTE reclaim), demonstrated by an integration test rather than a bench scenario.
 - **Multi-region**.
 - **Webhook management APIs**.
 
@@ -366,7 +424,7 @@ Each scenario lives in `cmd/bench` and emits a markdown report under `bench/resu
 - **Fairness SLO uses Small Customer scheduling latency.** Measure the time from a Delivery becoming claimable to its first claim and evaluate p99 for Small Customers under Whale load. This isolates scheduling behavior from Integration Partner response time and retries. End-to-end Delivery latency remains a separate reliability metric.
 - **Initial Small Customer scheduling-latency SLO: p99 < 2 seconds under Whale load.** This matches Bench Scenario 1 and is a provisional product target to validate against production traffic assumptions. It is not a guarantee during dependency outages.
 - **Retry-due Deliveries use the same fairness SLO once claimable.** Their scheduling-latency clock starts when `next_attempt_at` is reached, not while they are intentionally in backoff. Once due, they compete normally by Customer so recovering Integration Partners are not starved behind fresh Whale traffic.
-- **Reclaimable stale `in_flight` Deliveries use the same fairness SLO after claim-lease expiry.** Before lease expiry they remain owned by the original worker. After expiry they compete normally by Customer. Track reclaimed Deliveries separately so crash-recovery latency remains visible.
+- **Reclaimable stale claimed Deliveries use the same fairness SLO after claim-lease expiry.** Before lease expiry they remain owned by the original worker via the `delivery_claims` row. After expiry the stale-candidate CTE reclaims them atomically; they then compete normally by Customer. Track reclaimed Deliveries separately so crash-recovery latency remains visible.
 - **Customers with only future work leave local Scheduler rotation.** A Customer whose remaining Deliveries are all waiting for `next_attempt_at` or claim-lease expiry is not claimable yet. Remove it from local rotation after an empty claim; DB-backed discovery re-adds it when work becomes claimable. This avoids hot Postgres polling during backoff.
 - **Postgres as queue has a throughput ceiling.** Bench scenario 4 measures it; the scale-out path is in ADR-0002.
 

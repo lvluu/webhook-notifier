@@ -126,8 +126,8 @@ type scenario5RunResult struct {
 	BreakerFinalSnapshot    scenario5BreakerSnapshot
 }
 
-// RunScenario5 executes Scenario 5: a dead partner that trips the breaker
-// without degrading healthy Customers.
+// RunScenario5 executes the legacy Scenario 5, folded into
+// partner_resilience.go and kept for reference until retirement.
 func RunScenario5(ctx context.Context) error {
 	observe.RegisterMetrics(prometheus.NewRegistry())
 	db, cleanup, err := openBenchDatabase(ctx)
@@ -518,10 +518,10 @@ func compareScenario5Latencies(control, dead []scenario5CustomerLatency) ([]scen
 		if control[i].CustomerID != dead[i].CustomerID {
 			return nil, false, fmt.Errorf("healthy latency row mismatch at %d: control=%s dead=%s", i, control[i].CustomerID, dead[i].CustomerID)
 		}
-		ratio := 0.0
-		if control[i].ControlP95 > 0 {
-			ratio = dead[i].ControlP95 / control[i].ControlP95
+		if control[i].ControlP95 == 0 {
+			return nil, false, fmt.Errorf("control P95 is zero — cannot compare latencies for %s", control[i].CustomerID)
 		}
+		ratio := dead[i].ControlP95 / control[i].ControlP95
 		if ratio > 1.10 {
 			ok = false
 		}
@@ -559,7 +559,9 @@ func waitForScenario5BreakerTransitions(ctx context.Context, db *sql.DB, custome
 	var openSnap, halfOpenSnap, finalSnap scenario5BreakerSnapshot
 	var haveOpen, haveHalfOpen, haveFinal bool
 
-	pollCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	totalTimeout, pollInterval := scenario5BreakerPollingConfig()
+
+	pollCtx, cancel := context.WithTimeout(ctx, totalTimeout)
 	defer cancel()
 
 	for {
@@ -587,9 +589,43 @@ func waitForScenario5BreakerTransitions(ctx context.Context, db *sql.DB, custome
 		select {
 		case <-pollCtx.Done():
 			return scenario5BreakerSnapshot{}, scenario5BreakerSnapshot{}, scenario5BreakerSnapshot{}, fmt.Errorf("timed out waiting for breaker transitions: open=%v half_open=%v final=%v", haveOpen, haveHalfOpen, haveFinal)
-		case <-time.After(10 * time.Millisecond):
+		case <-time.After(pollInterval):
 		}
 	}
+}
+
+func scenario5BreakerPollingConfig() (time.Duration, time.Duration) {
+	profileName, err := benchProfileNameFromEnv()
+	if err != nil {
+		profileName = benchProfileDev
+	}
+
+	totalTimeout := 5 * time.Minute
+	if profileName != benchProfileStress {
+		totalTimeout = 90 * time.Second
+	}
+
+	cooldown := scenario5BreakerInitialCooldownFromProfile()
+	pollInterval := 500 * time.Millisecond
+	if cooldown > 0 {
+		pollInterval = cooldown / 20
+	}
+	if pollInterval < 250*time.Millisecond {
+		pollInterval = 250 * time.Millisecond
+	}
+	if pollInterval > 2*time.Second {
+		pollInterval = 2 * time.Second
+	}
+
+	return totalTimeout, pollInterval
+}
+
+func scenario5BreakerInitialCooldownFromProfile() time.Duration {
+	raw, _, err := loadBenchProfileConfig("scenario5")
+	if err != nil {
+		return 0
+	}
+	return raw.BreakerInitialCooldown.Duration()
 }
 
 func writeScenario5Report(path, profileName string, customerCount, deliveriesPerCustomer, breakerThreshold int, control, dead scenario5RunResult) error {

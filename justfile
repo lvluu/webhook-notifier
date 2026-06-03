@@ -3,10 +3,12 @@ set dotenv-load := true
 
 database_url := env_var_or_default("DATABASE_URL", "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable")
 migrate      := "go run -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.17.1"
-stack_services := "postgres pgbouncer notifier caddy webhook-receiver"
-observe_services := "prometheus grafana"
-all_profiles := "--profile observe --profile chaos --profile retention"
-compose_cmd := "docker compose -f compose/docker-compose.yml --project-directory ."
+compose      := "docker compose -f compose/docker-compose.yml --project-directory ."
+
+stack_base_services := "postgres pgbouncer notifier caddy webhook-receiver"
+stack_observe_services := "prometheus grafana"
+stack_chaos_services := "chaos-whales chaos-small"
+stack_all_profiles := "--profile observe --profile chaos --profile retention"
 
 # list available recipes
 default:
@@ -14,12 +16,12 @@ default:
 
 # start Postgres
 up:
-    {{compose_cmd}} up -d postgres
-    {{compose_cmd}} exec -T postgres bash -c 'until pg_isready -U notifier -d notifier; do sleep 1; done'
+    {{compose}} up -d postgres
+    {{compose}} exec -T postgres bash -c 'until pg_isready -U notifier -d notifier; do sleep 1; done'
 
 # stop and remove containers + volumes
 down:
-    {{compose_cmd}} down -v
+    {{compose}} down -v
 
 # apply migrations
 migrate:
@@ -69,11 +71,11 @@ tidy:
 
 # build production-like stack images
 stack-build:
-    {{compose_cmd}} build
+    {{compose}} {{stack_all_profiles}} build
 
 # start low-resource dev stack with N notifier replicas behind Caddy
 stack-up n="1":
-    {{compose_cmd}} up -d --scale notifier={{n}} {{stack_services}}
+    {{compose}} up -d --scale notifier={{n}} {{stack_base_services}}
 
 # same as stack-up; Caddy exposes host-accessible ingest on localhost:8080
 stack-up-host n="3":
@@ -81,17 +83,17 @@ stack-up-host n="3":
 
 # start observability stack on top of the low-resource dev stack
 stack-observe:
-    {{compose_cmd}} --profile observe up -d {{observe_services}}
+    {{compose}} --profile observe up -d {{stack_observe_services}}
 
 # start the full local demo stack, including observability, chaos, and retention
 stack-all n="1":
-    {{compose_cmd}} {{all_profiles}} up -d --scale notifier={{n}}
+    {{compose}} {{stack_all_profiles}} up -d --scale notifier={{n}}
 
 # start opt-in chaos load aligned to the smaller affordable mix:
 # 50 whales @ 250/s + 5k small @ 50/s (~300 events/s total)
 stack-chaos n="3":
-    {{compose_cmd}} up -d --scale notifier={{n}} {{stack_services}}
-    {{compose_cmd}} --profile chaos up -d chaos-whales chaos-small
+    {{compose}} up -d --scale notifier={{n}} {{stack_base_services}}
+    {{compose}} --profile chaos up -d {{stack_chaos_services}}
 
 # smoke test Caddy ingest, PgBouncer, workers, and receiver delivery
 stack-smoke:
@@ -105,26 +107,105 @@ stack-smoke:
       -H 'Content-Type: application/json' \
       -d "{\"customer_id\":\"${smoke_id}\",\"event_name\":\"subscriber.created\",\"event_time\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"data\":{\"subscriber_id\":\"${smoke_id}-sub\"}}" >/dev/null
     sleep 3
-    {{compose_cmd}} exec -T postgres psql -U notifier -d notifier -P pager=off \
+    {{compose}} exec -T postgres psql -U notifier -d notifier -P pager=off \
       -c "SELECT status, count(*) FROM deliveries GROUP BY status ORDER BY status; SELECT count(*) AS attempts FROM delivery_attempts;"
     curl -fsS http://localhost:9092/metrics
 
-# show running stack containers
+# show stack containers plus queue/backlog health
 stack-status:
-    {{compose_cmd}} ps
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    {{compose}} ps
+
+    echo
+    echo "Queue health"
+    if ! {{compose}} ps --status running --services | grep -qx postgres; then
+      echo "unavailable: postgres is not running"
+      exit 0
+    fi
+
+    {{compose}} exec -T postgres psql -U notifier -d notifier -P pager=off -P border=2 -c "
+    WITH queue AS (
+      SELECT
+        count(*) FILTER (WHERE status IN ('pending', 'failed_retry')) AS ready,
+        count(*) FILTER (WHERE status = 'succeeded') AS succeeded,
+        count(*) FILTER (WHERE status = 'dead') AS dead,
+        count(*) FILTER (WHERE status IN ('pending', 'failed_retry') AND next_attempt_at <= now()) AS due_now,
+        count(*) FILTER (WHERE status IN ('pending', 'failed_retry') AND next_attempt_at > now()) AS delayed,
+        COALESCE(EXTRACT(EPOCH FROM max(now() - created_at) FILTER (WHERE status IN ('pending', 'failed_retry'))), 0)::bigint AS oldest_ready_seconds,
+        count(*) FILTER (WHERE created_at >= now() - interval '1 minute') AS created_last_minute
+      FROM deliveries
+    ),
+    claims AS (
+      SELECT count(*) AS active_claims
+      FROM delivery_claims
+    ),
+    attempts AS (
+      SELECT count(*) AS attempts_last_minute
+      FROM delivery_attempts
+      WHERE sent_at >= now() - interval '1 minute'
+    ),
+    customers AS (
+      SELECT count(DISTINCT customer_id) AS ready_customers
+      FROM deliveries
+      WHERE status IN ('pending', 'failed_retry')
+    ),
+    health AS (
+      SELECT
+        q.ready,
+        q.due_now,
+        q.delayed,
+        c.active_claims,
+        q.oldest_ready_seconds,
+        q.created_last_minute,
+        a.attempts_last_minute,
+        customers.ready_customers,
+        q.succeeded,
+        q.dead,
+        CASE
+          WHEN q.ready = 0 AND c.active_claims = 0 THEN 'caught up'
+          WHEN q.oldest_ready_seconds >= 300 THEN 'far behind'
+          WHEN q.ready > 0 AND a.attempts_last_minute < q.created_last_minute THEN 'falling behind'
+          WHEN q.ready > 0 THEN 'catching up'
+          ELSE 'active'
+        END AS verdict
+      FROM queue q
+      CROSS JOIN claims c
+      CROSS JOIN attempts a
+      CROSS JOIN customers
+    )
+    SELECT
+      verdict,
+      ready,
+      due_now,
+      delayed,
+      active_claims,
+      ready_customers,
+      oldest_ready_seconds,
+      created_last_minute,
+      attempts_last_minute,
+      succeeded,
+      dead
+    FROM health;
+    "
+
+    echo
+    echo "Receiver traffic"
+    curl -fsS http://localhost:9092/metrics 2>/dev/null | grep '^webhook_requests_received_total' || echo "unavailable: receiver metrics are not reachable on localhost:9092"
 
 # stop and remove the full stack, including volumes
 stack-down:
-    {{compose_cmd}} down -v
+    {{compose}} {{stack_all_profiles}} down -v
 
 # follow stack logs, optionally for one service
 stack-logs service="":
-    {{compose_cmd}} logs --tail=100 -f {{service}}
+    {{compose}} logs --tail=100 -f {{service}}
 
 # rebuild images and recreate notifier replicas after code changes
 stack-rebuild n="3":
-    {{compose_cmd}} build
-    {{compose_cmd}} up -d --scale notifier={{n}} --no-deps --force-recreate notifier
+    {{compose}} build
+    {{compose}} up -d --scale notifier={{n}} --no-deps --force-recreate notifier
 
 # end-to-end smoke (placeholder until #16)
 demo: up migrate
@@ -164,6 +245,18 @@ bench-5:
 # assignment-aligned production-like mixed workload
 bench-6:
     BENCH_PROFILE=stress go run ./cmd/bench scenario6
+
+# horizontal scalability across real notifier replicas
+bench-8:
+    BENCH_PROFILE=stress go run ./cmd/bench scenario8
+
+# partner resilience: transient recovery + 4xx fast-fail + breaker isolation
+bench-partner-resilience:
+    BENCH_PROFILE=stress go run ./cmd/bench partner_resilience
+
+# internal breaker hardening (not assignment-facing)
+bench-7:
+    BENCH_PROFILE=stress go run ./cmd/bench scenario7
 
 # retain terminal deliveries into delivery_history
 delivery-history-retention:

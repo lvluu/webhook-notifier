@@ -9,7 +9,9 @@ import (
 	"sync"
 
 	"github.com/lvluu/webhook-notifier/internal/outbox"
+	"github.com/lvluu/webhook-notifier/internal/scheduler/dbweights"
 	"github.com/lvluu/webhook-notifier/internal/scheduler/roundrobin"
+	"github.com/lvluu/webhook-notifier/internal/scheduler/swrr"
 	"github.com/lvluu/webhook-notifier/internal/worker"
 )
 
@@ -27,7 +29,7 @@ type roundrobinScheduler interface {
 }
 
 type runtimeDeps struct {
-	newScheduler func() roundrobinScheduler
+	newScheduler func(*sql.DB, workerRuntimeConfig) roundrobinScheduler
 	newStore     func(*sql.DB, workerRuntimeConfig) *outbox.Store
 	newLimiter   func(int) *worker.HostLimiter
 	runDiscovery func(context.Context, *outbox.Store, roundrobinScheduler, worker.DiscoveryConfig) error
@@ -37,7 +39,12 @@ const pgNotifyQueueSize = 1024
 
 func defaultRuntimeDeps() runtimeDeps {
 	return runtimeDeps{
-		newScheduler: func() roundrobinScheduler { return roundrobin.New() },
+		newScheduler: func(db *sql.DB, cfg workerRuntimeConfig) roundrobinScheduler {
+			if cfg.EnableWeightedScheduler {
+				return swrr.New(dbweights.New(db))
+			}
+			return roundrobin.New()
+		},
 		newStore: func(db *sql.DB, cfg workerRuntimeConfig) *outbox.Store {
 			opts := []outbox.Option{
 				outbox.WithClaimQueryMode(outbox.ClaimQueryMode(cfg.ClaimQueryMode)),
@@ -89,7 +96,7 @@ func startDeliveryRuntimeWithDeps(
 	done := make(chan struct{})
 	errCh := make(chan error, cfg.WorkerCount+1)
 
-	sched := deps.newScheduler()
+	sched := deps.newScheduler(db, cfg)
 	notify := schedulerNotifier{
 		scheduler: sched,
 	}
@@ -138,6 +145,7 @@ func startDeliveryRuntimeWithDeps(
 				worker.WithHTTPClient(httpClient),
 				worker.WithHostLimiter(limiter),
 				worker.WithMinBatchHint(cfg.MinBatchHint),
+				worker.WithMultiPickCount(cfg.MultiPickCount),
 				worker.WithRequestTimeout(cfg.RequestTimeout),
 				worker.WithEmptyClaimBackoff(cfg.EmptyClaimBackoff),
 				worker.WithLogger(logger.With("component", "worker", "worker_id", workerID)),

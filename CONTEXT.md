@@ -67,6 +67,10 @@ _Avoid_: failure store, error log
 The health state of one Webhook destination. When a Webhook is repeatedly failing, its circuit breaker can pause further Deliveries for that Webhook until a later probe shows the Integration Partner endpoint is healthy again.
 _Avoid_: host breaker, customer breaker, rate limit
 
+**First-Attempt Queue Latency**:
+The canonical benchmark fairness metric. Measured as the time from a Delivery becoming claimable (`deliveries.created_at`) to the first Attempt being sent (`delivery_attempts.sent_at` where `attempt_number = 1`). This isolates scheduling and queue behaviour from Integration Partner response time and retry/backoff effects. Evaluated at P95 for Small Customers under concurrent Whale Customer load.
+_Avoid_: lifecycle latency, end-to-end latency, delivery latency
+
 ## Example dialogue
 
 > Dev: "What if a Customer with 500k Subscribers and three matching Webhooks does a bulk import?"

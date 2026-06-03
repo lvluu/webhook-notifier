@@ -39,7 +39,7 @@ func (w *Worker) classifyDelivery(ctx context.Context, d outbox.Delivery) delive
 			return deliveryOutcome{err: fmt.Errorf("parse delivery URL: %w", parseErr)}
 		}
 
-		release, acquireErr := w.HostLimiter.Acquire(ctx, u.Hostname())
+		release, acquireErr := w.HostLimiter.TryAcquire(u.Hostname())
 		if acquireErr != nil {
 			if ctx.Err() != nil {
 				return deliveryOutcome{err: ctx.Err()}

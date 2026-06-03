@@ -5,8 +5,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/lvluu/webhook-notifier/internal/signer"
@@ -76,6 +79,9 @@ func (w *Worker) Send(ctx context.Context, d Delivery) (*http.Response, error) {
 	req.Header.Set("X-Event-Id", d.EventID)
 	req.Header.Set("X-Delivery-Id", d.DeliveryID)
 	req.Header.Set("X-Event-Type", d.EventType)
+	if replicaID := strings.TrimSpace(os.Getenv("NOTIFIER_REPLICA_ID")); replicaID != "" {
+		req.Header.Set("X-Notifier-Replica", replicaID)
+	}
 	if d.AttemptNumber > 0 {
 		req.Header.Set("X-Attempt-Number", fmt.Sprintf("%d", d.AttemptNumber))
 	}
@@ -84,6 +90,8 @@ func (w *Worker) Send(ctx context.Context, d Delivery) (*http.Response, error) {
 		req.Header.Set("X-Signature-Timestamp", strconv.FormatInt(ts.Unix(), 10))
 		req.Header.Set("X-Signature-256", signer.Sign([]byte(d.Secret), d.Body, ts))
 	}
+
+	rewriteScenario8ReceiverURL(req)
 
 	resp, err := w.HTTP.Do(req)
 	if err != nil {
@@ -100,6 +108,30 @@ func (w *Worker) Send(ctx context.Context, d Delivery) (*http.Response, error) {
 	}
 
 	return resp, nil
+}
+
+func rewriteScenario8ReceiverURL(req *http.Request) {
+	addr := strings.TrimSpace(os.Getenv("SCENARIO8_RECEIVER_ADDR"))
+	if addr == "" {
+		return
+	}
+	if req.URL == nil || req.URL.Hostname() != "scenario8-receiver.local" {
+		return
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+		port = ""
+	}
+	if host == "" {
+		host = addr
+	}
+	if port != "" {
+		req.URL.Host = net.JoinHostPort(host, port)
+	} else {
+		req.URL.Host = host
+	}
+	req.Host = "scenario8-receiver.local"
 }
 
 type cancelOnCloseReadCloser struct {

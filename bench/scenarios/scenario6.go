@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lvluu/webhook-notifier/bench/receiver"
@@ -25,6 +26,7 @@ const (
 	scenario6WhaleCustomerID = "scenario6-whale"
 	scenario6SmallPrefix     = "scenario6-small-"
 	scenario6ReportPath      = "bench/results/scenario-6.md"
+	scenario6SeedBatchRows   = 1000
 )
 
 type scenario6Profile struct {
@@ -51,6 +53,9 @@ type scenario6RunResult struct {
 	WhaleP95Ms    float64
 	DeadRatePct   float64
 	RetryRatePct  float64
+	AvgClaimBatch float64
+	ClaimCalls    int64
+	EmptyClaims   int64
 	Total         int
 	Duplicates    int
 	ReliabilityOK bool
@@ -139,9 +144,11 @@ func RunScenario6(ctx context.Context) error {
 
 func runScenario6Once(ctx context.Context, db *sql.DB, profile scenario6Profile, workers int) (scenario6RunResult, error) {
 	// Keep DB pool proportional to worker concurrency during this benchmark so
-	// higher worker counts are not artificially bottlenecked by a tiny client pool.
-	db.SetMaxOpenConns(max(workers*4, 16))
-	db.SetMaxIdleConns(max(workers*4, 16))
+	// higher worker counts are not artificially bottlenecked by a tiny client
+	// pool, while staying below the default test Postgres max_connections.
+	maxConns := min(max(workers*4, 16), 80)
+	db.SetMaxOpenConns(maxConns)
+	db.SetMaxIdleConns(maxConns)
 
 	if err := resetBenchData(ctx, db); err != nil {
 		return scenario6RunResult{}, fmt.Errorf("reset bench data: %w", err)
@@ -163,9 +170,9 @@ func runScenario6Once(ctx context.Context, db *sql.DB, profile scenario6Profile,
 
 	sched := roundrobin.New()
 	ingestStore := ingest.New(db, registry.New(db), sched)
-	outboxStore := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
+	outboxStore := newScenario6InstrumentedStore(outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
 		FailureThreshold: profile.BreakerFailureThreshold,
-	}))
+	})))
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()
@@ -180,6 +187,7 @@ func runScenario6Once(ctx context.Context, db *sql.DB, profile scenario6Profile,
 				worker.WithLogger(workerLog),
 				worker.WithRequestTimeout(profile.RequestTimeout),
 				worker.WithMinBatchHint(profile.MinBatchHint),
+				worker.WithMultiPickCount(32),
 				worker.WithRetryPolicy(retry.New(retry.Config{
 					MaxAttempts: profile.RetryMaxAttempts,
 					BaseDelay:   profile.RetryBaseDelay,
@@ -238,6 +246,7 @@ func runScenario6Once(ctx context.Context, db *sql.DB, profile scenario6Profile,
 	}
 	duplicates := countDuplicateAttemptTuples(rs.Recorded())
 	throughput := float64(total) / duration.Seconds()
+	claimStats := outboxStore.ClaimStats()
 
 	return scenario6RunResult{
 		Workers:       workers,
@@ -247,11 +256,74 @@ func runScenario6Once(ctx context.Context, db *sql.DB, profile scenario6Profile,
 		WhaleP95Ms:    whaleP95,
 		DeadRatePct:   deadRate,
 		RetryRatePct:  retryRate,
+		AvgClaimBatch: claimStats.AvgBatch,
+		ClaimCalls:    claimStats.Calls,
+		EmptyClaims:   claimStats.Empty,
 		Total:         total,
 		Duplicates:    duplicates,
 		ReliabilityOK: duplicates == 0 && deadRate <= 1.0,
 		FairnessOK:    smallP95 <= whaleP95*profile.FairnessRatioLimit,
 	}, nil
+}
+
+type scenario6InstrumentedStore struct {
+	*outbox.Store
+	claimCalls  atomic.Int64
+	claimRows   atomic.Int64
+	emptyClaims atomic.Int64
+}
+
+type scenario6ClaimStats struct {
+	Calls    int64
+	Empty    int64
+	AvgBatch float64
+}
+
+func newScenario6InstrumentedStore(store *outbox.Store) *scenario6InstrumentedStore {
+	return &scenario6InstrumentedStore{Store: store}
+}
+
+func (s *scenario6InstrumentedStore) ClaimNextN(ctx context.Context, customerID string, limit int) ([]outbox.Delivery, error) {
+	deliveries, err := s.Store.ClaimNextN(ctx, customerID, limit)
+	s.claimCalls.Add(1)
+	if err != nil {
+		return nil, err
+	}
+	s.claimRows.Add(int64(len(deliveries)))
+	if len(deliveries) == 0 {
+		s.emptyClaims.Add(1)
+	}
+	return deliveries, nil
+}
+
+func (s *scenario6InstrumentedStore) ClaimNextBatch(ctx context.Context, customerIDs []string, limit int) ([]outbox.Delivery, error) {
+	deliveries, err := s.Store.ClaimNextBatch(ctx, customerIDs, limit)
+	s.claimCalls.Add(1)
+	if err != nil {
+		return nil, err
+	}
+	s.claimRows.Add(int64(len(deliveries)))
+	if len(deliveries) == 0 {
+		s.emptyClaims.Add(1)
+	}
+	return deliveries, nil
+}
+
+func (s *scenario6InstrumentedStore) HasClaimableWorkBatch(ctx context.Context, customerIDs []string) (map[string]bool, error) {
+	return s.Store.HasClaimableWorkBatch(ctx, customerIDs)
+}
+
+func (s *scenario6InstrumentedStore) ClaimStats() scenario6ClaimStats {
+	calls := s.claimCalls.Load()
+	avgBatch := 0.0
+	if calls > 0 {
+		avgBatch = float64(s.claimRows.Load()) / float64(calls)
+	}
+	return scenario6ClaimStats{
+		Calls:    calls,
+		Empty:    s.emptyClaims.Load(),
+		AvgBatch: avgBatch,
+	}
 }
 
 func submitScenario6Events(ctx context.Context, store *ingest.Store, profile scenario6Profile) error {
@@ -289,7 +361,7 @@ func submitScenario6Events(ctx context.Context, store *ingest.Store, profile sce
 	go submit(scenario6WhaleCustomerID, profile.WhaleDeliveries)
 	for i := 0; i < profile.SmallCount; i++ {
 		wg.Add(1)
-		go submit(fmt.Sprintf("%s%03d", scenario6SmallPrefix, i), profile.SmallDeliveries)
+		go submit(scenario6SmallCustomerID(i), profile.SmallDeliveries)
 	}
 	wg.Wait()
 	select {
@@ -304,7 +376,7 @@ type scenario6Notifier interface {
 	Notify(customerID string)
 }
 
-func waitScenario6Drain(ctx context.Context, db *sql.DB, store *outbox.Store, sched scenario6Notifier) error {
+func waitScenario6Drain(ctx context.Context, db *sql.DB, store *scenario6InstrumentedStore, sched scenario6Notifier) error {
 	pollCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	for {
@@ -332,14 +404,51 @@ func waitScenario6Drain(ctx context.Context, db *sql.DB, store *outbox.Store, sc
 }
 
 func seedScenario6Customers(ctx context.Context, db *sql.DB, smallCount int) error {
-	var sb strings.Builder
-	sb.WriteString("INSERT INTO customers (id, class) VALUES ($1, 1)")
-	args := []any{scenario6WhaleCustomerID}
-	argPos := 2
+	customerIDs := make([]string, 0, smallCount+1)
+	customerIDs = append(customerIDs, scenario6WhaleCustomerID)
 	for i := 0; i < smallCount; i++ {
-		_, _ = fmt.Fprintf(&sb, ", ($%d, 1)", argPos)
-		args = append(args, fmt.Sprintf("%s%03d", scenario6SmallPrefix, i))
-		argPos++
+		customerIDs = append(customerIDs, scenario6SmallCustomerID(i))
+	}
+
+	for start := 0; start < len(customerIDs); start += scenario6SeedBatchRows {
+		end := min(start+scenario6SeedBatchRows, len(customerIDs))
+		if err := seedScenario6CustomerBatch(ctx, db, customerIDs[start:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func seedScenario6Webhooks(ctx context.Context, db *sql.DB, baseURL string, smallCount int) error {
+	customerIDs := make([]string, 0, smallCount+1)
+	customerIDs = append(customerIDs, scenario6WhaleCustomerID)
+	for i := 0; i < smallCount; i++ {
+		customerIDs = append(customerIDs, scenario6SmallCustomerID(i))
+	}
+
+	for start := 0; start < len(customerIDs); start += scenario6SeedBatchRows {
+		end := min(start+scenario6SeedBatchRows, len(customerIDs))
+		if err := seedScenario6WebhookBatch(ctx, db, baseURL, customerIDs[start:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func scenario6SmallCustomerID(index int) string {
+	return fmt.Sprintf("%s%05d", scenario6SmallPrefix, index)
+}
+
+func seedScenario6CustomerBatch(ctx context.Context, db *sql.DB, customerIDs []string) error {
+	var sb strings.Builder
+	sb.WriteString("INSERT INTO customers (id, class) VALUES ")
+	args := make([]any, 0, len(customerIDs))
+	for i, customerID := range customerIDs {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		_, _ = fmt.Fprintf(&sb, "($%d, 1)", i+1)
+		args = append(args, customerID)
 	}
 	sb.WriteString(" ON CONFLICT (id) DO NOTHING")
 	if _, err := db.ExecContext(ctx, sb.String(), args...); err != nil {
@@ -348,11 +457,7 @@ func seedScenario6Customers(ctx context.Context, db *sql.DB, smallCount int) err
 	return nil
 }
 
-func seedScenario6Webhooks(ctx context.Context, db *sql.DB, baseURL string, smallCount int) error {
-	customerIDs := []string{scenario6WhaleCustomerID}
-	for i := 0; i < smallCount; i++ {
-		customerIDs = append(customerIDs, fmt.Sprintf("%s%03d", scenario6SmallPrefix, i))
-	}
+func seedScenario6WebhookBatch(ctx context.Context, db *sql.DB, baseURL string, customerIDs []string) error {
 	paths := []string{"/hooks/fast", "/hooks/slow", "/hooks/flaky"}
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active) VALUES ")
@@ -427,15 +532,18 @@ Fairness metric note:
 
 ## Results
 
-| Workers | Total Deliveries | Duration | Throughput (Deliveries/sec) | Retry Rate | Dead Rate | Duplicate (delivery_id, attempt_number) tuples | Small P95 First-Attempt Latency (ms) | Whale P95 First-Attempt Latency (ms) | Reliability | Fairness |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| Workers | Total Deliveries | Duration | Throughput (Deliveries/sec) | Avg Claim Batch | Claim Calls | Empty Claims | Retry Rate | Dead Rate | Duplicate (delivery_id, attempt_number) tuples | Small P95 First-Attempt Latency (ms) | Whale P95 First-Attempt Latency (ms) | Reliability | Fairness |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
 `, profile.Name, profile.SmallCount, profile.WorkerCounts)
 	for _, r := range results {
-		_, _ = fmt.Fprintf(f, "| %d | %d | %s | %.2f | %.2f%% | %.2f%% | %d | %.2f | %.2f | %s | %s |\n",
+		_, _ = fmt.Fprintf(f, "| %d | %d | %s | %.2f | %.2f | %d | %d | %.2f%% | %.2f%% | %d | %.2f | %.2f | %s | %s |\n",
 			r.Workers,
 			r.Total,
 			r.Duration.Round(time.Millisecond),
 			r.Throughput,
+			r.AvgClaimBatch,
+			r.ClaimCalls,
+			r.EmptyClaims,
 			r.RetryRatePct,
 			r.DeadRatePct,
 			r.Duplicates,

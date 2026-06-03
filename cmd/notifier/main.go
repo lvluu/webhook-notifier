@@ -26,8 +26,10 @@ func main() {
 	addr := flag.String("addr", ":8080", "business HTTP server address")
 	metricsAddr := flag.String("metrics-addr", ":9090", "metrics HTTP server address")
 	workerCount := flag.Int("workers", 64, "number of delivery workers")
+	replicaID := flag.String("replica-id", "", "optional replica identity for diagnostics header")
 	minBatch := flag.Int("min-batch", 32, "minimum claim batch size per customer")
-	concurrency := flag.Int("concurrency", 16, "Host Concurrency Cap")
+	multiPick := flag.Int("multi-pick", 1, "customers to batch per claim query (1 = single-customer ClaimNextN, >1 = ClaimNextBatch)")
+	hostCap := flag.Int("host-cap", 20, "maximum concurrent in-flight requests per Integration Partner hostname")
 	discoveryInterval := flag.Duration("discovery-interval", time.Second, "claimable customer discovery interval")
 	emptyClaimBackoff := flag.Duration("empty-claim-backoff", 20*time.Millisecond, "pause after an empty claim cycle")
 	backlogSampleInterval := flag.Duration("pending-sample-interval", 5*time.Second, "sample interval for pending-delivery backlog gauge (0 disables)")
@@ -45,7 +47,7 @@ func main() {
 		"metrics_addr", *metricsAddr,
 		"workers", *workerCount,
 		"min_batch", *minBatch,
-		"concurrency", *concurrency,
+		"host_cap", *hostCap,
 		"discovery_interval", *discoveryInterval,
 		"empty_claim_backoff", *emptyClaimBackoff,
 		"pending_sample_interval", *backlogSampleInterval,
@@ -68,7 +70,6 @@ func main() {
 		logger.Error("failed to parse database config", "error", err)
 		os.Exit(1)
 	}
-	connConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	dbConn := stdlib.OpenDB(*connConfig)
 	if *maxConns > 0 {
 		dbConn.SetMaxOpenConns(*maxConns)
@@ -95,10 +96,18 @@ func main() {
 
 	runCtx, cancel := context.WithCancel(context.Background())
 
+	if *replicaID != "" {
+		if err := os.Setenv("NOTIFIER_REPLICA_ID", *replicaID); err != nil {
+			logger.Error("failed to set notifier replica id env", "error", err)
+			os.Exit(1)
+		}
+	}
+
 	runtimeCfg := loadWorkerRuntimeConfig()
 	runtimeCfg.WorkerCount = *workerCount
 	runtimeCfg.MinBatchHint = *minBatch
-	runtimeCfg.HostConcurrencyCap = *concurrency
+	runtimeCfg.MultiPickCount = *multiPick
+	runtimeCfg.HostConcurrencyCap = *hostCap
 	runtimeCfg.EmptyClaimBackoff = *emptyClaimBackoff
 	runtimeCfg.BacklogSampleInterval = *backlogSampleInterval
 	runtimeCfg.EnablePgNotifyWakeups = *enablePgNotifyWakeups

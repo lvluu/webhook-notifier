@@ -3,6 +3,7 @@ package roundrobin_test
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"testing"
 
@@ -299,4 +300,21 @@ func TestRoundRobin_ConcurrentNotifyAndPick(t *testing.T) {
 	}
 
 	<-done
+}
+
+// BenchmarkNotifyAndRemoveLargeSet provides a direct before/after signal for #75:
+// the sparse-Customer workload exercises Notify and Remove on thousands of
+// Customers per second. With the linked-list+map implementation each operation
+// is O(1); the naive slice-based version was O(n) per operation.
+func BenchmarkNotifyAndRemoveLargeSet(b *testing.B) {
+	for b.Loop() {
+		s := roundrobin.New()
+		const n = 10000
+		for i := 0; i < n; i++ {
+			s.Notify(fmt.Sprintf("customer-%05d", i))
+		}
+		for i := 0; i < n; i++ {
+			s.Remove(fmt.Sprintf("customer-%05d", i))
+		}
+	}
 }

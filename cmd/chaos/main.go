@@ -45,22 +45,59 @@ func main() {
 		customerIDs[i] = fmt.Sprintf("%s-%04d", *customerBase, i+1)
 	}
 
-	logger.Info("registering customers", "count", *customerCount, "receiver", *receiverURL, "class", *customerClass)
-	for _, cid := range customerIDs {
-		body, _ := json.Marshal(map[string]interface{}{
-			"id":    cid,
-			"class": *customerClass,
-			"url":   *receiverURL + "/hooks/" + cid,
-		})
-		resp, err := client.Post(*notifierURL+"/api/customers", "application/json", bytes.NewReader(body))
-		if err != nil {
-			logger.Error("register customer failed", "customer", cid, "error", err)
-			continue
-		}
+	logger.Info("seeding customers", "count", *customerCount, "receiver", *receiverURL)
+	body, err := json.Marshal(map[string]interface{}{
+		"customer_base": *customerBase,
+		"count":         *customerCount,
+		"class":         *customerClass,
+		"receiver_url":  *receiverURL,
+	})
+	if err != nil {
+		logger.Error("marshal setup-customers request", "error", err)
+		os.Exit(1)
+	}
+
+	setupCtx, setupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	req, err := http.NewRequestWithContext(
+		setupCtx,
+		http.MethodPost,
+		*notifierURL+"/setup-customers",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		setupCancel()
+		logger.Error("build setup-customers request", "error", err)
+		os.Exit(1)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	setupCancel()
+	if err != nil {
+		logger.Error("setup-customers failed", "error", err)
+		os.Exit(1)
+	}
+	closeSetupResponse := func() {
 		if err := resp.Body.Close(); err != nil {
-			logger.Warn("close register response body", "customer", cid, "error", err)
+			logger.Warn("close setup-customers response body", "error", err)
 		}
 	}
+
+	if resp.StatusCode != http.StatusCreated {
+		logger.Error("setup-customers rejected", "status", resp.StatusCode)
+		closeSetupResponse()
+		os.Exit(1)
+	}
+	var result struct {
+		Created int `json:"created"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		logger.Error("decode setup-customers response", "error", err)
+		closeSetupResponse()
+		os.Exit(1)
+	}
+	closeSetupResponse()
+	logger.Info("customers seeded", "created", result.Created)
 
 	logger.Info("customers registered, starting event emission",
 		"rate", *rate, "burst", *burst, "duration", duration, "class", *customerClass,

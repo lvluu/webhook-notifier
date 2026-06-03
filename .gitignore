@@ -21,3 +21,5 @@ coverage.*
 # Env
 .env
 .env.local
+chaos
+notifier

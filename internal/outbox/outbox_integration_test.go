@@ -217,6 +217,164 @@ func TestClaimNextConcurrentWorkersDoNotDoubleClaim(t *testing.T) {
 	}
 }
 
+func TestClaimNextBatchDeduplicatesInputCustomers(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	deliveryID := submitOneDelivery(t, ctx, db, "cus_duplicate_batch")
+	store := outbox.New(db)
+
+	deliveries, err := store.ClaimNextBatch(ctx, []string{
+		"cus_duplicate_batch",
+		"cus_duplicate_batch",
+		"cus_duplicate_batch",
+	}, 4)
+	if err != nil {
+		t.Fatalf("ClaimNextBatch: %v", err)
+	}
+	if len(deliveries) != 1 {
+		t.Fatalf("claimed deliveries: got %d, want 1", len(deliveries))
+	}
+	if deliveries[0].ID != deliveryID {
+		t.Fatalf("claimed delivery ID: got %s, want %s", deliveries[0].ID, deliveryID)
+	}
+
+	var claimCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM delivery_claims WHERE delivery_id = $1`, deliveryID).Scan(&claimCount); err != nil {
+		t.Fatalf("count delivery claims: %v", err)
+	}
+	if claimCount != 1 {
+		t.Fatalf("delivery claim count: got %d, want 1", claimCount)
+	}
+}
+
+// TestClaimNextBatchPerCustomerLimitPreventsWhaleMonopoly proves that a single
+// high-volume Customer cannot fill an entire multi-customer claim batch and
+// starve a co-claimed sparse Customer. The whale's Deliveries are submitted
+// first, so they sort older than the small Customer's single Delivery on the
+// (next_attempt_at, created_at, id) claim ordering. Without a per-Customer cap
+// on the candidate pool, the whale's oldest rows would consume the whole batch
+// limit at the final ORDER BY ... LIMIT cut and the small Customer would claim
+// nothing. With the per-Customer cap the whale contributes at most its fair
+// share, leaving room for the small Customer in the same batch.
+func TestClaimNextBatchPerCustomerLimitPreventsWhaleMonopoly(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	const whaleDeliveries = 8
+	const batchLimit = 4
+
+	whaleFirst := submitOneDelivery(t, ctx, db, "cus_whale")
+	for range whaleDeliveries - 1 {
+		if _, err := appendDeliveryForExistingWebhook(t, ctx, db, whaleFirst); err != nil {
+			t.Fatalf("append whale delivery: %v", err)
+		}
+	}
+
+	smallID := submitOneDelivery(t, ctx, db, "cus_small")
+
+	store := outbox.New(db)
+	deliveries, err := store.ClaimNextBatch(ctx, []string{"cus_whale", "cus_small"}, batchLimit)
+	if err != nil {
+		t.Fatalf("ClaimNextBatch: %v", err)
+	}
+
+	whaleClaimed := 0
+	smallClaimed := false
+	for _, d := range deliveries {
+		switch d.CustomerID {
+		case "cus_whale":
+			whaleClaimed++
+		case "cus_small":
+			smallClaimed = true
+			if d.ID != smallID {
+				t.Fatalf("small delivery ID: got %s, want %s", d.ID, smallID)
+			}
+		default:
+			t.Fatalf("unexpected customer in batch: %s", d.CustomerID)
+		}
+	}
+
+	if !smallClaimed {
+		t.Fatalf("small Customer was starved: claimed %d deliveries, all from whale; want the small Customer's delivery included", len(deliveries))
+	}
+
+	// Fair share with 2 input customers and a batch limit of 4 is 2 per customer.
+	if maxWhalePerBatch := batchLimit / 2; whaleClaimed > maxWhalePerBatch {
+		t.Fatalf("whale claimed %d in one batch; per-customer cap should hold it to %d", whaleClaimed, maxWhalePerBatch)
+	}
+}
+
+// TestClaimNextBatchAndRequeueConcurrentNoDeadlock stresses the claim and
+// requeue paths together to guard against lock-order inversion. Claiming locks
+// deliveries (FOR UPDATE SKIP LOCKED) before inserting delivery_claims; requeue
+// goes through withInFlightDelivery, which must acquire the same
+// deliveries-then-claims order. With the breaker enabled the claim path also
+// touches webhooks. If any of these acquire row locks in a conflicting order,
+// Postgres aborts a transaction with SQLSTATE 40P01 (deadlock detected). The
+// test fails on any deadlock error.
+func TestClaimNextBatchAndRequeueConcurrentNoDeadlock(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	const customerCount = 4
+	const deliveriesPerCustomer = 6
+
+	customerIDs := make([]string, 0, customerCount)
+	for c := range customerCount {
+		customerID := fmt.Sprintf("cus_deadlock_%d", c)
+		customerIDs = append(customerIDs, customerID)
+		first := submitOneDelivery(t, ctx, db, customerID)
+		for range deliveriesPerCustomer - 1 {
+			if _, err := appendDeliveryForExistingWebhook(t, ctx, db, first); err != nil {
+				t.Fatalf("append delivery for %s: %v", customerID, err)
+			}
+		}
+	}
+
+	store := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
+		FailureThreshold: 3,
+		InitialCooldown:  time.Second,
+		MaxCooldown:      time.Second,
+	}), outbox.WithClaimLease(50*time.Millisecond))
+
+	deadline := time.Now().Add(2 * time.Second)
+	var deadlocks atomic.Int64
+	var wg sync.WaitGroup
+
+	assertNoDeadlock := func(label string, err error) {
+		if err == nil {
+			return
+		}
+		if strings.Contains(err.Error(), "40P01") || strings.Contains(err.Error(), "deadlock detected") {
+			deadlocks.Add(1)
+			t.Errorf("%s: deadlock: %v", label, err)
+		}
+	}
+
+	// Claimers race to claim the whole set repeatedly.
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for time.Now().Before(deadline) {
+				deliveries, err := store.ClaimNextBatch(ctx, customerIDs, customerCount*deliveriesPerCustomer)
+				assertNoDeadlock("claim", err)
+				// Requeue everything claimed so the rows churn back into the pool.
+				for _, d := range deliveries {
+					assertNoDeadlock("requeue", store.Requeue(ctx, d.ID, 0))
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	if n := deadlocks.Load(); n > 0 {
+		t.Fatalf("observed %d deadlock(s) across concurrent claim/requeue", n)
+	}
+}
+
 func TestClaimNextRecoversStaleInFlightDelivery(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)
@@ -481,6 +639,64 @@ func TestProcessRetryableFailuresOpenWebhookBreaker(t *testing.T) {
 	assertWebhookBreaker(t, ctx, db, submitted.DeliveryIDs[0], "open", 2)
 }
 
+func TestBatchRetryOpensBreakerWithMultipleDeliveries(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	deliveryID := submitOneDelivery(t, ctx, db, "cus_batch_breaker")
+	delivery2, err := appendDeliveryForExistingWebhook(t, ctx, db, deliveryID)
+	if err != nil {
+		t.Fatalf("append delivery 2: %v", err)
+	}
+	delivery3, err := appendDeliveryForExistingWebhook(t, ctx, db, deliveryID)
+	if err != nil {
+		t.Fatalf("append delivery 3: %v", err)
+	}
+	delivery4, err := appendDeliveryForExistingWebhook(t, ctx, db, deliveryID)
+	if err != nil {
+		t.Fatalf("append delivery 4: %v", err)
+	}
+
+	store := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
+		FailureThreshold: 3,
+		InitialCooldown:  time.Hour,
+		MaxCooldown:      time.Hour,
+	}))
+
+	_ = claimDelivery(t, ctx, store, "cus_batch_breaker", deliveryID)
+	_ = claimDelivery(t, ctx, store, "cus_batch_breaker", delivery2)
+	_ = claimDelivery(t, ctx, store, "cus_batch_breaker", delivery3)
+	_ = claimDelivery(t, ctx, store, "cus_batch_breaker", delivery4)
+
+	err = store.MarkRetryBatch(ctx, []outbox.BatchMarkItem{
+		{DeliveryID: deliveryID, StatusCode: 500, ErrorClass: retry.ReasonRetryable5xx, Delay: time.Millisecond},
+		{DeliveryID: delivery2, StatusCode: 500, ErrorClass: retry.ReasonRetryable5xx, Delay: time.Millisecond},
+		{DeliveryID: delivery3, StatusCode: 500, ErrorClass: retry.ReasonRetryable5xx, Delay: time.Millisecond},
+		{DeliveryID: delivery4, StatusCode: 500, ErrorClass: retry.ReasonRetryable5xx, Delay: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("MarkRetryBatch: %v", err)
+	}
+
+	assertWebhookBreaker(t, ctx, db, deliveryID, "open", 4)
+}
+
+func claimDelivery(t *testing.T, ctx context.Context, store *outbox.Store, customerID, deliveryID string) outbox.Delivery {
+	t.Helper()
+
+	claimed, ok, err := store.ClaimNext(ctx, customerID)
+	if err != nil {
+		t.Fatalf("ClaimNext: %v", err)
+	}
+	if !ok {
+		t.Fatalf("ClaimNext: no delivery available")
+	}
+	if claimed.ID != deliveryID {
+		t.Fatalf("ClaimNext: got delivery %s, want %s", claimed.ID, deliveryID)
+	}
+	return claimed
+}
+
 func TestProcessRetryableFailuresCanDisableWebhookBreaker(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)
@@ -705,13 +921,28 @@ func TestProcessRetryableFailureUsesPreviousRetryDelay(t *testing.T) {
 	if second.PreviousDelay <= 0 {
 		t.Fatalf("second previous delay: got %s, want positive", second.PreviousDelay)
 	}
+	if !durationNear(second.PreviousDelay, firstDelay, time.Millisecond) {
+		t.Fatalf("second previous delay: got %s, want previous scheduled delay %s", second.PreviousDelay, firstDelay)
+	}
+	expectedSecondDelay, terminal, reason := w.RetryPolicy.NextWithKey(
+		second.AttemptNumber,
+		second.PreviousDelay,
+		&http.Response{StatusCode: http.StatusInternalServerError},
+		nil,
+		second.ID,
+		time.Since(second.CreatedAt),
+	)
+	if terminal {
+		t.Fatalf("second retry policy terminal: got true with reason %s, want retry", reason)
+	}
 	if result := w.Process(ctx, store, second); result.Err != nil {
 		t.Fatalf("second Process: %v", result.Err)
 	}
 
 	secondDelay := scheduledRetryDelay(t, ctx, db, submitted.DeliveryIDs[0])
-	if secondDelay <= firstDelay {
-		t.Fatalf("second retry delay: got %s, want greater than first delay %s", secondDelay, firstDelay)
+	expectedSecondDelay = time.Duration(expectedSecondDelay.Milliseconds()) * time.Millisecond
+	if !durationNear(secondDelay, expectedSecondDelay, time.Millisecond) {
+		t.Fatalf("second retry delay: got %s, want policy delay %s", secondDelay, expectedSecondDelay)
 	}
 }
 
@@ -947,6 +1178,69 @@ func TestArchiveTerminalDeliveriesMovesOldTerminalRowsToHistory(t *testing.T) {
 
 	assertDeliveryHistory(t, ctx, db, oldSucceededID, "succeeded", sql.NullString{}, 1)
 	assertDeliveryHistory(t, ctx, db, oldDeadID, "dead", sql.NullString{String: retry.ReasonTerminal4xx, Valid: true}, 1)
+}
+
+func TestArchiveTerminalDeliveriesOrdersByUpdatedAt(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	store := outbox.New(db)
+
+	var oldIDs []string
+	for i := 0; i < 3; i++ {
+		customerID := fmt.Sprintf("cus_ord_old_%d", i)
+		deliveryID := submitOneDelivery(t, ctx, db, customerID)
+		claimed, ok, err := store.ClaimNext(ctx, customerID)
+		if err != nil {
+			t.Fatalf("ClaimNext old %d: %v", i, err)
+		}
+		if !ok {
+			t.Fatalf("ClaimNext old %d: no delivery", i)
+		}
+		if i < 2 {
+			if err := store.MarkSucceeded(ctx, claimed.ID, http.StatusOK, 10*time.Millisecond); err != nil {
+				t.Fatalf("MarkSucceeded old %d: %v", i, err)
+			}
+		} else {
+			if err := store.MarkDead(ctx, claimed.ID, http.StatusNotFound, retry.ReasonTerminal4xx, retry.ReasonTerminal4xx, 10*time.Millisecond); err != nil {
+				t.Fatalf("MarkDead old %d: %v", i, err)
+			}
+		}
+		oldIDs = append(oldIDs, deliveryID)
+		retention.AgeTerminalDelivery(t, ctx, db, deliveryID, 48*time.Hour)
+	}
+
+	var recentIDs []string
+	for i := 0; i < 2; i++ {
+		customerID := fmt.Sprintf("cus_ord_recent_%d", i)
+		deliveryID := submitOneDelivery(t, ctx, db, customerID)
+		claimed, ok, err := store.ClaimNext(ctx, customerID)
+		if err != nil {
+			t.Fatalf("ClaimNext recent %d: %v", i, err)
+		}
+		if !ok {
+			t.Fatalf("ClaimNext recent %d: no delivery", i)
+		}
+		if err := store.MarkSucceeded(ctx, claimed.ID, http.StatusOK, 10*time.Millisecond); err != nil {
+			t.Fatalf("MarkSucceeded recent %d: %v", i, err)
+		}
+		recentIDs = append(recentIDs, deliveryID)
+		retention.AgeTerminalDelivery(t, ctx, db, deliveryID, 1*time.Hour)
+	}
+
+	archived, err := store.ArchiveTerminalDeliveries(ctx, 24*time.Hour, 3)
+	if err != nil {
+		t.Fatalf("ArchiveTerminalDeliveries: %v", err)
+	}
+	if archived != 3 {
+		t.Fatalf("archived count: got %d, want 3 (oldest 3 eligible rows)", archived)
+	}
+
+	for _, id := range oldIDs {
+		assertDeliveryMissing(t, ctx, db, id)
+	}
+	for _, id := range recentIDs {
+		assertDeliveryStatus(t, ctx, db, id, string(outbox.StatusSucceeded))
+	}
 }
 
 func TestBatchMarkErrorsWhenDeliveryIsNotInFlight(t *testing.T) {
@@ -1658,6 +1952,14 @@ func scheduledRetryDelay(t *testing.T, ctx context.Context, db *sql.DB, delivery
 	return time.Duration(delaySeconds * float64(time.Second))
 }
 
+func durationNear(got, want, tolerance time.Duration) bool {
+	delta := got - want
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta <= tolerance
+}
+
 func waitForClaim(t *testing.T, ctx context.Context, store *outbox.Store, customerID string, timeout time.Duration) outbox.Delivery {
 	t.Helper()
 
@@ -1697,4 +1999,120 @@ func countSucceededForCustomer(t *testing.T, ctx context.Context, db *sql.DB, cu
 		t.Fatalf("count succeeded for customer %s: %v", customerID, err)
 	}
 	return got
+}
+
+func TestPurgeOldDeadLettersRemovesRowsOlderThanMaxAge(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	store := outbox.New(db)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	oldDeadID := submitOneDeliveryToURL(t, ctx, db, "cus_purge_dl_old", srv.URL)
+	claimedOld, ok, err := store.ClaimNext(ctx, "cus_purge_dl_old")
+	if err != nil {
+		t.Fatalf("ClaimNext old dead: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext old dead: got no delivery, want one")
+	}
+	if err := store.MarkDead(ctx, claimedOld.ID, http.StatusNotFound, retry.ReasonTerminal4xx, retry.ReasonTerminal4xx, 10*time.Millisecond); err != nil {
+		t.Fatalf("MarkDead old: %v", err)
+	}
+
+	recentDeadID := submitOneDeliveryToURL(t, ctx, db, "cus_purge_dl_recent", srv.URL)
+	claimedRecent, ok, err := store.ClaimNext(ctx, "cus_purge_dl_recent")
+	if err != nil {
+		t.Fatalf("ClaimNext recent dead: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext recent dead: got no delivery, want one")
+	}
+	if err := store.MarkDead(ctx, claimedRecent.ID, http.StatusNotFound, retry.ReasonTerminal4xx, retry.ReasonTerminal4xx, 10*time.Millisecond); err != nil {
+		t.Fatalf("MarkDead recent: %v", err)
+	}
+
+	retention.AgeTerminalDelivery(t, ctx, db, oldDeadID, 48*time.Hour)
+
+	purged, err := store.PurgeOldDeadLetters(ctx, 24*time.Hour, 10)
+	if err != nil {
+		t.Fatalf("PurgeOldDeadLetters: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged count: got %d, want 1", purged)
+	}
+
+	assertDeadLetterMissing(t, ctx, db, oldDeadID)
+	assertDeadLetter(t, ctx, db, recentDeadID, retry.ReasonTerminal4xx, 1)
+}
+
+func TestPurgeOldDeliveryHistoryRemovesRowsOlderThanMaxAge(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	store := outbox.New(db)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	oldID := submitOneDeliveryToURL(t, ctx, db, "cus_purge_dh_old", srv.URL)
+	claimedOld, ok, err := store.ClaimNext(ctx, "cus_purge_dh_old")
+	if err != nil {
+		t.Fatalf("ClaimNext old: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext old: got no delivery, want one")
+	}
+	if err := store.MarkSucceeded(ctx, claimedOld.ID, http.StatusOK, 10*time.Millisecond); err != nil {
+		t.Fatalf("MarkSucceeded old: %v", err)
+	}
+	retention.AgeTerminalDelivery(t, ctx, db, oldID, 48*time.Hour)
+
+	recentID := submitOneDeliveryToURL(t, ctx, db, "cus_purge_dh_recent", srv.URL)
+	claimedRecent, ok, err := store.ClaimNext(ctx, "cus_purge_dh_recent")
+	if err != nil {
+		t.Fatalf("ClaimNext recent: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext recent: got no delivery, want one")
+	}
+	if err := store.MarkSucceeded(ctx, claimedRecent.ID, http.StatusOK, 10*time.Millisecond); err != nil {
+		t.Fatalf("MarkSucceeded recent: %v", err)
+	}
+	retention.AgeTerminalDelivery(t, ctx, db, recentID, 25*time.Hour)
+
+	archived, err := store.ArchiveTerminalDeliveries(ctx, 24*time.Hour, 10)
+	if err != nil {
+		t.Fatalf("ArchiveTerminalDeliveries: %v", err)
+	}
+	if archived != 2 {
+		t.Fatalf("archived count: got %d, want 2", archived)
+	}
+
+	purged, err := store.PurgeOldDeliveryHistory(ctx, 26*time.Hour, 10)
+	if err != nil {
+		t.Fatalf("PurgeOldDeliveryHistory: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged count: got %d, want 1", purged)
+	}
+
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM delivery_history WHERE delivery_id = $1`, oldID).Scan(&count); err != nil {
+		t.Fatalf("count old history: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("old delivery_history count: got %d, want 0", count)
+	}
+
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM delivery_history WHERE delivery_id = $1`, recentID).Scan(&count); err != nil {
+		t.Fatalf("count recent history: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("recent delivery_history count: got %d, want 1", count)
+	}
 }

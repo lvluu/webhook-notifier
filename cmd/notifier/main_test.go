@@ -222,7 +222,7 @@ func TestCustomerRegistration_IsIdempotentForWebhookRows(t *testing.T) {
 		}
 	}
 
-	if got := countWebhooksForCustomerURL(t, ctx, db, "cus_repeat", "https://partner.example/webhook"); got != 1 {
+	if got := countWebhooksForCustomerURL(t, ctx, db, "cus_repeat", "https://partner.example/webhook/hooks/fast"); got != 1 {
 		t.Fatalf("webhook rows for customer/url: got %d, want 1", got)
 	}
 }

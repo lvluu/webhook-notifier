@@ -19,6 +19,7 @@ import (
 type config struct {
 	DatabaseURL string
 	Retention   time.Duration
+	MaxAge      time.Duration
 	BatchSize   int
 	Enrichment  outbox.ArchiveEnrichmentMode
 	DB          *sql.DB
@@ -29,6 +30,7 @@ func main() {
 	cfg := config{
 		DatabaseURL: envDefault("DATABASE_URL", "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable"),
 		Retention:   24 * time.Hour,
+		MaxAge:      7 * 24 * time.Hour,
 		BatchSize:   1000,
 		Enrichment:  outbox.ArchiveEnrichmentFull,
 		Out:         os.Stdout,
@@ -36,7 +38,8 @@ func main() {
 
 	flag.StringVar(&cfg.DatabaseURL, "database-url", cfg.DatabaseURL, "Postgres connection string")
 	flag.DurationVar(&cfg.Retention, "retention", cfg.Retention, "terminal delivery retention before archiving")
-	flag.IntVar(&cfg.BatchSize, "batch-size", cfg.BatchSize, "maximum deliveries to retain into history per pass")
+	flag.DurationVar(&cfg.MaxAge, "max-age", cfg.MaxAge, "maximum age of dead_letters and delivery_history rows before purging")
+	flag.IntVar(&cfg.BatchSize, "batch-size", cfg.BatchSize, "maximum rows to process per batch (archive and purge)")
 	flag.Func("enrichment", "archive enrichment mode: full or deferred", func(v string) error {
 		mode := outbox.ArchiveEnrichmentMode(v)
 		if mode != outbox.ArchiveEnrichmentFull && mode != outbox.ArchiveEnrichmentDeferred {
@@ -82,9 +85,33 @@ func runDeliveryHistoryRetention(ctx context.Context, cfg config) (int, error) {
 		}
 		total += archived
 		if archived == 0 {
-			return total, nil
+			break
 		}
 	}
+
+	if cfg.MaxAge > 0 {
+		for {
+			purged, err := store.PurgeOldDeadLetters(ctx, cfg.MaxAge, cfg.BatchSize)
+			if err != nil {
+				return total, fmt.Errorf("purge dead letters: %w", err)
+			}
+			if purged == 0 {
+				break
+			}
+		}
+
+		for {
+			purged, err := store.PurgeOldDeliveryHistory(ctx, cfg.MaxAge, cfg.BatchSize)
+			if err != nil {
+				return total, fmt.Errorf("purge delivery history: %w", err)
+			}
+			if purged == 0 {
+				break
+			}
+		}
+	}
+
+	return total, nil
 }
 
 func openArchiveDB(databaseURL string) (*sql.DB, error) {
@@ -95,7 +122,6 @@ func openArchiveDB(databaseURL string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse database config: %w", err)
 	}
-	connConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	db := stdlib.OpenDB(*connConfig)
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)
