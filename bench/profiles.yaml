@@ -19,6 +19,7 @@ scenarios:
       small_drip_interval: 1s
       late_notify_delay: 30s
       breaker_failure_threshold: 0
+  # Legacy — folded into partner_resilience.
   # Scenario 2: transient partner failures plus a recoverable outage window.
   scenario2:
     dev:
@@ -37,6 +38,7 @@ scenarios:
       outage_delay: 5s
       outage_duration: 30s
       breaker_failure_threshold: 0
+  # Legacy — folded into partner_resilience.
   # Scenario 3: terminal 4xx failures should fast-fail without retry churn.
   scenario3:
     dev:
@@ -59,6 +61,7 @@ scenarios:
       throughput_deliveries: 10000
       retry_deliveries: 100
       breaker_failure_threshold: 0
+  # Legacy — folded into partner_resilience.
   # Scenario 5: dead-partner circuit breaker plus healthy-customer pool protection.
   scenario5:
     dev:
@@ -154,3 +157,68 @@ scenarios:
       retry_max_attempts: 3
       retry_base_delay: 50ms
       retry_cap_delay: 50ms
+  scenario8:
+    dev:
+      replica_counts: [1, 2]
+      sparse_customers: 1000
+      sparse_events_per_customer: 1
+      dense_customers: 10
+      dense_deliveries_per_customer: 100
+      request_timeout: 1500ms
+      min_batch_hint: 8
+      multi_pick_count: 32
+      breaker_failure_threshold: 0
+      retry_max_attempts: 3
+      retry_base_delay: 25ms
+      retry_cap_delay: 2s
+      fairness_ratio_limit: 1.05
+    stress:
+      replica_counts: [1, 2, 3]
+      sparse_customers: 10000
+      sparse_events_per_customer: 1
+      dense_customers: 100
+      dense_deliveries_per_customer: 1000
+      request_timeout: 1500ms
+      min_batch_hint: 8
+      multi_pick_count: 32
+      breaker_failure_threshold: 0
+      retry_max_attempts: 3
+      retry_base_delay: 25ms
+      retry_cap_delay: 2s
+      fairness_ratio_limit: 1.05
+  # Partner Resilience: reliability drill-down (folded Scenarios 2+3+5, Issue #44).
+  partner_resilience:
+    dev:
+      worker_count: 8
+      customer_count: 5
+      deliveries_per_customer: 100
+      events_per_customer: 20
+      submit_interval: 5ms
+      outage_delay: 1s
+      outage_duration: 5s
+      request_timeout: 250ms
+      discovery_interval: 50ms
+      discovery_empty_backoff: 50ms
+      discovery_error_backoff: 50ms
+      discovery_max_backoff: 250ms
+      discovery_limit: 100
+      breaker_failure_threshold: 2
+      breaker_initial_cooldown: 2s
+      breaker_max_cooldown: 2s
+    stress:
+      worker_count: 32
+      customer_count: 10
+      deliveries_per_customer: 1000
+      events_per_customer: 100
+      submit_interval: 20ms
+      outage_delay: 5s
+      outage_duration: 30s
+      request_timeout: 250ms
+      discovery_interval: 50ms
+      discovery_empty_backoff: 50ms
+      discovery_error_backoff: 50ms
+      discovery_max_backoff: 250ms
+      discovery_limit: 100
+      breaker_failure_threshold: 2
+      breaker_initial_cooldown: 15s
+      breaker_max_cooldown: 15s

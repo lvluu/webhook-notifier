@@ -29,17 +29,24 @@ func main() {
 	case "scenario1":
 		err = scenarios.RunScenario1(ctx)
 	case "scenario2":
+		// Legacy scenario — folded into partner_resilience.go. Kept wired for reference until retirement.
 		err = scenarios.RunScenario2(ctx)
 	case "scenario3":
+		// Legacy scenario — folded into partner_resilience.go. Kept wired for reference until retirement.
 		err = scenarios.RunScenario3(ctx)
 	case "scenario4":
 		err = scenarios.RunScenario4(ctx)
 	case "scenario5":
+		// Legacy scenario — folded into partner_resilience.go. Kept wired for reference until retirement.
 		err = scenarios.RunScenario5(ctx)
 	case "scenario6":
 		err = scenarios.RunScenario6(ctx)
 	case "scenario7":
 		err = scenarios.RunScenario7(ctx)
+	case "scenario8":
+		err = scenarios.RunScenario8(ctx)
+	case "partner_resilience", "partner-resilience":
+		err = scenarios.RunPartnerResilience(ctx)
 	default:
 		err = fmt.Errorf("unknown scenario: %s", scenario)
 	}

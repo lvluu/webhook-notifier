@@ -113,6 +113,7 @@ type scenario7Result struct {
 	BreakerSnapshots   []scenario5BreakerSnapshot
 }
 
+// Internal hardening scenario — not part of the assignment-facing proof map.
 // RunScenario7 executes Scenario 7: all webhooks return 5xx, workers claim
 // batches of deliveries per customer, and the batch breaker bookkeeping path
 // (MarkRetryBatch → batchRecordBreakerFailure) handles every failure in O(1)

@@ -50,6 +50,7 @@ type scenario2Profile struct {
 	BreakerFailureThreshold int
 }
 
+// Legacy scenario — folded into partner_resilience.go. Kept for reference until retirement.
 // RunScenario2 executes Scenario 2: transient and recovering Integration
 // Partners under Event x Webhook fanout.
 func RunScenario2(ctx context.Context) error {

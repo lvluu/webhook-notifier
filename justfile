@@ -246,6 +246,18 @@ bench-5:
 bench-6:
     BENCH_PROFILE=stress go run ./cmd/bench scenario6
 
+# horizontal scalability across real notifier replicas
+bench-8:
+    BENCH_PROFILE=stress go run ./cmd/bench scenario8
+
+# partner resilience: transient recovery + 4xx fast-fail + breaker isolation
+bench-partner-resilience:
+    BENCH_PROFILE=stress go run ./cmd/bench partner_resilience
+
+# internal breaker hardening (not assignment-facing)
+bench-7:
+    BENCH_PROFILE=stress go run ./cmd/bench scenario7
+
 # retain terminal deliveries into delivery_history
 delivery-history-retention:
     go run ./cmd/delivery-history-retention
