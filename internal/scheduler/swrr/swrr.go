@@ -3,7 +3,6 @@ package swrr
 
 import (
 	"context"
-	"sort"
 	"sync"
 	"time"
 
@@ -86,10 +85,6 @@ func (s *swrr) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bool, er
 		totalWeight += int64(w)
 	}
 
-	sort.SliceStable(candidates, func(i, j int) bool {
-		return candidates[i].order < candidates[j].order
-	})
-
 	s.activeList = make([]scheduler.CustomerID, 0, len(candidates))
 	for _, c := range candidates {
 		s.activeList = append(s.activeList, c.id)
@@ -107,7 +102,9 @@ func (s *swrr) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bool, er
 		e := s.entryFor(c.id)
 		e.currentWeight += int64(c.weight)
 		candidates[i].currentWeight = e.currentWeight
-		if i == 0 || e.currentWeight > candidates[maxIdx].currentWeight {
+		if i == 0 ||
+			e.currentWeight > candidates[maxIdx].currentWeight ||
+			(e.currentWeight == candidates[maxIdx].currentWeight && e.order < candidates[maxIdx].order) {
 			maxIdx = i
 		}
 	}

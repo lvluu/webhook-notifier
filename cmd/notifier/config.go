@@ -7,18 +7,19 @@ import (
 )
 
 type workerRuntimeConfig struct {
-	WorkerCount           int
-	MinBatchHint          int
-	MultiPickCount        int
-	HostConcurrencyCap    int
-	RequestTimeout        time.Duration
-	EmptyClaimBackoff     time.Duration
-	BacklogSampleInterval time.Duration
-	EnablePgNotifyWakeups bool
-	PgNotifyDSN           string
-	PgNotifyChannel       string
-	ClaimQueryMode        string
-	Discovery             worker.DiscoveryConfig
+	WorkerCount             int
+	MinBatchHint            int
+	MultiPickCount          int
+	HostConcurrencyCap      int
+	RequestTimeout          time.Duration
+	EmptyClaimBackoff       time.Duration
+	BacklogSampleInterval   time.Duration
+	EnablePgNotifyWakeups   bool
+	PgNotifyDSN             string
+	PgNotifyChannel         string
+	ClaimQueryMode          string
+	EnableWeightedScheduler bool
+	Discovery               worker.DiscoveryConfig
 }
 
 func loadWorkerRuntimeConfig() workerRuntimeConfig {
