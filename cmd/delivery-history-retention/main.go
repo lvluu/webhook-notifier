@@ -122,7 +122,6 @@ func openArchiveDB(databaseURL string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse database config: %w", err)
 	}
-	connConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	db := stdlib.OpenDB(*connConfig)
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)

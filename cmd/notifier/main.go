@@ -69,7 +69,6 @@ func main() {
 		logger.Error("failed to parse database config", "error", err)
 		os.Exit(1)
 	}
-	connConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	dbConn := stdlib.OpenDB(*connConfig)
 	if *maxConns > 0 {
 		dbConn.SetMaxOpenConns(*maxConns)
