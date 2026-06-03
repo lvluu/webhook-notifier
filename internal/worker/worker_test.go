@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	neturl "net/url"
 	"slices"
 	"strconv"
 	"sync"
@@ -1057,4 +1058,64 @@ func TestIntegration_ReceiverVerifiesHMACAndStableDeliveryID(t *testing.T) {
 			t.Errorf("attempt %d: X-Delivery-Id = %q, want %q", i+1, id, deliveryID)
 		}
 	}
+}
+
+func TestProcess_RequeueImmediatelyWhenHostSaturated(t *testing.T) {
+	t.Parallel()
+
+	hl := worker.NewHostLimiter(worker.HostLimiterConfig{
+		MaxPerHost:     1,
+		AcquireTimeout: 500 * time.Millisecond,
+		RequeueDelay:   10 * time.Millisecond,
+	})
+
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	hostname, err := urlHost(srv.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+
+	release, err := hl.TryAcquire(hostname)
+	if err != nil {
+		t.Fatalf("pre-occupy slot: %v", err)
+	}
+	defer release()
+
+	w := newTestWorker(worker.WithHostLimiter(hl))
+	store := &recordingDeliveryStore{}
+
+	started := time.Now()
+	result := w.Process(context.Background(), store, outbox.Delivery{
+		ID:            "dlv_saturated",
+		URL:           srv.URL,
+		AttemptNumber: 1,
+	})
+	elapsed := time.Since(started)
+
+	if result.Err != nil {
+		t.Fatalf("Process error: %v", result.Err)
+	}
+	if result.Status != worker.StatusRequeued {
+		t.Errorf("expected StatusRequeued, got %v", result.Status)
+	}
+	if called {
+		t.Error("HTTP Send was called for a saturated host")
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("Process should return immediately when saturated, took %v", elapsed)
+	}
+}
+
+func urlHost(raw string) (string, error) {
+	u, err := neturl.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	return u.Hostname(), nil
 }

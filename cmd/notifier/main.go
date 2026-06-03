@@ -28,7 +28,7 @@ func main() {
 	workerCount := flag.Int("workers", 64, "number of delivery workers")
 	minBatch := flag.Int("min-batch", 32, "minimum claim batch size per customer")
 	multiPick := flag.Int("multi-pick", 1, "customers to batch per claim query (1 = single-customer ClaimNextN, >1 = ClaimNextBatch)")
-	concurrency := flag.Int("concurrency", 16, "Host Concurrency Cap")
+	hostCap := flag.Int("host-cap", 20, "maximum concurrent in-flight requests per Integration Partner hostname")
 	discoveryInterval := flag.Duration("discovery-interval", time.Second, "claimable customer discovery interval")
 	emptyClaimBackoff := flag.Duration("empty-claim-backoff", 20*time.Millisecond, "pause after an empty claim cycle")
 	backlogSampleInterval := flag.Duration("pending-sample-interval", 5*time.Second, "sample interval for pending-delivery backlog gauge (0 disables)")
@@ -46,7 +46,7 @@ func main() {
 		"metrics_addr", *metricsAddr,
 		"workers", *workerCount,
 		"min_batch", *minBatch,
-		"concurrency", *concurrency,
+		"host_cap", *hostCap,
 		"discovery_interval", *discoveryInterval,
 		"empty_claim_backoff", *emptyClaimBackoff,
 		"pending_sample_interval", *backlogSampleInterval,
@@ -100,7 +100,7 @@ func main() {
 	runtimeCfg.WorkerCount = *workerCount
 	runtimeCfg.MinBatchHint = *minBatch
 	runtimeCfg.MultiPickCount = *multiPick
-	runtimeCfg.HostConcurrencyCap = *concurrency
+	runtimeCfg.HostConcurrencyCap = *hostCap
 	runtimeCfg.EmptyClaimBackoff = *emptyClaimBackoff
 	runtimeCfg.BacklogSampleInterval = *backlogSampleInterval
 	runtimeCfg.EnablePgNotifyWakeups = *enablePgNotifyWakeups
