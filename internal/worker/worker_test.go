@@ -353,6 +353,200 @@ func TestRun_NotifiesCustomerWhenClaimabilityCheckErrors(t *testing.T) {
 	}
 }
 
+// multiPickScheduler hands out a fixed sequence of customers across successive
+// Pick calls (once total, not per loop iteration), then reports no more work.
+// It records Notify and Remove so a test can assert rotation bookkeeping.
+type multiPickScheduler struct {
+	mu       sync.Mutex
+	queue    []string
+	idx      int
+	notified []string
+	removed  []string
+}
+
+func (s *multiPickScheduler) Pick(ctx context.Context) (string, uint32, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.idx >= len(s.queue) {
+		return "", 0, false, ctx.Err()
+	}
+	c := s.queue[s.idx]
+	s.idx++
+	return c, 1, true, nil
+}
+
+func (s *multiPickScheduler) Notify(customerID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notified = append(s.notified, customerID)
+}
+
+func (s *multiPickScheduler) Remove(customerID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.removed = append(s.removed, customerID)
+}
+
+func (s *multiPickScheduler) Notified() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.notified)
+}
+
+func (s *multiPickScheduler) Removed() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.removed)
+}
+
+// whaleBatchStore models a multi-customer claim where only the whale produces a
+// Delivery; the co-picked sparse customers come back empty. HasClaimableWorkBatch
+// reports which empty customers still have work so the worker can decide whom to
+// keep in rotation (Notify) versus drop (Remove). done is closed after the
+// terminal MarkSucceededBatch so the test can stop the Run loop deterministically.
+type whaleBatchStore struct {
+	whaleDelivery outbox.Delivery
+	claimableMap  map[string]bool
+
+	done chan struct{}
+	once sync.Once
+
+	mu             sync.Mutex
+	batchCustomers []string
+	emptyCustomers []string
+	succeeded      []string
+}
+
+func (s *whaleBatchStore) ClaimNextN(context.Context, string, int) ([]outbox.Delivery, error) {
+	return nil, nil
+}
+
+func (s *whaleBatchStore) ClaimNextBatch(_ context.Context, customerIDs []string, _ int) ([]outbox.Delivery, error) {
+	s.mu.Lock()
+	if len(s.batchCustomers) == 0 {
+		s.batchCustomers = slices.Clone(customerIDs)
+	}
+	s.mu.Unlock()
+	return []outbox.Delivery{s.whaleDelivery}, nil
+}
+
+func (s *whaleBatchStore) HasClaimableWork(context.Context, string) (bool, error) {
+	return false, nil
+}
+
+func (s *whaleBatchStore) HasClaimableWorkBatch(_ context.Context, customerIDs []string) (map[string]bool, error) {
+	s.mu.Lock()
+	s.emptyCustomers = slices.Clone(customerIDs)
+	s.mu.Unlock()
+	return s.claimableMap, nil
+}
+
+func (s *whaleBatchStore) MarkSucceeded(context.Context, string, int, time.Duration) error {
+	return nil
+}
+func (s *whaleBatchStore) MarkRetry(context.Context, string, int, string, time.Duration, time.Duration) error {
+	return nil
+}
+func (s *whaleBatchStore) MarkDead(context.Context, string, int, string, string, time.Duration) error {
+	return nil
+}
+func (s *whaleBatchStore) Requeue(context.Context, string, time.Duration) error { return nil }
+
+func (s *whaleBatchStore) MarkSucceededBatch(_ context.Context, items []outbox.BatchMarkItem) error {
+	s.mu.Lock()
+	for _, item := range items {
+		s.succeeded = append(s.succeeded, item.DeliveryID)
+	}
+	s.mu.Unlock()
+	s.once.Do(func() { close(s.done) })
+	return nil
+}
+func (s *whaleBatchStore) MarkRetryBatch(context.Context, []outbox.BatchMarkItem) error { return nil }
+func (s *whaleBatchStore) MarkDeadBatch(context.Context, []outbox.BatchMarkItem) error  { return nil }
+
+// TestRun_MultiClaimKeepsClaimableEmptyCustomersAndDropsExhausted verifies the
+// claimMulti rotation bookkeeping when a whale monopolizes a multi-customer
+// claim batch. The whale and two sparse customers are picked together; only the
+// whale yields a Delivery. The sparse customer that still has work must be
+// re-Notified (kept in rotation) and the truly exhausted one Removed — so a
+// whale filling the batch never silently evicts a co-picked customer that has
+// pending work.
+func TestRun_MultiClaimKeepsClaimableEmptyCustomersAndDropsExhausted(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	store := &whaleBatchStore{
+		whaleDelivery: outbox.Delivery{
+			ID:         "dlv_whale",
+			EventID:    "evt_whale",
+			CustomerID: "cus_whale",
+			EventType:  "subscriber.created",
+			Payload:    []byte(`{"subscriber_id":"sub_1"}`),
+			URL:        srv.URL,
+		},
+		claimableMap: map[string]bool{
+			"cus_small_keep": true,  // still has work -> keep in rotation
+			"cus_small_drop": false, // exhausted -> remove
+		},
+		done: make(chan struct{}),
+	}
+
+	sched := &multiPickScheduler{
+		queue: []string{"cus_whale", "cus_small_keep", "cus_small_drop"},
+	}
+
+	w := worker.New(sched, worker.WithMultiPickCount(3))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.Run(ctx, store) }()
+
+	select {
+	case <-store.done:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for whale delivery to be marked succeeded")
+	}
+	cancel()
+
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error: got %v, want context.Canceled", err)
+	}
+
+	store.mu.Lock()
+	succeeded := slices.Clone(store.succeeded)
+	empties := slices.Clone(store.emptyCustomers)
+	store.mu.Unlock()
+
+	if !slices.Equal(succeeded, []string{"dlv_whale"}) {
+		t.Fatalf("succeeded deliveries: got %v, want [dlv_whale]", succeeded)
+	}
+
+	wantEmpties := []string{"cus_small_drop", "cus_small_keep"}
+	gotEmpties := slices.Clone(empties)
+	slices.Sort(gotEmpties)
+	if !slices.Equal(gotEmpties, wantEmpties) {
+		t.Fatalf("empty customers checked for claimable work: got %v, want %v", gotEmpties, wantEmpties)
+	}
+
+	notified := sched.Notified()
+	slices.Sort(notified)
+	wantNotified := []string{"cus_small_keep", "cus_whale"}
+	if !slices.Equal(notified, wantNotified) {
+		t.Fatalf("Notify calls: got %v, want %v (whale claimed + small_keep still claimable)", notified, wantNotified)
+	}
+
+	if removed := sched.Removed(); !slices.Equal(removed, []string{"cus_small_drop"}) {
+		t.Fatalf("Remove calls: got %v, want [cus_small_drop] (only the exhausted customer)", removed)
+	}
+}
+
 func TestNew_DefaultHTTPClientUsesTunedTransport(t *testing.T) {
 	t.Parallel()
 

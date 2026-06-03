@@ -40,6 +40,32 @@ Do not replace Event ingest fanout with `CopyFrom` in this change. The current
 multi-row `INSERT ... VALUES (...)` fanout is correct, bounded by the expected
 Webhook count per Customer, and keeps the `database/sql` store API intact.
 
+## Multi-customer claim shaping
+
+Re-enabling cached prepared statements stabilizes the hot-path query plans, so
+this change also reshapes `ClaimNextBatch` while the plan cache is in scope:
+
+- De-duplicate the input Customer IDs (`SELECT DISTINCT ... FROM unnest($1)`).
+  Without it a repeated Customer ID multiplied that Customer's lock and scan
+  work and skewed the batch toward it.
+- Probe each distinct Customer independently with a `CROSS JOIN LATERAL`, instead
+  of one `customer_id = ANY($1)` scan, so the per-Customer claim index is used
+  directly and a sparse Customer is not buried behind a high-volume Customer in
+  a single global scan.
+- Cap each Customer's candidate contribution to a fair share of the batch limit
+  (`limit / number of input Customers`, floored at 1) before the final
+  time-ordered `LIMIT`. The cap bounds rows locked `FOR UPDATE`: without it `N`
+  co-claimed Customers could each lock up to the full batch limit (`N × limit`
+  rows) only to discard most at the final cut, amplifying lock contention and
+  letting one whale monopolize the batch.
+
+Align the lock-acquisition order of `withInFlightDelivery` (used by `Requeue`
+and breaker state writes) with the claim path. Both now lock the `deliveries`
+row before the `delivery_claims` row. The previous `FOR UPDATE OF dc, d` over a
+`delivery_claims`-first join acquired locks in the opposite order to the claim
+path and deadlocked (`SQLSTATE 40P01`) when claim and requeue ran concurrently
+on overlapping rows.
+
 ## Consequences
 
 - Hot CTEs can reuse prepared plans through PgBouncer instead of paying parse and
@@ -56,6 +82,15 @@ Webhook count per Customer, and keeps the `database/sql` store API intact.
 - A future native `pgxpool` migration remains available when benchmarks show
   that one-round-trip batching or bulk ingest fanout is worth the larger
   refactor.
+- A high-volume Customer can no longer monopolize a multi-customer claim batch
+  or lock the whole candidate pool; the per-Customer fair-share cap keeps a
+  co-picked Small Customer claimable within the same batch. Per-batch fairness
+  remains best-effort (the contract has no per-Customer guarantee) and the
+  scheduler (ADR-0001) still owns cross-batch fairness.
+- The requeue/breaker `SQLSTATE 40P01` deadlock is resolved by the shared
+  `deliveries`-then-`delivery_claims` lock order; this is now a documented
+  invariant (see DESIGN.md → Invariants → Lock ordering) and is covered by a
+  concurrent claim/requeue regression test.
 
 ## Follow-up benchmark
 
