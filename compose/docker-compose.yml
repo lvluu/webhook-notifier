@@ -48,6 +48,12 @@ services:
       - pg_stat_statements.max=10000
       - -c
       - pg_stat_statements.track=all
+      - -c
+      - statement_timeout=30s
+      - -c
+      - transaction_timeout=2min
+      - -c
+      - idle_in_transaction_session_timeout=5min
 
   pgbouncer:
     image: edoburu/pgbouncer:latest
