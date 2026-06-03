@@ -8,7 +8,7 @@ The Webhook Notifier needs a durable place to hold Deliveries between Event inge
 
 Use **Postgres alone** as outbox, work queue, and scheduling source-of-truth for the PoC. No Redis, no broker. Workers claim Deliveries with `SELECT ... FOR UPDATE SKIP LOCKED` scoped to the Customer the Scheduler picked.
 
-The `Scheduler` interface (ADR-0001) abstracts the queue source so a future move to Redis Streams or Kafka per-Customer partitions is a Scheduler implementation swap, not a system rewrite.
+The `Scheduler` interface (ADR-0001) isolates the fairness policy so round-robin vs SWRR is a Scheduler implementation swap. However, the Scheduler alone does not abstract the queue source — the `outbox.Store` claim queries, `Customer` discovery, and ingest fanout are all Postgres-specific. A move to Redis Streams or Kafka would require changes in outbox, discovery, and ingest simultaneously. The Scheduler stays; everything else under it changes.
 
 ## Considered options
 

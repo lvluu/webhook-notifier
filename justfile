@@ -196,9 +196,9 @@ stack-status:
     echo "Receiver traffic"
     curl -fsS http://localhost:9092/metrics 2>/dev/null | grep '^webhook_requests_received_total' || echo "unavailable: receiver metrics are not reachable on localhost:9092"
 
-# stop and remove the full stack, including volumes
+# stop and remove the full stack, including volumes and orphan containers
 stack-down:
-    {{compose}} {{stack_all_profiles}} down -v
+    {{compose}} {{stack_all_profiles}} down -v --remove-orphans
 
 # follow stack logs, optionally for one service
 stack-logs service="":
@@ -221,9 +221,95 @@ stack-production-all:
 stack-production-down:
     {{compose_prod}} {{stack_prod_profiles}} down -v
 
-# end-to-end smoke (placeholder until #16)
-demo: up migrate
-    @echo "demo recipe stub — wired in issue #16"
+# end-to-end demo: start stack, register customers, post events, verify delivery (under 2 min)
+demo:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "=== Webhook Notifier Demo ==="
+    echo ""
+
+    # 1. Start the dev stack
+    echo "[1/6] Starting services..."
+    {{compose}} up -d --scale notifier=2 {{stack_base_services}}
+
+    echo "    Waiting for services..."
+    {{compose}} exec -T postgres bash -c 'until pg_isready -U notifier -d notifier; do sleep 0.5; done'
+
+    # Wait for notifier HTTP to be ready
+    for i in $(seq 1 20); do
+        if curl -sf http://localhost:8080/ >/dev/null 2>&1; then break; fi
+        sleep 0.5
+    done
+    echo "    All services ready."
+
+    # 2. Register customers + webhooks
+    echo "[2/6] Registering customers and webhooks..."
+    curl -fsS -X POST http://localhost:8080/api/customers \
+      -H 'Content-Type: application/json' \
+      -d '{"id":"demo-whale","class":3,"url":"http://webhook-receiver:8080/hooks/fast"}' >/dev/null
+    curl -fsS -X POST http://localhost:8080/api/customers \
+      -H 'Content-Type: application/json' \
+      -d '{"id":"demo-small","class":1,"url":"http://webhook-receiver:8080/hooks/slow"}' >/dev/null
+    echo "    Customers registered: demo-whale, demo-small"
+
+    # 3. Post events
+    echo "[3/6] Posting events..."
+    for i in $(seq 1 20); do
+        curl -fsS -X POST http://localhost:8080/api/events \
+          -H 'Content-Type: application/json' \
+          -d "{\"customer_id\":\"demo-whale\",\"event_name\":\"subscriber.created\",\"event_time\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"data\":{\"id\":\"whale-$i\"}}" >/dev/null &
+    done
+    for i in $(seq 1 10); do
+        curl -fsS -X POST http://localhost:8080/api/events \
+          -H 'Content-Type: application/json' \
+          -d "{\"customer_id\":\"demo-small\",\"event_name\":\"subscriber.created\",\"event_time\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"data\":{\"id\":\"small-$i\"}}" >/dev/null &
+    done
+    wait
+    echo "    20 whale + 10 small events posted."
+
+    # 4. Wait for processing
+    echo "[4/6] Waiting for delivery processing..."
+    sleep 5
+
+    # 5. Show results
+    echo ""
+    echo "[5/6] Delivery results:"
+    {{compose}} exec -T postgres psql -U notifier -d notifier -P pager=off -P border=2 -c "
+    SELECT
+      d.customer_id,
+      d.status,
+      COUNT(*) AS count
+    FROM deliveries d
+    WHERE d.customer_id IN ('demo-whale', 'demo-small')
+    GROUP BY d.customer_id, d.status
+    ORDER BY d.customer_id, d.status;
+    "
+
+    echo ""
+    echo "[6/6] Attempts recorded:"
+    {{compose}} exec -T postgres psql -U notifier -d notifier -P pager=off -P border=2 -c "
+    SELECT COUNT(*) AS total_attempts FROM delivery_attempts;
+    "
+
+    echo ""
+    echo "Receiver metrics (last 30 deliveries):"
+    curl -fsS http://localhost:9092/metrics 2>/dev/null | grep -E '^webhook_requests_received_total' || echo "    (receiver metrics unavailable)"
+
+    echo ""
+    echo "Notifier health:"
+    curl -fsS http://localhost:9090/health 2>/dev/null || echo "    (metrics endpoint unavailable)"
+
+    echo ""
+    echo "=== Demo complete ==="
+    echo ""
+    echo "Grafana:     http://localhost:3000 (admin/admin)"
+    echo "Prometheus:  http://localhost:9091"
+    echo ""
+    echo "To inspect further:"
+    echo "  just stack-status    # queue health"
+    echo "  just stack-logs notifier  # worker logs"
+    echo "  just stack-down      # tear down"
 
 # fairness under load + late-arrival reactivity (issue #12)
 bench-1:

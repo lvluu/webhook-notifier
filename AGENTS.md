@@ -55,7 +55,7 @@ Mention schema or migration changes explicitly.
 
 ## Agent Workflow
 
-Track work in GitHub Issues for `lvluu/flodesk-home-assignment` via `gh`.
+Track work in GitHub Issues for `lvluu/webhook-notifier` via `gh`.
 Ready work uses the `ready-for-agent` label. Triage labels are
 `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and
 `wontfix`; see `docs/agents/triage-labels.md`. Domain context is single-root:

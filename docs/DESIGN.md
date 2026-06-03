@@ -99,7 +99,7 @@ flowchart LR
   }
   ```
   SWRR interleaves picks so a `[3,1]` weight set yields `AABAAABA` rather than classic contiguous `AAAB AAAB` cycles — same share, with the low-weight Customer pulled forward as much as the 3:1 ratio permits. With all weights=1, behaviour is identical to plain RR. Weight controls how often a Customer is picked. Claim batch size is a separate database-amortization knob. A throttled Customer with `weight=0` is skipped entirely (useful for incident response).
-- **RetryPolicy** — `Next(attempt int, prevDelay time.Duration, resp *http.Response, err error) (delay time.Duration, terminal bool, reason string)`. Pure function. Encodes decorrelated jitter, 4xx fast-fail, 429 `Retry-After` honouring, and exhaustion (ADR-0003).
+- **RetryPolicy** — `Next(attempt int, prevDelay time.Duration, resp *http.Response, err error, lifetime time.Duration) (delay time.Duration, terminal bool, reason string)`. Pure function. Encodes decorrelated jitter, 4xx fast-fail, 429 `Retry-After` honouring, exhaustion, and MaxAge expiry (ADR-0003, ADR-0009).
 - **Signer** — `Sign(secret, body []byte, ts time.Time) (sig string)`. HMAC-SHA256 over `timestamp.body`. Deterministic.
 
 ### Service modules
@@ -164,7 +164,7 @@ customers                              delivery_history (partitioned)
 ──────────                             ─────────────────────────────
 id (uuid)                              delivery_id + final_at (PK)
 class (int, default 1, check >= 0)     event_id, webhook_id, customer_id
-plan_tier (text, nullable)             event_type, url_host
+                                       event_type, url_host
                                        final_status, terminal_reason
                                        attempt_count, first/last_attempt_at
                                        last_status_code, last_error_class, last_error
@@ -225,7 +225,7 @@ stateDiagram-v2
 - **Shared HTTP transport**: each Worker owns one tuned HTTP client with large idle connection pools and explicit transport timeouts (ADR-0007). Per-Attempt deadlines come from request contexts, not `http.Client.Timeout`, so response bodies can be drained before cancellation and idle connections can be reused.
 - **No leader**: the Scheduler is process-local. Postgres claim locking prevents duplicate Delivery processing across instances, but globally balanced Customer fairness requires every instance to discover the claimable Customer set from shared storage. DB-backed claimable Customer discovery is the chosen path in ADR-0006; it gives approximate cluster-wide fairness without a globally serialized Scheduler.
 - **Layered wakeups**: successful ingest wakes the local Scheduler synchronously and enqueues an advisory remote wake hint. A bounded broadcaster coalesces hints per Customer for 100ms and sends `pg_notify` through a dedicated direct Postgres connection; periodic DB-backed discovery remains the recovery path if a hint is dropped or Postgres notification is unavailable.
-- **Scale ceiling**: at very high throughput, contention on the `deliveries` claim query becomes the bottleneck. The natural next step is to partition by `customer_id` (or move per-Customer queues to Redis Streams). The `Scheduler` interface already hides the queue source so this swap is local.
+- **Scale ceiling**: at very high throughput, contention on the `deliveries` claim query becomes the bottleneck. The natural next step is to partition by `customer_id`. Migrating to Redis Streams or Kafka is a larger change — the `Scheduler` interface stays, but the outbox claim, discovery, and ingest layers are Postgres-coupled and would need simultaneous rewrites.
 
 ## Fairness mechanics
 
@@ -409,7 +409,7 @@ Each scenario lives in `cmd/bench` and emits a markdown report under `bench/resu
 
 - **SWRR with divergent weights** — the Scheduler interface, `WeightSource` plumbing, and `customers.class` column are in place, but the PoC scheduler runs plain round-robin (all weights equal). Adding divergent weights is a config + scheduler-implementation change, not a redesign.
 - **Plan-tier → weight policy** — the `WeightSource` plumbing is in place, but the actual tier table and admin UI to set non-uniform weights are out of PoC scope. Adding them is a config change, not a redesign.
-- **Redis Streams per-Customer queues** — same Scheduler interface (ADR-0002).
+- **Redis Streams per-Customer queues** — a possible scale-out path if Postgres claim contention becomes the limiting factor. Would require changes in outbox, discovery, and ingest — the Scheduler stays, but the claim and persistence layers beneath it change. Not a free swap.
 - **Per-Customer concurrency cap** — round-robin already paces; documented as natural addition under future needs.
 - **Many-Whale contention bench** — scenario 1 already proves the mechanism. Scenario 6 proves the sparse-Customer path.
 - **Mid-flight worker crash chaos scenario** — recoverable by design (stale_candidate CTE reclaim), demonstrated by an integration test rather than a bench scenario.
