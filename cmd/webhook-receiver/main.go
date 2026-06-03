@@ -21,6 +21,8 @@ func main() {
 	latencyMin := flag.Duration("latency-min", 5*time.Millisecond, "minimum response latency")
 	latencyMax := flag.Duration("latency-max", 15*time.Millisecond, "maximum response latency")
 	failureRate := flag.Float64("failure-rate", 0.0, "failure rate (0.0-1.0)")
+	tlsCert := flag.String("tls-cert", "", "TLS certificate file (enables TLS when set with -tls-key)")
+	tlsKey := flag.String("tls-key", "", "TLS private key file (enables TLS when set with -tls-cert)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -72,10 +74,17 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("listening", "addr", *addr, "metrics_addr", *metricsAddr, "latency_min", *latencyMin, "latency_max", *latencyMax, "failure_rate", *failureRate)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("server error", "error", err)
-			os.Exit(1)
+		logger.Info("listening", "addr", *addr, "metrics_addr", *metricsAddr, "latency_min", *latencyMin, "latency_max", *latencyMax, "failure_rate", *failureRate, "tls", *tlsCert != "" && *tlsKey != "")
+		if *tlsCert != "" && *tlsKey != "" {
+			if err := server.ListenAndServeTLS(*tlsCert, *tlsKey); err != nil && err != http.ErrServerClosed {
+				logger.Error("server error", "error", err)
+				os.Exit(1)
+			}
+		} else {
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Error("server error", "error", err)
+				os.Exit(1)
+			}
 		}
 	}()
 	go func() {

@@ -118,6 +118,43 @@ Current reports:
 
 These reports are intended to be committed so the benchmark results stay reviewable and comparable across revisions.
 
+## Compose Chaos Profile vs Benchmark Fidelity
+
+The `compose/docker-compose.yml` chaos profile (`--profile chaos`) is a
+**live demo harness**, not a production-representative benchmark rig. It is
+useful for interactive development, observability dashboards, and
+smoke-testing the end-to-end flow, but it prioritises simplicity and fast
+startup over production fidelity.
+
+Key differences from a production deployment:
+
+| Area | Compose chaos (demo) | Benchmark harness (proof) |
+|------|----------------------|---------------------------|
+| Postgres durability | `synchronous_commit=off` | DB is opaque to benchmarks; scenarios measure delivery outcomes regardless |
+| Postgres tuning | `shared_buffers=128MB` (laptop) | Testcontainer inherits host; scenario profiles tune worker/breaker params |
+| Partner diversity | Single `webhook-receiver` with uniform latency (5-15ms) | Per-route fast/slow/flaky/dead receivers via `bench/receiver` |
+| Multi-replica | Scaled via `--scale notifier=N` | `scenario8` launches real OS process groups with programmatic control |
+| Resource limits | None | Not applicable (benchmarks measure code, not infra caps) |
+| TLS | Plain HTTP | Not required for assignment proofs; TLS receiver available in production compose profile |
+| Retention | 1-minute window (demo) | Not exercised by benchmark scenarios |
+
+**To run a production-representative Compose stack**, layer the production
+override:
+
+```bash
+just stack-production         # durable PG, resource limits, multi-host receivers, TLS
+just stack-production-all     # + chaos, observe, retention
+```
+
+The production override (`compose/docker-compose.production.yml`) enables
+`synchronous_commit=on`, production-sized Postgres buffers, container CPU
+and memory limits, multi-host partner receivers (fast, flaky, slow, dead),
+a TLS-enabled receiver, and a 24-hour delivery-history retention window.
+
+The **benchmark harness** (`cmd/bench`) remains the **authoritative proof**
+for fairness, scalability, and reliability claims. The Compose stack is a
+supplementary tool for live demos and manual exploration.
+
 ## Sustained-Load Health Checks (Issue #54)
 
 For dead-tuple/backlog drift validation under sustained load, run:

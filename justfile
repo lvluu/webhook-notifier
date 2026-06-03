@@ -4,11 +4,13 @@ set dotenv-load := true
 database_url := env_var_or_default("DATABASE_URL", "postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable")
 migrate      := "go run -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.17.1"
 compose      := "docker compose -f compose/docker-compose.yml --project-directory ."
+compose_prod := "docker compose -f compose/docker-compose.yml -f compose/docker-compose.production.yml --project-directory ."
 
 stack_base_services := "postgres pgbouncer notifier caddy webhook-receiver"
 stack_observe_services := "prometheus grafana"
 stack_chaos_services := "chaos-whales chaos-small"
 stack_all_profiles := "--profile observe --profile chaos --profile retention"
+stack_prod_profiles := "--profile observe --profile chaos --profile retention --profile production"
 
 # list available recipes
 default:
@@ -206,6 +208,18 @@ stack-logs service="":
 stack-rebuild n="3":
     {{compose}} build
     {{compose}} up -d --scale notifier={{n}} --no-deps --force-recreate notifier
+
+# start production-representative stack (durable PG, resource limits, multi-host receivers)
+stack-production:
+    {{compose_prod}} --profile production up -d
+
+# start full production stack with observe, chaos, and retention
+stack-production-all:
+    {{compose_prod}} {{stack_prod_profiles}} up -d --scale notifier=3
+
+# stop and remove production stack, including volumes
+stack-production-down:
+    {{compose_prod}} {{stack_prod_profiles}} down -v
 
 # end-to-end smoke (placeholder until #16)
 demo: up migrate

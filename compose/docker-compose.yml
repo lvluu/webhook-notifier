@@ -139,6 +139,8 @@ services:
       - 5ms
       - -latency-max
       - 15ms
+      - -failure-rate
+      - "0.02"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9091/metrics"]
       interval: 2s
