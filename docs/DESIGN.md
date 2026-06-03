@@ -108,7 +108,7 @@ flowchart LR
   2. Claim up to the configured batch size for that Customer (single SQL statement). The PoC uses a default minimum batch of 32 Deliveries per pick and validates that throughput tuning against the Small Customer scheduling-latency SLO.
   3. For each claimed Delivery, in order:
      - Look up Webhook (cached).
-     - Acquire per-host semaphore (skip and requeue with short backoff if blocked > short timeout; yield back to Scheduler so a saturated partner does not stall fairness).
+     - Try to acquire the per-host semaphore without blocking (skip and requeue with short backoff if unavailable; yield back to Scheduler so a saturated partner does not stall fairness).
      - `Signer.Sign()`, build HTTP request with idempotency headers.
      - POST with a shared tuned HTTP client and per-Attempt request timeout.
      - Drain and close the response body so the transport can reuse the connection.
@@ -236,7 +236,16 @@ type HostLimiter struct {
 func (h *HostLimiter) Acquire(ctx context.Context, host string) (release func(), err error) { ... }
 ```
 
-Workers acquire before POSTing. On acquisition timeout the Delivery is requeued with a short `next_attempt_at` bump — the worker frees up to serve another Customer. This keeps fairness intact when one process saturates its local allowance.
+Workers acquire before POSTing. If no slot is immediately available, the Delivery is requeued with a short `next_attempt_at` bump — the worker frees up to serve another Customer. This keeps fairness intact when one process saturates its local allowance.
+
+The cap sets the upper bound on concurrent in-flight Attempts per Integration
+Partner hostname. Approximate per-host throughput is `host_cap /
+partner_latency`: a cap of 20 supports about 200 Attempts/s at 100 ms p50
+partner latency, or about 400 Attempts/s at 50 ms. The default of 20 is sized
+as a conservative starting point for the 300 events/s PoC target when traffic is
+spread across multiple partner hostnames; concentrated traffic to one hostname
+needs either lower partner latency, a higher configured cap, or more host-level
+coordination capacity.
 
 The Host Concurrency Cap is a fleet-wide partner-protection invariant. The PoC's
 in-memory HostLimiter enforces only the local portion of that allowance. A

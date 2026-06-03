@@ -91,9 +91,13 @@ func (h *HostLimiter) Acquire(ctx context.Context, host string) (release func(),
 // immediately without consuming a slot.
 func (h *HostLimiter) TryAcquire(host string) (release func(), err error) {
 	sem := h.semFor(host)
+	acquireStarted := time.Now()
 	if !sem.TryAcquire(1) {
+		observe.ObserveSemaphoreWait(host, time.Since(acquireStarted).Seconds())
 		return nil, fmt.Errorf("host limiter acquire %s: capacity reached", host)
 	}
+
+	observe.ObserveSemaphoreWait(host, time.Since(acquireStarted).Seconds())
 
 	released := false
 	return func() {

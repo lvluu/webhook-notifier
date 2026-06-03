@@ -83,7 +83,7 @@ services:
       - "4"
       - -multi-pick
       - "8"
-      - -concurrency
+      - -host-cap
       - "4"
       - -discovery-interval
       - 10s
