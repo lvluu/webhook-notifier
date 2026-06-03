@@ -61,7 +61,8 @@ func scenario3ProfileFromEnv() (scenario3Profile, error) {
 	}, nil
 }
 
-// RunScenario3 executes Scenario 3: terminal classification fast-fail.
+// RunScenario3 executes the legacy Scenario 3, folded into
+// partner_resilience.go and kept for reference until retirement.
 func RunScenario3(ctx context.Context) error {
 	db, cleanup, err := openBenchDatabase(ctx)
 	if err != nil {
@@ -90,7 +91,8 @@ func RunScenario3(ctx context.Context) error {
 	if err := seedScenario3Customer(ctx, db); err != nil {
 		return fmt.Errorf("seed customer: %w", err)
 	}
-	if err := seedScenario3Webhooks(ctx, db, rs.URL()); err != nil {
+	webhookURLs, err := seedScenario3Webhooks(ctx, db, rs.URL())
+	if err != nil {
 		return fmt.Errorf("seed webhooks: %w", err)
 	}
 
@@ -150,6 +152,8 @@ func RunScenario3(ctx context.Context) error {
 		expectedDeliveries: profile.EventCount * scenario3WebhookCount,
 		totalDuration:      time.Since(startTime),
 		workerCount:        workers,
+		goodWebhookURL:     webhookURLs["good"],
+		badWebhookURL:      webhookURLs["misconfigured-404"],
 	}); err != nil {
 		return fmt.Errorf("write report: %w", err)
 	}
@@ -170,19 +174,22 @@ func seedScenario3Customer(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func seedScenario3Webhooks(ctx context.Context, db *sql.DB, receiverBaseURL string) error {
+func seedScenario3Webhooks(ctx context.Context, db *sql.DB, receiverBaseURL string) (map[string]string, error) {
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active) VALUES ")
 	args := make([]any, 0, len(scenario3Webhooks)*4)
+	urls := make(map[string]string, len(scenario3Webhooks))
 	for i, webhook := range scenario3Webhooks {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
 		base := i * 4
+		fullURL := receiverBaseURL + webhook.Path
+		urls[webhook.Label] = fullURL
 		_, _ = fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, true)", base+1, base+2, base+3, base+4)
 		args = append(args,
 			scenario3CustomerID,
-			receiverBaseURL+webhook.Path,
+			fullURL,
 			"",
 			fmt.Sprintf("{%s}", eventType),
 		)
@@ -190,9 +197,9 @@ func seedScenario3Webhooks(ctx context.Context, db *sql.DB, receiverBaseURL stri
 	sb.WriteString(" ON CONFLICT DO NOTHING")
 
 	if _, err := db.ExecContext(ctx, sb.String(), args...); err != nil {
-		return fmt.Errorf("insert webhooks: %w", err)
+		return nil, fmt.Errorf("insert webhooks: %w", err)
 	}
-	return nil
+	return urls, nil
 }
 
 func submitScenario3Events(ctx context.Context, store *ingest.Store, eventCount int) error {
@@ -214,6 +221,8 @@ type scenario3ReportParams struct {
 	expectedDeliveries int
 	totalDuration      time.Duration
 	workerCount        int
+	goodWebhookURL     string
+	badWebhookURL      string
 }
 
 func writeScenario3Report(ctx context.Context, db *sql.DB, path string, p scenario3ReportParams) error {
@@ -225,11 +234,11 @@ func writeScenario3Report(ctx context.Context, db *sql.DB, path string, p scenar
 	if err != nil {
 		return fmt.Errorf("query terminal deliveries: %w", err)
 	}
-	good, err := queryScenario3WebhookResult(ctx, db, "/hooks/good")
+	good, err := queryScenario3WebhookResult(ctx, db, p.goodWebhookURL)
 	if err != nil {
 		return fmt.Errorf("query good webhook result: %w", err)
 	}
-	misconfigured, err := queryScenario3WebhookResult(ctx, db, "/hooks/misconfigured-404")
+	misconfigured, err := queryScenario3WebhookResult(ctx, db, p.badWebhookURL)
 	if err != nil {
 		return fmt.Errorf("query misconfigured webhook result: %w", err)
 	}
@@ -237,7 +246,7 @@ func writeScenario3Report(ctx context.Context, db *sql.DB, path string, p scenar
 	if err != nil {
 		return fmt.Errorf("query dlq reasons: %w", err)
 	}
-	attempts, err := queryScenario3AttemptsDistribution(ctx, db)
+	attempts, err := queryScenario3AttemptsDistribution(ctx, db, p.goodWebhookURL, p.badWebhookURL)
 	if err != nil {
 		return fmt.Errorf("query attempts distribution: %w", err)
 	}
@@ -330,7 +339,7 @@ type scenario3WebhookResult struct {
 	Terminal4xxDLQ int
 }
 
-func queryScenario3WebhookResult(ctx context.Context, db *sql.DB, path string) (scenario3WebhookResult, error) {
+func queryScenario3WebhookResult(ctx context.Context, db *sql.DB, webhookURL string) (scenario3WebhookResult, error) {
 	var r scenario3WebhookResult
 	err := db.QueryRowContext(ctx, `
 		SELECT
@@ -343,8 +352,8 @@ func queryScenario3WebhookResult(ctx context.Context, db *sql.DB, path string) (
 		FROM deliveries d
 		JOIN webhooks w ON w.id = d.webhook_id
 		LEFT JOIN dead_letters dl ON dl.delivery_id = d.id
-		WHERE w.url LIKE '%' || $1
-	`, path, retry.ReasonTerminal4xx).Scan(
+		WHERE w.url = $1
+	`, webhookURL, retry.ReasonTerminal4xx).Scan(
 		&r.Total,
 		&r.Succeeded,
 		&r.Dead,
@@ -364,20 +373,16 @@ type scenario3AttemptsRow struct {
 	Count    int
 }
 
-func queryScenario3AttemptsDistribution(ctx context.Context, db *sql.DB) ([]scenario3AttemptsRow, error) {
+func queryScenario3AttemptsDistribution(ctx context.Context, db *sql.DB, goodWebhookURL, badWebhookURL string) ([]scenario3AttemptsRow, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT
-			CASE
-				WHEN w.url LIKE '%/hooks/good' THEN 'good'
-				WHEN w.url LIKE '%/hooks/misconfigured-404' THEN 'misconfigured-404'
-				ELSE w.url
-			END AS webhook,
+			w.url,
 			d.attempt_count,
 			COUNT(*)
 		FROM deliveries d
 		JOIN webhooks w ON w.id = d.webhook_id
-		GROUP BY webhook, d.attempt_count
-		ORDER BY webhook, d.attempt_count
+		GROUP BY w.url, d.attempt_count
+		ORDER BY w.url, d.attempt_count
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("query attempts per webhook: %w", err)
@@ -386,16 +391,33 @@ func queryScenario3AttemptsDistribution(ctx context.Context, db *sql.DB) ([]scen
 
 	var out []scenario3AttemptsRow
 	for rows.Next() {
+		var rawURL string
 		var r scenario3AttemptsRow
-		if err := rows.Scan(&r.Webhook, &r.Attempts, &r.Count); err != nil {
+		if err := rows.Scan(&rawURL, &r.Attempts, &r.Count); err != nil {
 			return nil, fmt.Errorf("scan attempts row: %w", err)
 		}
+		r.Webhook = scenario3WebhookLabel(rawURL, goodWebhookURL, badWebhookURL)
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate attempts rows: %w", err)
 	}
 	return out, nil
+}
+
+func scenario3WebhookLabel(webhookURL, goodWebhookURL, badWebhookURL string) string {
+	switch {
+	case scenario3WebhookURLMatches(webhookURL, goodWebhookURL):
+		return "good"
+	case scenario3WebhookURLMatches(webhookURL, badWebhookURL):
+		return "misconfigured-404"
+	default:
+		return webhookURL
+	}
+}
+
+func scenario3WebhookURLMatches(webhookURL, expectedURL string) bool {
+	return strings.TrimSpace(webhookURL) == strings.TrimSpace(expectedURL)
 }
 
 type scenario3DLQReasonRow struct {

@@ -26,6 +26,7 @@ func main() {
 	addr := flag.String("addr", ":8080", "business HTTP server address")
 	metricsAddr := flag.String("metrics-addr", ":9090", "metrics HTTP server address")
 	workerCount := flag.Int("workers", 64, "number of delivery workers")
+	replicaID := flag.String("replica-id", "", "optional replica identity for diagnostics header")
 	minBatch := flag.Int("min-batch", 32, "minimum claim batch size per customer")
 	multiPick := flag.Int("multi-pick", 1, "customers to batch per claim query (1 = single-customer ClaimNextN, >1 = ClaimNextBatch)")
 	hostCap := flag.Int("host-cap", 20, "maximum concurrent in-flight requests per Integration Partner hostname")
@@ -94,6 +95,13 @@ func main() {
 	logger.Info("infra server started", "addr", *metricsAddr)
 
 	runCtx, cancel := context.WithCancel(context.Background())
+
+	if *replicaID != "" {
+		if err := os.Setenv("NOTIFIER_REPLICA_ID", *replicaID); err != nil {
+			logger.Error("failed to set notifier replica id env", "error", err)
+			os.Exit(1)
+		}
+	}
 
 	runtimeCfg := loadWorkerRuntimeConfig()
 	runtimeCfg.WorkerCount = *workerCount
