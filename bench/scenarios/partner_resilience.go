@@ -1055,7 +1055,7 @@ Folded from the legacy Scenarios 2, 3, and 5.
 ## Phase C — Dead Partner Breaker Isolation
 
 | Metric | Control | Dead Partner |
-|---|---|---:|---:|
+|---|---|:---:|---:|
 | Duration | %s | %s |
 | Goroutines (baseline → final) | %d | %d |
 | Dead-customer attempts | — | %d |

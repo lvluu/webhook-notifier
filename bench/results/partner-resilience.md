@@ -2,7 +2,7 @@
 
 ## Description
 
-Profile **dev**: consolidated reliability proof covering transient partner
+Profile **stress**: consolidated reliability proof covering transient partner
 recovery, terminal 4xx fast-fail, and dead-partner circuit-breaker isolation.
 
 Folded from the legacy Scenarios 2, 3, and 5.
@@ -11,13 +11,13 @@ Folded from the legacy Scenarios 2, 3, and 5.
 
 | Metric | Value |
 |---|---:|
-| Events | 100 |
-| Expected Deliveries | 300 |
-| Total Deliveries | 300 |
-| Terminal Deliveries | 300 |
-| Partner A p99 (ms) | 25.26 |
-| Recovery: Successfully recovered | 0 / 0 |
-| Jitter: max retries per second post-recovery | 0 / 0 total |
+| Events | 1000 |
+| Expected Deliveries | 3000 |
+| Total Deliveries | 3000 |
+| Terminal Deliveries | 3000 |
+| Partner A p99 (ms) | 61.85 |
+| Recovery: Successfully recovered | 793 / 793 |
+| Jitter: max retries per second post-recovery | 129 / 794 total |
 
 | Gate | OK |
 |---|---|
@@ -30,12 +30,12 @@ Folded from the legacy Scenarios 2, 3, and 5.
 
 | Metric | Value |
 |---|---:|
-| Events submitted | 20 |
-| Expected Deliveries | 40 |
-| Total Deliveries | 40 |
-| Terminal Deliveries | 40 |
-| Good webhook: succeeded / total | 20 / 20 |
-| Bad webhook: dead / total | 20 / 20 |
+| Events submitted | 100 |
+| Expected Deliveries | 200 |
+| Total Deliveries | 200 |
+| Terminal Deliveries | 200 |
+| Good webhook: succeeded / total | 100 / 100 |
+| Bad webhook: dead / total | 100 / 100 |
 | Bad webhook: retry waste (deliveries with >1 attempt) | 0 |
 
 | Gate | OK |
@@ -47,12 +47,12 @@ Folded from the legacy Scenarios 2, 3, and 5.
 ## Phase C — Dead Partner Breaker Isolation
 
 | Metric | Control | Dead Partner |
-|---|---|---:|---:|
-| Duration | 1.512s | 18.87s |
+|---|---|:---:|---:|
+| Duration | 12.266s | 32.202s |
 | Goroutines (baseline → final) | 6 | 5 |
-| Dead-customer attempts | — | 65 |
-| Dead-customer attempt cap | — | 100 |
-| Dead-customer pending (skipped) | — | 100 |
+| Dead-customer attempts | — | 124 |
+| Dead-customer attempt cap | — | 1000 |
+| Dead-customer pending (skipped) | — | 1000 |
 
 | Gate | OK |
 |---|---|
