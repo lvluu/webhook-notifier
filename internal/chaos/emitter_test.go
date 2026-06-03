@@ -34,7 +34,7 @@ func TestEmitter_SmoothArrival(t *testing.T) {
 		customerIDs[i] = fmt.Sprintf("chaos-%04d", i+1)
 	}
 
-	emitter := chaos.New(chaos.Config{
+	emitter, err := chaos.New(chaos.Config{
 		NotifierURL:  srv.URL,
 		Rate:         targetRate,
 		MaxInFlight:  50,
@@ -42,13 +42,14 @@ func TestEmitter_SmoothArrival(t *testing.T) {
 		CustomerBase: "chaos",
 		HTTPClient:   srv.Client(),
 	})
+	if err != nil {
+		t.Fatalf("new emitter: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), window)
 	defer cancel()
 
-	go emitter.Run(ctx)
-
-	<-ctx.Done()
+	emitter.Run(ctx)
 
 	got := float64(received.Load())
 	want := targetRate * window.Seconds()
@@ -85,7 +86,7 @@ func TestEmitter_MaxInFlight(t *testing.T) {
 
 	const maxInFlight = 3
 
-	emitter := chaos.New(chaos.Config{
+	emitter, err := chaos.New(chaos.Config{
 		NotifierURL:  srv.URL,
 		Rate:         1000.0,
 		MaxInFlight:  maxInFlight,
@@ -93,14 +94,14 @@ func TestEmitter_MaxInFlight(t *testing.T) {
 		CustomerBase: "chaos",
 		HTTPClient:   srv.Client(),
 	})
+	if err != nil {
+		t.Fatalf("new emitter: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	go emitter.Run(ctx)
-
-	<-ctx.Done()
-	time.Sleep(400 * time.Millisecond)
+	emitter.Run(ctx)
 
 	if got := maxSeen.Load(); got > int64(maxInFlight) {
 		t.Fatalf("max concurrent POSTs %d exceeded MaxInFlight %d", got, maxInFlight)
@@ -150,7 +151,7 @@ func TestEmitter_CounterAccuracy(t *testing.T) {
 			customerIDs := make([]string, 1)
 			customerIDs[0] = "chaos-0001"
 
-			emitter := chaos.New(chaos.Config{
+			emitter, err := chaos.New(chaos.Config{
 				NotifierURL:  srvURL,
 				Rate:         5.0,
 				MaxInFlight:  1,
@@ -158,18 +159,14 @@ func TestEmitter_CounterAccuracy(t *testing.T) {
 				CustomerBase: "chaos",
 				HTTPClient:   client,
 			})
+			if err != nil {
+				t.Fatalf("new emitter: %v", err)
+			}
 
-			var wg sync.WaitGroup
-			wg.Add(1)
 			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 			defer cancel()
 
-			go func() {
-				emitter.Run(ctx)
-				wg.Done()
-			}()
-			<-ctx.Done()
-			wg.Wait()
+			emitter.Run(ctx)
 
 			if got := emitter.Sent(); got != tt.wantSent {
 				t.Errorf("sent: got %d, want %d", got, tt.wantSent)
@@ -216,7 +213,7 @@ func TestEmitter_CustomerDistribution(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	emitter := chaos.New(chaos.Config{
+	emitter, err := chaos.New(chaos.Config{
 		NotifierURL:  srv.URL,
 		Rate:         200.0,
 		MaxInFlight:  50,
@@ -224,18 +221,14 @@ func TestEmitter_CustomerDistribution(t *testing.T) {
 		CustomerBase: "chaos",
 		HTTPClient:   srv.Client(),
 	})
+	if err != nil {
+		t.Fatalf("new emitter: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		emitter.Run(ctx)
-		wg.Done()
-	}()
-	<-ctx.Done()
-	wg.Wait()
+	emitter.Run(ctx)
 
 	mu.Lock()
 	for _, cid := range customerIDs {

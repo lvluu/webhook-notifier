@@ -43,11 +43,19 @@ type Emitter struct {
 	shed        atomic.Int64
 	customerMu  sync.Mutex
 	customerIdx int
-	startTime   time.Time
 }
 
 // New returns an Emitter configured for the given parameters.
-func New(cfg Config) *Emitter {
+func New(cfg Config) (*Emitter, error) {
+	if cfg.NotifierURL == "" {
+		return nil, fmt.Errorf("notifier URL is required")
+	}
+	if len(cfg.CustomerIDs) == 0 {
+		return nil, fmt.Errorf("at least one customer ID is required")
+	}
+	if cfg.HTTPClient == nil {
+		cfg.HTTPClient = http.DefaultClient
+	}
 	if cfg.MaxInFlight <= 0 {
 		cfg.MaxInFlight = 10
 	}
@@ -60,7 +68,7 @@ func New(cfg Config) *Emitter {
 		cfg:     cfg,
 		limiter: rate.NewLimiter(rate.Limit(cfg.Rate), 1),
 		sem:     make(chan struct{}, cfg.MaxInFlight),
-	}
+	}, nil
 }
 
 // Sent returns the number of events that received an HTTP 2xx response.
@@ -75,38 +83,66 @@ func (e *Emitter) Shed() int64 { return e.shed.Load() }
 
 // Run blocks until ctx is cancelled, emitting events at the configured rate.
 func (e *Emitter) Run(ctx context.Context) {
-	e.startTime = time.Now()
 	logger := slog.Default().With("service", "chaos-emitter")
+	var wg sync.WaitGroup
+
+	admitCtx := ctx
+	if e.cfg.Duration > 0 {
+		var cancel context.CancelFunc
+		admitCtx, cancel = context.WithTimeout(ctx, e.cfg.Duration)
+		defer cancel()
+	}
 
 	for {
-		if err := e.limiter.Wait(ctx); err != nil {
-			return
-		}
-
-		if e.cfg.Duration > 0 && time.Since(e.startTime) >= e.cfg.Duration {
+		if err := e.limiter.Wait(admitCtx); err != nil {
+			wg.Wait()
 			return
 		}
 
 		cid := e.nextCustomer()
 
-		data, _ := json.Marshal(map[string]interface{}{
-			"subscriber_id": fmt.Sprintf("sub-%d", time.Now().UnixNano()),
-			"source":        e.cfg.CustomerBase,
-		})
+		body, err := e.eventBody(cid)
+		if err != nil {
+			e.failed.Add(1)
+			logger.Error("build event request", "customer", cid, "error", err)
+			continue
+		}
 
-		body, _ := json.Marshal(eventRequest{
-			CustomerID: cid,
-			Type:       "subscriber.created",
-			EventTime:  time.Now().UTC().Format(time.RFC3339),
-			Data:       data,
-		})
+		select {
+		case e.sem <- struct{}{}:
+		case <-admitCtx.Done():
+			wg.Wait()
+			return
+		}
 
-		e.sem <- struct{}{}
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			defer func() { <-e.sem }()
-			e.post(logger, body)
+			e.post(ctx, logger, body)
 		}()
 	}
+}
+
+func (e *Emitter) eventBody(cid string) ([]byte, error) {
+	data, err := json.Marshal(map[string]string{
+		"subscriber_id": fmt.Sprintf("sub-%d", time.Now().UnixNano()),
+		"source":        e.cfg.CustomerBase,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal event data: %w", err)
+	}
+
+	body, err := json.Marshal(eventRequest{
+		CustomerID: cid,
+		Type:       "subscriber.created",
+		EventTime:  time.Now().UTC().Format(time.RFC3339),
+		Data:       data,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal event request: %w", err)
+	}
+	return body, nil
 }
 
 func (e *Emitter) nextCustomer() string {
@@ -117,12 +153,21 @@ func (e *Emitter) nextCustomer() string {
 	return cid
 }
 
-func (e *Emitter) post(logger *slog.Logger, body []byte) {
-	resp, err := e.cfg.HTTPClient.Post(
+func (e *Emitter) post(ctx context.Context, logger *slog.Logger, body []byte) {
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
 		e.cfg.NotifierURL+"/api/events",
-		"application/json",
 		bytes.NewReader(body),
 	)
+	if err != nil {
+		e.failed.Add(1)
+		logger.Error("build event POST request", "error", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := e.cfg.HTTPClient.Do(req)
 	if err != nil {
 		e.failed.Add(1)
 		return

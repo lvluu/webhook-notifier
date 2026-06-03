@@ -66,7 +66,7 @@ func main() {
 		"rate", *rate, "burst", *burst, "duration", duration, "class", *customerClass,
 	)
 
-	emitter := chaos.New(chaos.Config{
+	emitter, err := chaos.New(chaos.Config{
 		NotifierURL:  *notifierURL,
 		Rate:         *rate,
 		MaxInFlight:  *burst,
@@ -75,6 +75,10 @@ func main() {
 		CustomerBase: *customerBase,
 		HTTPClient:   client,
 	})
+	if err != nil {
+		logger.Error("configure chaos emitter", "error", err)
+		os.Exit(1)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -94,6 +98,9 @@ func main() {
 
 	startTime := time.Now()
 	emitter.Run(ctx)
+	if ctx.Err() == nil && *duration > 0 && time.Since(startTime) >= *duration {
+		logger.Info("duration reached")
+	}
 
 	logger.Info("shutdown complete",
 		"total_sent", emitter.Sent(),
