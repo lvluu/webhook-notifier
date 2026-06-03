@@ -84,13 +84,13 @@ services:
       - -metrics-addr
       - :9090
       - -workers
-      - "16"
+      - "48"
       - -min-batch
       - "4"
       - -multi-pick
       - "8"
       - -host-cap
-      - "4"
+      - "40"
       - -discovery-interval
       - 10s
       - -empty-claim-backoff
@@ -105,7 +105,7 @@ services:
       - -claim-query-mode
       - split
       - -max-conns
-      - "30"
+      - "60"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9090/metrics"]
       interval: 2s
@@ -181,13 +181,13 @@ services:
       - -customer-base
       - whale
       - -customers
-      - "5"
+      - "10"
       - -class
       - "3"
       - -rate
-      - "200"
+      - "1000"
       - -burst
-      - "200"
+      - "1000"
 
   chaos-small:
     <<: *chaos-common
