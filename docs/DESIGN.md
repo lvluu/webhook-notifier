@@ -80,7 +80,7 @@ flowchart LR
 
 ### Deep modules (pure logic, isolated unit tests)
 
-- **Scheduler** — Given the set of Customers with pending Deliveries, returns the next Customer to serve. The PoC implements plain round-robin with `container/list.List` + `map` for O(1) Notify and Remove — all Customers get equal share (`WeightSource` returns 1 for every Customer). The interface supports Smooth Weighted Round Robin (SWRR, Nginx-style) for future tiered scheduling; with divergent weights the same O(1) data structure applies. The interface is the load-bearing contract; the implementation (RR / SWRR / DRR) is the trade-off (ADR-0001).
+- **Scheduler** — Given the set of Customers with pending Deliveries, returns the next Customer to serve. The PoC implements plain round-robin with `container/list.List` + `map` for O(1) Notify and Remove — all Customers get equal share (`WeightSource` returns 1 for every Customer). The interface supports Smooth Weighted Round Robin (SWRR, Nginx-style) for future tiered scheduling. Divergent weighted scheduling would need its own implementation; the existing SWRR prototype uses slice scans and rebuilds, not the list+map structure. The interface is the load-bearing contract; the implementation (RR / SWRR / DRR) is the trade-off (ADR-0001).
   ```go
   type Scheduler interface {
       // Pick returns the next Customer to serve and an implementation-specific
@@ -88,6 +88,7 @@ flowchart LR
       // yielding back. batchHint == 0 means "no work".
       Pick(ctx context.Context) (id CustomerID, batchHint uint32, ok bool, err error)
       Notify(CustomerID) // wake the scheduler when work arrives
+      Remove(CustomerID) // stop tracking the Customer when it has no remaining work
   }
 
   // WeightSource resolves a Customer's fairness weight. Default impl returns 1
