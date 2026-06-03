@@ -1842,3 +1842,119 @@ func countSucceededForCustomer(t *testing.T, ctx context.Context, db *sql.DB, cu
 	}
 	return got
 }
+
+func TestPurgeOldDeadLettersRemovesRowsOlderThanMaxAge(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	store := outbox.New(db)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	oldDeadID := submitOneDeliveryToURL(t, ctx, db, "cus_purge_dl_old", srv.URL)
+	claimedOld, ok, err := store.ClaimNext(ctx, "cus_purge_dl_old")
+	if err != nil {
+		t.Fatalf("ClaimNext old dead: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext old dead: got no delivery, want one")
+	}
+	if err := store.MarkDead(ctx, claimedOld.ID, http.StatusNotFound, retry.ReasonTerminal4xx, retry.ReasonTerminal4xx, 10*time.Millisecond); err != nil {
+		t.Fatalf("MarkDead old: %v", err)
+	}
+
+	recentDeadID := submitOneDeliveryToURL(t, ctx, db, "cus_purge_dl_recent", srv.URL)
+	claimedRecent, ok, err := store.ClaimNext(ctx, "cus_purge_dl_recent")
+	if err != nil {
+		t.Fatalf("ClaimNext recent dead: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext recent dead: got no delivery, want one")
+	}
+	if err := store.MarkDead(ctx, claimedRecent.ID, http.StatusNotFound, retry.ReasonTerminal4xx, retry.ReasonTerminal4xx, 10*time.Millisecond); err != nil {
+		t.Fatalf("MarkDead recent: %v", err)
+	}
+
+	retention.AgeTerminalDelivery(t, ctx, db, oldDeadID, 48*time.Hour)
+
+	purged, err := store.PurgeOldDeadLetters(ctx, 24*time.Hour, 10)
+	if err != nil {
+		t.Fatalf("PurgeOldDeadLetters: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged count: got %d, want 1", purged)
+	}
+
+	assertDeadLetterMissing(t, ctx, db, oldDeadID)
+	assertDeadLetter(t, ctx, db, recentDeadID, retry.ReasonTerminal4xx, 1)
+}
+
+func TestPurgeOldDeliveryHistoryRemovesRowsOlderThanMaxAge(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	store := outbox.New(db)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	oldID := submitOneDeliveryToURL(t, ctx, db, "cus_purge_dh_old", srv.URL)
+	claimedOld, ok, err := store.ClaimNext(ctx, "cus_purge_dh_old")
+	if err != nil {
+		t.Fatalf("ClaimNext old: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext old: got no delivery, want one")
+	}
+	if err := store.MarkSucceeded(ctx, claimedOld.ID, http.StatusOK, 10*time.Millisecond); err != nil {
+		t.Fatalf("MarkSucceeded old: %v", err)
+	}
+	retention.AgeTerminalDelivery(t, ctx, db, oldID, 48*time.Hour)
+
+	recentID := submitOneDeliveryToURL(t, ctx, db, "cus_purge_dh_recent", srv.URL)
+	claimedRecent, ok, err := store.ClaimNext(ctx, "cus_purge_dh_recent")
+	if err != nil {
+		t.Fatalf("ClaimNext recent: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext recent: got no delivery, want one")
+	}
+	if err := store.MarkSucceeded(ctx, claimedRecent.ID, http.StatusOK, 10*time.Millisecond); err != nil {
+		t.Fatalf("MarkSucceeded recent: %v", err)
+	}
+	retention.AgeTerminalDelivery(t, ctx, db, recentID, 25*time.Hour)
+
+	archived, err := store.ArchiveTerminalDeliveries(ctx, 24*time.Hour, 10)
+	if err != nil {
+		t.Fatalf("ArchiveTerminalDeliveries: %v", err)
+	}
+	if archived != 2 {
+		t.Fatalf("archived count: got %d, want 2", archived)
+	}
+
+	purged, err := store.PurgeOldDeliveryHistory(ctx, 26*time.Hour, 10)
+	if err != nil {
+		t.Fatalf("PurgeOldDeliveryHistory: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged count: got %d, want 1", purged)
+	}
+
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM delivery_history WHERE delivery_id = $1`, oldID).Scan(&count); err != nil {
+		t.Fatalf("count old history: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("old delivery_history count: got %d, want 0", count)
+	}
+
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM delivery_history WHERE delivery_id = $1`, recentID).Scan(&count); err != nil {
+		t.Fatalf("count recent history: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("recent delivery_history count: got %d, want 1", count)
+	}
+}
