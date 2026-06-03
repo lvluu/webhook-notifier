@@ -104,23 +104,9 @@ func (s *Store) MarkSucceededBatch(ctx context.Context, items []BatchMarkItem) e
 	if s.breakerConfig.FailureThreshold == 0 {
 		return s.commitBatchTx(tx, "success")
 	}
-	webhookIDs, err := batchDeliveryWebhookIDs(ctx, tx, base.ids)
+	closedBreakers, err := s.batchRecordBreakerSuccess(ctx, tx, base.ids)
 	if err != nil {
 		return err
-	}
-	var closedBreakers []string
-	for _, item := range items {
-		wid, ok := webhookIDs[item.DeliveryID]
-		if !ok {
-			return fmt.Errorf("delivery %s not found", item.DeliveryID)
-		}
-		closed, err := s.recordBreakerSuccess(ctx, tx, wid, item.DeliveryID)
-		if err != nil {
-			return err
-		}
-		if closed {
-			closedBreakers = append(closedBreakers, wid)
-		}
 	}
 	if err := s.commitBatchTx(tx, "success"); err != nil {
 		return err
@@ -196,29 +182,9 @@ func (s *Store) MarkRetryBatch(ctx context.Context, items []BatchMarkItem) error
 	if s.breakerConfig.FailureThreshold == 0 {
 		return s.commitBatchTx(tx, "retry")
 	}
-	webhookIDs, err := batchDeliveryWebhookIDs(ctx, tx, retryBatch.ids)
+	trippedBreakers, err := s.batchRecordBreakerFailure(ctx, tx, retryBatch.ids, items, func(item BatchMarkItem) string { return item.ErrorClass })
 	if err != nil {
 		return err
-	}
-	var trippedBreakers []struct {
-		webhookID string
-		reason    string
-	}
-	for _, item := range items {
-		wid, ok := webhookIDs[item.DeliveryID]
-		if !ok {
-			return fmt.Errorf("delivery %s not found", item.DeliveryID)
-		}
-		tripped, err := s.recordBreakerFailure(ctx, tx, wid, item.ErrorClass)
-		if err != nil {
-			return err
-		}
-		if tripped {
-			trippedBreakers = append(trippedBreakers, struct {
-				webhookID string
-				reason    string
-			}{wid, item.ErrorClass})
-		}
 	}
 	if err := s.commitBatchTx(tx, "retry"); err != nil {
 		return err
@@ -301,29 +267,9 @@ func (s *Store) MarkDeadBatch(ctx context.Context, items []BatchMarkItem) error 
 	if s.breakerConfig.FailureThreshold == 0 {
 		return s.commitBatchTx(tx, "dead")
 	}
-	webhookIDs, err := batchDeliveryWebhookIDs(ctx, tx, deadBatch.ids)
+	trippedBreakers, err := s.batchRecordBreakerFailure(ctx, tx, deadBatch.ids, items, func(item BatchMarkItem) string { return item.Reason })
 	if err != nil {
 		return err
-	}
-	var trippedBreakers []struct {
-		webhookID string
-		reason    string
-	}
-	for _, item := range items {
-		wid, ok := webhookIDs[item.DeliveryID]
-		if !ok {
-			return fmt.Errorf("delivery %s not found", item.DeliveryID)
-		}
-		tripped, err := s.recordBreakerFailure(ctx, tx, wid, item.Reason)
-		if err != nil {
-			return err
-		}
-		if tripped {
-			trippedBreakers = append(trippedBreakers, struct {
-				webhookID string
-				reason    string
-			}{wid, item.Reason})
-		}
 	}
 	if err := s.commitBatchTx(tx, "dead"); err != nil {
 		return err

@@ -115,3 +115,42 @@ scenarios:
       retry_cap_delay: 2s
       fairness_ratio_limit: 1.05
       breaker_failure_threshold: 0
+  # Scenario 7: mass breaker tripping under batch mark — validates that the
+  # batch breaker bookkeeping path handles many webhooks tripping
+  # simultaneously in production-sized batches without N+1 per-item
+  # queries inside the marking transaction.
+  scenario7:
+    dev:
+      worker_count: 4
+      customer_count: 10
+      deliveries_per_customer: 200
+      request_timeout: 250ms
+      discovery_interval: 50ms
+      discovery_empty_backoff: 50ms
+      discovery_error_backoff: 50ms
+      discovery_max_backoff: 250ms
+      discovery_limit: 100
+      min_batch_hint: 32
+      breaker_failure_threshold: 2
+      breaker_initial_cooldown: 2s
+      breaker_max_cooldown: 2s
+      retry_max_attempts: 3
+      retry_base_delay: 50ms
+      retry_cap_delay: 50ms
+    stress:
+      worker_count: 16
+      customer_count: 50
+      deliveries_per_customer: 1000
+      request_timeout: 250ms
+      discovery_interval: 50ms
+      discovery_empty_backoff: 50ms
+      discovery_error_backoff: 50ms
+      discovery_max_backoff: 250ms
+      discovery_limit: 200
+      min_batch_hint: 32
+      breaker_failure_threshold: 2
+      breaker_initial_cooldown: 15s
+      breaker_max_cooldown: 15s
+      retry_max_attempts: 3
+      retry_base_delay: 50ms
+      retry_cap_delay: 50ms

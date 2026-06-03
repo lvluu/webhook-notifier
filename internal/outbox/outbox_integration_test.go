@@ -481,6 +481,64 @@ func TestProcessRetryableFailuresOpenWebhookBreaker(t *testing.T) {
 	assertWebhookBreaker(t, ctx, db, submitted.DeliveryIDs[0], "open", 2)
 }
 
+func TestBatchRetryOpensBreakerWithMultipleDeliveries(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	deliveryID := submitOneDelivery(t, ctx, db, "cus_batch_breaker")
+	delivery2, err := appendDeliveryForExistingWebhook(t, ctx, db, deliveryID)
+	if err != nil {
+		t.Fatalf("append delivery 2: %v", err)
+	}
+	delivery3, err := appendDeliveryForExistingWebhook(t, ctx, db, deliveryID)
+	if err != nil {
+		t.Fatalf("append delivery 3: %v", err)
+	}
+	delivery4, err := appendDeliveryForExistingWebhook(t, ctx, db, deliveryID)
+	if err != nil {
+		t.Fatalf("append delivery 4: %v", err)
+	}
+
+	store := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
+		FailureThreshold: 3,
+		InitialCooldown:  time.Hour,
+		MaxCooldown:      time.Hour,
+	}))
+
+	_ = claimDelivery(t, ctx, store, "cus_batch_breaker", deliveryID)
+	_ = claimDelivery(t, ctx, store, "cus_batch_breaker", delivery2)
+	_ = claimDelivery(t, ctx, store, "cus_batch_breaker", delivery3)
+	_ = claimDelivery(t, ctx, store, "cus_batch_breaker", delivery4)
+
+	err = store.MarkRetryBatch(ctx, []outbox.BatchMarkItem{
+		{DeliveryID: deliveryID, StatusCode: 500, ErrorClass: retry.ReasonRetryable5xx, Delay: time.Millisecond},
+		{DeliveryID: delivery2, StatusCode: 500, ErrorClass: retry.ReasonRetryable5xx, Delay: time.Millisecond},
+		{DeliveryID: delivery3, StatusCode: 500, ErrorClass: retry.ReasonRetryable5xx, Delay: time.Millisecond},
+		{DeliveryID: delivery4, StatusCode: 500, ErrorClass: retry.ReasonRetryable5xx, Delay: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("MarkRetryBatch: %v", err)
+	}
+
+	assertWebhookBreaker(t, ctx, db, deliveryID, "open", 4)
+}
+
+func claimDelivery(t *testing.T, ctx context.Context, store *outbox.Store, customerID, deliveryID string) outbox.Delivery {
+	t.Helper()
+
+	claimed, ok, err := store.ClaimNext(ctx, customerID)
+	if err != nil {
+		t.Fatalf("ClaimNext: %v", err)
+	}
+	if !ok {
+		t.Fatalf("ClaimNext: no delivery available")
+	}
+	if claimed.ID != deliveryID {
+		t.Fatalf("ClaimNext: got delivery %s, want %s", claimed.ID, deliveryID)
+	}
+	return claimed
+}
+
 func TestProcessRetryableFailuresCanDisableWebhookBreaker(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)
