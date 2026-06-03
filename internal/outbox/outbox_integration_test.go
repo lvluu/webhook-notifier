@@ -763,13 +763,28 @@ func TestProcessRetryableFailureUsesPreviousRetryDelay(t *testing.T) {
 	if second.PreviousDelay <= 0 {
 		t.Fatalf("second previous delay: got %s, want positive", second.PreviousDelay)
 	}
+	if !durationNear(second.PreviousDelay, firstDelay, time.Millisecond) {
+		t.Fatalf("second previous delay: got %s, want previous scheduled delay %s", second.PreviousDelay, firstDelay)
+	}
+	expectedSecondDelay, terminal, reason := w.RetryPolicy.NextWithKey(
+		second.AttemptNumber,
+		second.PreviousDelay,
+		&http.Response{StatusCode: http.StatusInternalServerError},
+		nil,
+		second.ID,
+		time.Since(second.CreatedAt),
+	)
+	if terminal {
+		t.Fatalf("second retry policy terminal: got true with reason %s, want retry", reason)
+	}
 	if result := w.Process(ctx, store, second); result.Err != nil {
 		t.Fatalf("second Process: %v", result.Err)
 	}
 
 	secondDelay := scheduledRetryDelay(t, ctx, db, submitted.DeliveryIDs[0])
-	if secondDelay <= firstDelay {
-		t.Fatalf("second retry delay: got %s, want greater than first delay %s", secondDelay, firstDelay)
+	expectedSecondDelay = time.Duration(expectedSecondDelay.Milliseconds()) * time.Millisecond
+	if !durationNear(secondDelay, expectedSecondDelay, time.Millisecond) {
+		t.Fatalf("second retry delay: got %s, want policy delay %s", secondDelay, expectedSecondDelay)
 	}
 }
 
@@ -1714,6 +1729,14 @@ func scheduledRetryDelay(t *testing.T, ctx context.Context, db *sql.DB, delivery
 	}
 
 	return time.Duration(delaySeconds * float64(time.Second))
+}
+
+func durationNear(got, want, tolerance time.Duration) bool {
+	delta := got - want
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta <= tolerance
 }
 
 func waitForClaim(t *testing.T, ctx context.Context, store *outbox.Store, customerID string, timeout time.Duration) outbox.Delivery {
