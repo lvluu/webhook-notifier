@@ -20,11 +20,20 @@ func (s *Store) withInFlightDelivery(ctx context.Context, deliveryID string, mut
 	var attemptNumber int
 	var webhookID string
 	err = tx.QueryRowContext(ctx, `
-		SELECT dc.attempt_number, d.webhook_id::text
-		FROM delivery_claims dc
-		JOIN deliveries d ON d.id = dc.delivery_id
-		WHERE dc.delivery_id = $1
-		FOR UPDATE OF dc, d
+		WITH locked_delivery AS (
+			SELECT id, webhook_id::text
+			FROM deliveries
+			WHERE id = $1
+			FOR UPDATE
+		),
+		locked_claim AS (
+			SELECT dc.attempt_number, ld.webhook_id
+			FROM locked_delivery ld
+			JOIN delivery_claims dc ON dc.delivery_id = ld.id
+			FOR UPDATE OF dc
+		)
+		SELECT attempt_number, webhook_id
+		FROM locked_claim
 	`, deliveryID).Scan(&attemptNumber, &webhookID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("delivery %s is not in flight", deliveryID)

@@ -217,6 +217,37 @@ func TestClaimNextConcurrentWorkersDoNotDoubleClaim(t *testing.T) {
 	}
 }
 
+func TestClaimNextBatchDeduplicatesInputCustomers(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	deliveryID := submitOneDelivery(t, ctx, db, "cus_duplicate_batch")
+	store := outbox.New(db)
+
+	deliveries, err := store.ClaimNextBatch(ctx, []string{
+		"cus_duplicate_batch",
+		"cus_duplicate_batch",
+		"cus_duplicate_batch",
+	}, 4)
+	if err != nil {
+		t.Fatalf("ClaimNextBatch: %v", err)
+	}
+	if len(deliveries) != 1 {
+		t.Fatalf("claimed deliveries: got %d, want 1", len(deliveries))
+	}
+	if deliveries[0].ID != deliveryID {
+		t.Fatalf("claimed delivery ID: got %s, want %s", deliveries[0].ID, deliveryID)
+	}
+
+	var claimCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM delivery_claims WHERE delivery_id = $1`, deliveryID).Scan(&claimCount); err != nil {
+		t.Fatalf("count delivery claims: %v", err)
+	}
+	if claimCount != 1 {
+		t.Fatalf("delivery claim count: got %d, want 1", claimCount)
+	}
+}
+
 func TestClaimNextRecoversStaleInFlightDelivery(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)

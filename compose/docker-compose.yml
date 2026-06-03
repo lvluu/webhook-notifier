@@ -91,7 +91,7 @@ services:
       - -multi-pick
       - "8"
       - -host-cap
-      - "4"
+      - "1000"
       - -discovery-interval
       - 10s
       - -empty-claim-backoff
