@@ -579,18 +579,6 @@ func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile part
 		return prPhaseCRunResult{}, fmt.Errorf("seed customers: %w", err)
 	}
 
-	sb.Reset()
-	sb.WriteString("INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active) VALUES ")
-	for i, id := range ids {
-		if i > 0 {
-			sb.WriteString(", ")
-		}
-		path := fmt.Sprintf("/hooks/pr-customer-%02d", i+1)
-		fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, true)", i*4+1, i*4+2, i*4+3, i*4+4)
-		args = append(args[:i*4], append([]any{id, rs.URL() + path, "", "{bench.test}"}, args[i*4:]...)...)
-	}
-	sb.WriteString(" ON CONFLICT DO NOTHING")
-
 	webhookArgs := make([]any, 0, customerCount*4)
 	for i, id := range ids {
 		path := fmt.Sprintf("/hooks/pr-customer-%02d", i+1)
