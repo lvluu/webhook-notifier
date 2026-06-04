@@ -594,4 +594,3 @@ func (s *Store) hasClaimableWorkSplit(ctx context.Context, customerID string) (b
 	`, claimSelection.Any(s.claimLease.Milliseconds()), breakerEligible), customerID).Scan(&exists)
 	return exists, err
 }
-
