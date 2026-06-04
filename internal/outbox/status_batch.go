@@ -160,6 +160,7 @@ func (s *Store) MarkRetryBatch(ctx context.Context, items []BatchMarkItem) error
 			SET status = 'failed_retry',
 			    attempt_count = dc.attempt_number,
 			    next_attempt_at = now() + (dc.delay_ms * interval '1 millisecond'),
+			    previous_delay_millis = dc.delay_ms,
 			    last_error = NULLIF(dc.error_class, ''),
 			    updated_at = now()
 			FROM deleted_claims dc

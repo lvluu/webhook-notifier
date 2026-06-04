@@ -1,0 +1,1 @@
+ALTER TABLE deliveries DROP COLUMN IF EXISTS previous_delay_millis;

@@ -417,39 +417,25 @@ func scanClaimedDeliveries(rows *sql.Rows) ([]Delivery, error) {
 // DiscoverClaimableCustomers returns up to limit Customer IDs greater than
 // afterCustomerID that have at least one Delivery eligible for claim.
 //
-// Uses two branch-specific scans - one for ready rows without an active claim
-// and one for stale claims - so discovery stays index-friendly without a
-// recursive loose-index walk.
+// Reads from the unlogged claimable_customers summary table, which is
+// automatically refreshed at the start of each scan cycle (afterCustomerID="").
 func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID string, limit int) ([]string, error) {
 	if limit < 1 {
 		return nil, fmt.Errorf("limit must be >= 1")
 	}
 
-	claimSelection := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
-	breakerEligible := claimSelection.BreakerEligible()
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		WITH claimable_customers AS (
-			SELECT d.customer_id
-			FROM deliveries d
-			JOIN webhooks w ON w.id = d.webhook_id
-			LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
-			WHERE d.customer_id > $1
-			  AND %s
-			  AND %s
-			UNION
-			SELECT d.customer_id
-			FROM delivery_claims dc
-			JOIN deliveries d ON d.id = dc.delivery_id
-			JOIN webhooks w ON w.id = d.webhook_id
-			WHERE d.customer_id > $1
-			  AND %s
-			  AND %s
-		)
-		SELECT customer_id
-		FROM claimable_customers
+	if afterCustomerID == "" {
+		if err := s.refreshClaimableCustomers(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT customer_id FROM claimable_customers
+		WHERE customer_id > $1
 		ORDER BY customer_id
 		LIMIT $2
-	`, claimSelection.Ready(), breakerEligible, claimSelection.Stale(s.claimLease.Milliseconds()), breakerEligible), afterCustomerID, limit)
+	`, afterCustomerID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("discover claimable customers: %w", err)
 	}
@@ -468,6 +454,58 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 	}
 
 	return customerIDs, nil
+}
+
+func (s *Store) refreshClaimableCustomers(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `TRUNCATE claimable_customers`)
+	if err != nil {
+		return fmt.Errorf("truncate claimable_customers: %w", err)
+	}
+
+	if s.breakerConfig.FailureThreshold == 0 {
+		claimSelection := sqlClaimSelectionFor("d", "dc")
+		_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
+			INSERT INTO claimable_customers (customer_id)
+			SELECT DISTINCT d.customer_id
+			FROM deliveries d
+			LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
+			WHERE %s
+			UNION
+			SELECT DISTINCT d.customer_id
+			FROM delivery_claims dc
+			JOIN deliveries d ON d.id = dc.delivery_id
+			WHERE %s
+			ON CONFLICT (customer_id) DO NOTHING
+		`, claimSelection.Ready(), claimSelection.Stale(s.claimLease.Milliseconds())))
+		if err != nil {
+			return fmt.Errorf("refresh claimable_customers: %w", err)
+		}
+		return nil
+	}
+
+	claimSelection := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
+	breakerEligible := claimSelection.BreakerEligible()
+	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO claimable_customers (customer_id)
+		SELECT DISTINCT d.customer_id
+		FROM deliveries d
+		JOIN webhooks w ON w.id = d.webhook_id
+		LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
+		WHERE %s
+		  AND %s
+		UNION
+		SELECT DISTINCT d.customer_id
+		FROM delivery_claims dc
+		JOIN deliveries d ON d.id = dc.delivery_id
+		JOIN webhooks w ON w.id = d.webhook_id
+		WHERE %s
+		  AND %s
+		ON CONFLICT (customer_id) DO NOTHING
+	`, claimSelection.Ready(), breakerEligible, claimSelection.Stale(s.claimLease.Milliseconds()), breakerEligible))
+	if err != nil {
+		return fmt.Errorf("refresh claimable_customers: %w", err)
+	}
+	return nil
 }
 
 // HasClaimableWork reports whether the customer has any deliveries that are

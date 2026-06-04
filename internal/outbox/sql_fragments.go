@@ -61,13 +61,7 @@ const sqlClaimedDeliveryProjection = `
 	    'in_flight' AS status,
 	    dc.attempt_number, d.next_attempt_at, dc.claimed_at,
 	    d.last_error, d.created_at, d.updated_at,
-	    CASE WHEN d.attempt_count = 0 THEN NULL ELSE (
-	        SELECT GREATEST(EXTRACT(EPOCH FROM (d.next_attempt_at - da.sent_at)) * 1000, 0)::bigint
-	        FROM delivery_attempts da
-	        WHERE da.delivery_id = d.id
-	        ORDER BY da.attempt_number DESC
-	        LIMIT 1
-	    ) END AS previous_delay_millis
+	    d.previous_delay_millis
 	FROM claimed dc
 	JOIN deliveries d ON d.id = dc.delivery_id
 	JOIN events e ON e.id = d.event_id

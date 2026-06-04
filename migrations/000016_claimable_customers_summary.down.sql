@@ -1,0 +1,1 @@
+DROP TABLE IF EXISTS claimable_customers;

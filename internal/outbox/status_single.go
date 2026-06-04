@@ -85,6 +85,7 @@ func (s *Store) MarkRetry(ctx context.Context, deliveryID string, statusCode int
 			SET status = 'failed_retry',
 			    attempt_count = $4,
 			    next_attempt_at = now() + ($2 * interval '1 millisecond'),
+			    previous_delay_millis = $2,
 			    last_error = $3,
 			    updated_at = now()
 			WHERE id = $1
