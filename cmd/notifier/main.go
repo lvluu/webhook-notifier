@@ -6,7 +6,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -29,7 +28,7 @@ func main() {
 	workerCount := flag.Int("workers", 64, "number of delivery workers")
 	replicaID := flag.String("replica-id", "", "optional replica identity for diagnostics header")
 	minBatch := flag.Int("min-batch", 32, "minimum claim batch size per customer")
-	claimBatchHint := flag.Uint("claim-batch-hint", 64, "scheduler per-pick batch hint; lower favours fairness, higher favours throughput")
+	claimBatchHint := flag.Int("claim-batch-hint", 64, "maximum per-pick claim batch size; lower favours fairness, higher favours throughput. 0 = unbounded")
 	multiPick := flag.Int("multi-pick", 1, "customers to batch per claim query (1 = single-customer ClaimNextN, >1 = ClaimNextBatch)")
 	hostCap := flag.Int("host-cap", 20, "maximum concurrent in-flight requests per Integration Partner hostname")
 	discoveryInterval := flag.Duration("discovery-interval", time.Second, "claimable customer discovery interval")
@@ -108,11 +107,7 @@ func main() {
 	runtimeCfg := loadWorkerRuntimeConfig()
 	runtimeCfg.WorkerCount = *workerCount
 	runtimeCfg.MinBatchHint = *minBatch
-	claimBatchHintVal := *claimBatchHint
-	if claimBatchHintVal > math.MaxUint32 {
-		claimBatchHintVal = math.MaxUint32
-	}
-	runtimeCfg.ClaimBatchHint = uint32(claimBatchHintVal)
+	runtimeCfg.MaxBatchHint = *claimBatchHint
 	runtimeCfg.MultiPickCount = *multiPick
 	runtimeCfg.HostConcurrencyCap = *hostCap
 	runtimeCfg.EmptyClaimBackoff = *emptyClaimBackoff

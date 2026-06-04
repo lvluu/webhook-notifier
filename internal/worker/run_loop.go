@@ -77,7 +77,14 @@ func (w *Worker) claimSingle(ctx context.Context, store DeliveryStore) ([]outbox
 		return nil, nil
 	}
 
-	deliveries, err := store.ClaimNextN(ctx, customerID, max(int(batchHint), w.MinBatchHint))
+	limit := int(batchHint)
+	if limit < w.MinBatchHint {
+		limit = w.MinBatchHint
+	}
+	if w.MaxBatchHint > 0 && limit > w.MaxBatchHint {
+		limit = w.MaxBatchHint
+	}
+	deliveries, err := store.ClaimNextN(ctx, customerID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim delivery for %s: %w", customerID, err)
 	}

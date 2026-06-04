@@ -43,7 +43,7 @@ func defaultRuntimeDeps() runtimeDeps {
 			if cfg.EnableWeightedScheduler {
 				return swrr.New(dbweights.New(db))
 			}
-			return roundrobin.New(roundrobin.WithBatchHint(cfg.ClaimBatchHint))
+			return roundrobin.New()
 		},
 		newStore: func(db *sql.DB, cfg workerRuntimeConfig) *outbox.Store {
 			opts := []outbox.Option{
@@ -145,6 +145,7 @@ func startDeliveryRuntimeWithDeps(
 				worker.WithHTTPClient(httpClient),
 				worker.WithHostLimiter(limiter),
 				worker.WithMinBatchHint(cfg.MinBatchHint),
+				worker.WithMaxBatchHint(cfg.MaxBatchHint),
 				worker.WithMultiPickCount(cfg.MultiPickCount),
 				worker.WithRequestTimeout(cfg.RequestTimeout),
 				worker.WithEmptyClaimBackoff(cfg.EmptyClaimBackoff),

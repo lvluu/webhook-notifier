@@ -64,6 +64,7 @@ type Worker struct {
 	Logger              *slog.Logger
 	RequestTimeout      time.Duration
 	MinBatchHint        int
+	MaxBatchHint        int
 	DeliveryConcurrency int
 	EmptyClaimBackoff   time.Duration
 	MultiPickCount      int
@@ -126,6 +127,18 @@ func WithMinBatchHint(minBatchHint int) Option {
 	}
 }
 
+// WithMaxBatchHint sets the maximum claim batch size. The scheduler batchHint
+// (fairness weight) is clamped between MinBatchHint and MaxBatchHint before
+// the claim query. Default 64 (roundrobin ClaimBatchSize). Lower favours
+// fairness; higher favours throughput. Tunable via --claim-batch-hint flag.
+func WithMaxBatchHint(maxBatchHint int) Option {
+	return func(w *Worker) {
+		if maxBatchHint > 0 {
+			w.MaxBatchHint = maxBatchHint
+		}
+	}
+}
+
 // WithDeliveryConcurrency sets max concurrent HTTP delivery classifications
 // per worker run-loop batch.
 func WithDeliveryConcurrency(n int) Option {
@@ -166,6 +179,7 @@ func New(s scheduler.Scheduler, opts ...Option) *Worker {
 		Logger:              observe.NewLogger(nil),
 		RequestTimeout:      30 * time.Second,
 		MinBatchHint:        32,
+		MaxBatchHint:        64,
 		DeliveryConcurrency: 16,
 		EmptyClaimBackoff:   20 * time.Millisecond,
 		MultiPickCount:      1,

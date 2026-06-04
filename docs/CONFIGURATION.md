@@ -23,7 +23,7 @@ All flags for `cmd/notifier`:
 |---|---|---|
 | `--workers` | `64` | Number of delivery worker goroutines |
 | `--min-batch` | `32` | Minimum claim batch size per Customer per scheduler pick |
-| `--claim-batch-hint` | `64` | Round-robin scheduler per-pick batch hint. Single-pick effective limit is `max(claim-batch-hint, min-batch)`. Lower favours fairness (worker yields to rotation sooner); higher favours throughput (more DB amortization per pick). `0` falls back to the built-in default |
+| `--claim-batch-hint` | `64` | Upper bound for per-pick claim batch size. The worker clamps each scheduler `batchHint` (fairness weight) between `--min-batch` and this value. Lower favours fairness (worker yields to rotation sooner); higher favours throughput (more DB amortization per pick). Applied to both roundrobin and weighted scheduler. |
 | `--multi-pick` | `1` | Customers to batch per claim query (1 = single, >1 = `ClaimNextBatch`) |
 | `--host-cap` | `20` | Max concurrent in-flight requests per Integration Partner hostname |
 
