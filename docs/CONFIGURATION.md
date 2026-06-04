@@ -47,7 +47,6 @@ All flags for `cmd/notifier`:
 | Flag | Default | Purpose |
 |---|---|---|
 | `--replica-id` | _empty_ | Optional replica identity for `X-Notifier-Replica` diagnostic header |
-| `--claim-query-mode` | `split` | Claim query mode: `split` (fast-path + fallback) or `legacy` |
 | `--enable-pg-notify-wakeups` | `true` | Use Postgres `LISTEN/NOTIFY` wakeups in addition to polling |
 | `--pg-notify-db` | _empty_ | Optional direct `DATABASE_URL` for `LISTEN/NOTIFY` connections (uses main DB pool when empty) |
 | `--pg-notify-channel` | `webhook_customer_ready` | Postgres `LISTEN/NOTIFY` channel for Customer wakeups |

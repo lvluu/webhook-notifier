@@ -4,6 +4,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
@@ -394,13 +395,12 @@ func TestRouteLatencyZeroProbOverridesServer(t *testing.T) {
 	defer srv.Close()
 
 	start := time.Now()
-	resp, err := testHTTP.Post(srv.URL()+"/fast", "application/json", strings.NewReader(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
+	code := srv.serveCode(httptest.NewRequest(http.MethodPost, "/fast", strings.NewReader(`{}`)))
 	elapsed := time.Since(start)
-	if elapsed >= 150*time.Millisecond {
+	if code != http.StatusOK {
+		t.Fatalf("serveCode status = %d, want %d", code, http.StatusOK)
+	}
+	if elapsed >= 50*time.Millisecond {
 		t.Errorf("elapsed %v, want route latency override to skip server latency", elapsed)
 	}
 }

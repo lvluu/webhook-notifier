@@ -758,6 +758,16 @@ func TestClaimNextSkipsOpenWebhookUntilHalfOpenProbe(t *testing.T) {
 	} else if len(got) != 0 {
 		t.Fatalf("claimable customers with open breaker: got %v, want none", got)
 	}
+	if got, err := store.HasClaimableWorkBatch(ctx, []string{"cus_open_breaker"}); err != nil {
+		t.Fatalf("HasClaimableWorkBatch: %v", err)
+	} else if got["cus_open_breaker"] {
+		t.Fatalf("HasClaimableWorkBatch with open breaker: got %v, want none", got)
+	}
+	if claimed, err := store.ClaimNextBatch(ctx, []string{"cus_open_breaker"}, 10); err != nil {
+		t.Fatalf("ClaimNextBatch while open: %v", err)
+	} else if len(claimed) != 0 {
+		t.Fatalf("ClaimNextBatch while open claimed %d deliveries", len(claimed))
+	}
 	if claimed, ok, err := store.ClaimNext(ctx, "cus_open_breaker"); err != nil {
 		t.Fatalf("ClaimNext while open: %v", err)
 	} else if ok {
@@ -789,6 +799,106 @@ func TestClaimNextSkipsOpenWebhookUntilHalfOpenProbe(t *testing.T) {
 		t.Fatalf("ClaimNext with probe in flight: %v", err)
 	} else if ok {
 		t.Fatalf("ClaimNext with probe in flight claimed %s, want no second probe; other pending delivery is %s", claimed.ID, second)
+	}
+}
+
+func TestHasClaimableWorkIgnoresBreakerWhenBreakerDisabled(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	customerID := "cus_breaker_disabled"
+	deliveryID := submitOneDelivery(t, ctx, db, customerID)
+	store := outbox.New(db,
+		outbox.WithBreakerConfig(outbox.BreakerConfig{FailureThreshold: 0}),
+	)
+
+	_, err := db.ExecContext(ctx, `
+		UPDATE webhooks
+		SET breaker_state = 'open',
+		    breaker_opened_at = now(),
+		    breaker_next_probe_at = now() + interval '1 hour',
+		    breaker_failure_count = 5
+		WHERE id = (SELECT webhook_id FROM deliveries WHERE id = $1)
+	`, deliveryID)
+	if err != nil {
+		t.Fatalf("open breaker: %v", err)
+	}
+
+	hasWork, err := store.HasClaimableWork(ctx, customerID)
+	if err != nil {
+		t.Fatalf("HasClaimableWork: %v", err)
+	}
+	if !hasWork {
+		t.Fatal("HasClaimableWork with breaker disabled: got false, want true")
+	}
+
+	hasWorkBatch, err := store.HasClaimableWorkBatch(ctx, []string{customerID})
+	if err != nil {
+		t.Fatalf("HasClaimableWorkBatch: %v", err)
+	}
+	if !hasWorkBatch[customerID] {
+		t.Fatalf("HasClaimableWorkBatch with breaker disabled: got %v, want customer", hasWorkBatch)
+	}
+
+	claimed, ok, err := store.ClaimNext(ctx, customerID)
+	if err != nil {
+		t.Fatalf("ClaimNext: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext with breaker disabled: got no delivery, want claim")
+	}
+	if claimed.ID != deliveryID {
+		t.Fatalf("ClaimNext with breaker disabled: got %s, want %s", claimed.ID, deliveryID)
+	}
+}
+
+func TestClaimNextBatchIgnoresBreakerWhenBreakerDisabled(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	first := submitOneDelivery(t, ctx, db, "cus_batch_breaker_disabled")
+	second, err := appendDeliveryForExistingWebhook(t, ctx, db, first)
+	if err != nil {
+		t.Fatalf("append delivery: %v", err)
+	}
+
+	store := outbox.New(db,
+		outbox.WithBreakerConfig(outbox.BreakerConfig{FailureThreshold: 0}),
+	)
+
+	_, err = db.ExecContext(ctx, `
+		UPDATE webhooks
+		SET breaker_state = 'open',
+		    breaker_opened_at = now(),
+		    breaker_next_probe_at = now() + interval '1 hour',
+		    breaker_failure_count = 5
+		WHERE id = (SELECT webhook_id FROM deliveries WHERE id = $1)
+	`, first)
+	if err != nil {
+		t.Fatalf("open breaker: %v", err)
+	}
+
+	claimed, err := store.ClaimNextBatch(ctx, []string{"cus_batch_breaker_disabled"}, 10)
+	if err != nil {
+		t.Fatalf("ClaimNextBatch: %v", err)
+	}
+	if len(claimed) != 2 {
+		t.Fatalf("ClaimNextBatch with breaker disabled: got %d deliveries, want 2", len(claimed))
+	}
+
+	got := map[string]bool{
+		first:  false,
+		second: false,
+	}
+	for _, delivery := range claimed {
+		if _, ok := got[delivery.ID]; !ok {
+			t.Fatalf("ClaimNextBatch with breaker disabled: got unexpected delivery %s", delivery.ID)
+		}
+		got[delivery.ID] = true
+	}
+	for id, seen := range got {
+		if !seen {
+			t.Fatalf("ClaimNextBatch with breaker disabled: missing delivery %s", id)
+		}
 	}
 }
 

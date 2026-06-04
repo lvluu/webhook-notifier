@@ -14,7 +14,6 @@ type workerRuntimeConfig struct {
 	EnablePgNotifyWakeups   bool
 	PgNotifyDSN             string
 	PgNotifyChannel         string
-	ClaimQueryMode          string
 	EnableWeightedScheduler bool
 	Discovery               worker.DiscoveryConfig
 }
@@ -28,7 +27,6 @@ func loadWorkerRuntimeConfig() workerRuntimeConfig {
 		BacklogSampleInterval: 5 * time.Second,
 		EnablePgNotifyWakeups: true,
 		PgNotifyChannel:       "webhook_customer_ready",
-		ClaimQueryMode:        "split",
 		Discovery: worker.DiscoveryConfig{
 			Interval:     time.Second,
 			EmptyBackoff: 5 * time.Second,

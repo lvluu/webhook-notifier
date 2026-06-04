@@ -2,12 +2,43 @@ package outbox
 
 import "fmt"
 
-func sqlClaimablePredicate(deliveryAlias, claimAlias string) string {
+type sqlClaimSelection struct {
+	deliveryAlias string
+	claimAlias    string
+	webhookAlias  string
+}
+
+func sqlClaimSelectionFor(deliveryAlias, claimAlias string) sqlClaimSelection {
+	return sqlClaimSelection{
+		deliveryAlias: deliveryAlias,
+		claimAlias:    claimAlias,
+	}
+}
+
+func (s sqlClaimSelection) WithWebhookAlias(webhookAlias string) sqlClaimSelection {
+	s.webhookAlias = webhookAlias
+	return s
+}
+
+func (s sqlClaimSelection) Ready() string {
+	return fmt.Sprintf(`%s.status IN ('pending', 'failed_retry')
+          AND %s.next_attempt_at <= now()
+          AND %s.delivery_id IS NULL`, s.deliveryAlias, s.deliveryAlias, s.claimAlias)
+}
+
+func (s sqlClaimSelection) Stale(claimLeaseMS int64) string {
+	return fmt.Sprintf(`%s.claimed_at < now() - (%d * interval '1 millisecond')`, s.claimAlias, claimLeaseMS)
+}
+
+func (s sqlClaimSelection) Any(claimLeaseMS int64) string {
 	return fmt.Sprintf(`(
-      (%s.status IN ('pending', 'failed_retry') AND %s.next_attempt_at <= now()
-       AND NOT EXISTS (SELECT 1 FROM delivery_claims %s WHERE %s.delivery_id = %s.id))
-      OR EXISTS (SELECT 1 FROM delivery_claims %s WHERE %s.delivery_id = %s.id AND %s.claimed_at < now() - ($2 * interval '1 millisecond'))
-  )`, deliveryAlias, deliveryAlias, claimAlias, claimAlias, deliveryAlias, claimAlias, claimAlias, deliveryAlias, claimAlias)
+      (%s)
+      OR (%s)
+  )`, s.Ready(), s.Stale(claimLeaseMS))
+}
+
+func (s sqlClaimSelection) BreakerEligible() string {
+	return sqlBreakerEligiblePredicate(s.webhookAlias, s.deliveryAlias)
 }
 
 func sqlBreakerEligiblePredicate(webhookAlias, deliveryAlias string) string {
