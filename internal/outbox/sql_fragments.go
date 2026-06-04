@@ -2,6 +2,45 @@ package outbox
 
 import "fmt"
 
+type sqlClaimSelection struct {
+	deliveryAlias string
+	claimAlias    string
+	webhookAlias  string
+}
+
+func sqlClaimSelectionFor(deliveryAlias, claimAlias string) sqlClaimSelection {
+	return sqlClaimSelection{
+		deliveryAlias: deliveryAlias,
+		claimAlias:    claimAlias,
+	}
+}
+
+func (s sqlClaimSelection) WithWebhookAlias(webhookAlias string) sqlClaimSelection {
+	s.webhookAlias = webhookAlias
+	return s
+}
+
+func (s sqlClaimSelection) Ready() string {
+	return fmt.Sprintf(`%s.status IN ('pending', 'failed_retry')
+          AND %s.next_attempt_at <= now()
+          AND %s.delivery_id IS NULL`, s.deliveryAlias, s.deliveryAlias, s.claimAlias)
+}
+
+func (s sqlClaimSelection) Stale() string {
+	return fmt.Sprintf(`%s.claimed_at < now() - ($2 * interval '1 millisecond')`, s.claimAlias)
+}
+
+func (s sqlClaimSelection) Any() string {
+	return fmt.Sprintf(`(
+      (%s)
+      OR (%s)
+  )`, s.Ready(), s.Stale())
+}
+
+func (s sqlClaimSelection) BreakerEligible() string {
+	return sqlBreakerEligiblePredicate(s.webhookAlias, s.deliveryAlias)
+}
+
 func sqlClaimablePredicate(deliveryAlias, claimAlias string) string {
 	return fmt.Sprintf(`(
       (%s.status IN ('pending', 'failed_retry') AND %s.next_attempt_at <= now()
