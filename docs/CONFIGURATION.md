@@ -23,6 +23,7 @@ All flags for `cmd/notifier`:
 |---|---|---|
 | `--workers` | `64` | Number of delivery worker goroutines |
 | `--min-batch` | `32` | Minimum claim batch size per Customer per scheduler pick |
+| `--claim-batch-hint` | `64` | Round-robin scheduler per-pick batch hint. Single-pick effective limit is `max(claim-batch-hint, min-batch)`. Lower favours fairness (worker yields to rotation sooner); higher favours throughput (more DB amortization per pick). `0` falls back to the built-in default |
 | `--multi-pick` | `1` | Customers to batch per claim query (1 = single, >1 = `ClaimNextBatch`) |
 | `--host-cap` | `20` | Max concurrent in-flight requests per Integration Partner hostname |
 
@@ -180,7 +181,10 @@ Defined in `bench/profiles.yaml`:
    tuples under load and acceptable dead-letter rate.
 2. **Throughput second**: sweep `worker_count × db_conns × min_batch`.
 3. **Fairness third**: verify Small Customer P95 first-attempt queue latency
-   stays within SLO under concurrent Whale load.
+   stays within SLO under concurrent Whale load. If a Whale occupies workers
+   too long per pick, lower `--claim-batch-hint` (and `--min-batch`) toward
+   `1`–`8` so workers yield to rotation sooner; this trades throughput for
+   tighter fairness tail latency.
 4. **Infrastructure fourth**: DB sizing, pooling, partitioning/sharding.
 
 See [docs/WORKFLOW.md](WORKFLOW.md) for the full execution path and tuning
