@@ -542,6 +542,10 @@ func TestHasClaimableWorkMatchesClaimEligibility(t *testing.T) {
 		t.Fatalf("set due retry: %v", err)
 	}
 
+	if _, err := store.DiscoverClaimableCustomers(ctx, "", 1); err != nil {
+		t.Fatalf("refresh claimable customers: %v", err)
+	}
+
 	tests := []struct {
 		customerID string
 		want       bool
@@ -821,6 +825,10 @@ func TestHasClaimableWorkIgnoresBreakerWhenBreakerDisabled(t *testing.T) {
 	`, deliveryID)
 	if err != nil {
 		t.Fatalf("open breaker: %v", err)
+	}
+
+	if _, err := store.DiscoverClaimableCustomers(ctx, "", 1); err != nil {
+		t.Fatalf("refresh claimable customers: %v", err)
 	}
 
 	hasWork, err := store.HasClaimableWork(ctx, customerID)
@@ -1721,6 +1729,10 @@ func TestHasClaimableWorkBatchExcludesOpenBreaker(t *testing.T) {
 		WHERE id = (SELECT webhook_id FROM deliveries WHERE id = $1)
 	`, openBreaker); err != nil {
 		t.Fatalf("open breaker: %v", err)
+	}
+
+	if _, err := store.DiscoverClaimableCustomers(ctx, "", 1); err != nil {
+		t.Fatalf("refresh claimable customers: %v", err)
 	}
 
 	got, err := store.HasClaimableWorkBatch(ctx, []string{"cus_open_breaker", "cus_eligible"})

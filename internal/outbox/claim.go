@@ -457,14 +457,19 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 }
 
 func (s *Store) refreshClaimableCustomers(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `TRUNCATE claimable_customers`)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("truncate claimable_customers: %w", err)
+		return fmt.Errorf("begin refresh: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM claimable_customers`); err != nil {
+		return fmt.Errorf("clear claimable_customers: %w", err)
 	}
 
 	if s.breakerConfig.FailureThreshold == 0 {
 		claimSelection := sqlClaimSelectionFor("d", "dc")
-		_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
+		_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO claimable_customers (customer_id)
 			SELECT DISTINCT d.customer_id
 			FROM deliveries d
@@ -480,12 +485,12 @@ func (s *Store) refreshClaimableCustomers(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("refresh claimable_customers: %w", err)
 		}
-		return nil
+		return tx.Commit()
 	}
 
 	claimSelection := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
 	breakerEligible := claimSelection.BreakerEligible()
-	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
+	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO claimable_customers (customer_id)
 		SELECT DISTINCT d.customer_id
 		FROM deliveries d
@@ -505,15 +510,12 @@ func (s *Store) refreshClaimableCustomers(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("refresh claimable_customers: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // HasClaimableWork reports whether the customer has any deliveries that are
 // currently eligible for claim, matching ClaimNextN and discovery semantics.
 func (s *Store) HasClaimableWork(ctx context.Context, customerID string) (bool, error) {
-	if err := s.ensureClaimableCustomers(ctx); err != nil {
-		return false, err
-	}
 	return s.hasClaimableWorkSplit(ctx, customerID)
 }
 
@@ -525,24 +527,10 @@ func (s *Store) HasClaimableWorkBatch(ctx context.Context, customerIDs []string)
 	if len(customerIDs) == 0 {
 		return nil, nil
 	}
-	if err := s.ensureClaimableCustomers(ctx); err != nil {
-		return nil, err
-	}
 	if s.breakerConfig.FailureThreshold == 0 {
 		return s.hasClaimableWorkBatchWithoutBreaker(ctx, customerIDs)
 	}
 	return s.hasClaimableWorkBatchWithBreaker(ctx, customerIDs)
-}
-
-func (s *Store) ensureClaimableCustomers(ctx context.Context) error {
-	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM claimable_customers`).Scan(&count); err != nil {
-		return fmt.Errorf("check claimable_customers: %w", err)
-	}
-	if count > 0 {
-		return nil
-	}
-	return s.refreshClaimableCustomers(ctx)
 }
 
 func (s *Store) hasClaimableWorkBatchWithoutBreaker(ctx context.Context, customerIDs []string) (map[string]bool, error) {
