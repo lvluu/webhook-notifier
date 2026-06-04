@@ -511,6 +511,9 @@ func (s *Store) refreshClaimableCustomers(ctx context.Context) error {
 // HasClaimableWork reports whether the customer has any deliveries that are
 // currently eligible for claim, matching ClaimNextN and discovery semantics.
 func (s *Store) HasClaimableWork(ctx context.Context, customerID string) (bool, error) {
+	if err := s.ensureClaimableCustomers(ctx); err != nil {
+		return false, err
+	}
 	return s.hasClaimableWorkSplit(ctx, customerID)
 }
 
@@ -522,31 +525,31 @@ func (s *Store) HasClaimableWorkBatch(ctx context.Context, customerIDs []string)
 	if len(customerIDs) == 0 {
 		return nil, nil
 	}
+	if err := s.ensureClaimableCustomers(ctx); err != nil {
+		return nil, err
+	}
 	if s.breakerConfig.FailureThreshold == 0 {
 		return s.hasClaimableWorkBatchWithoutBreaker(ctx, customerIDs)
 	}
 	return s.hasClaimableWorkBatchWithBreaker(ctx, customerIDs)
 }
 
-func (s *Store) hasClaimableWorkBatchWithoutBreaker(ctx context.Context, customerIDs []string) (map[string]bool, error) {
-	claimSelection := sqlClaimSelectionFor("d", "dc")
+func (s *Store) ensureClaimableCustomers(ctx context.Context) error {
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM claimable_customers`).Scan(&count); err != nil {
+		return fmt.Errorf("check claimable_customers: %w", err)
+	}
+	if count > 0 {
+		return nil
+	}
+	return s.refreshClaimableCustomers(ctx)
+}
 
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		WITH claimable AS (
-			SELECT DISTINCT d.customer_id
-			FROM deliveries d
-			LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
-			WHERE d.customer_id = ANY($1)
-			  AND %s
-			UNION
-			SELECT DISTINCT d.customer_id
-			FROM delivery_claims dc
-			JOIN deliveries d ON d.id = dc.delivery_id
-			WHERE d.customer_id = ANY($1)
-			  AND %s
-		)
-		SELECT customer_id FROM claimable
-	`, claimSelection.Ready(), claimSelection.Stale(s.claimLease.Milliseconds())), customerIDs)
+func (s *Store) hasClaimableWorkBatchWithoutBreaker(ctx context.Context, customerIDs []string) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT customer_id FROM claimable_customers
+		WHERE customer_id = ANY($1)
+	`, customerIDs)
 	if err != nil {
 		return nil, fmt.Errorf("has claimable work batch: %w", err)
 	}
@@ -556,28 +559,10 @@ func (s *Store) hasClaimableWorkBatchWithoutBreaker(ctx context.Context, custome
 }
 
 func (s *Store) hasClaimableWorkBatchWithBreaker(ctx context.Context, customerIDs []string) (map[string]bool, error) {
-	claimSelection := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
-	breakerEligible := claimSelection.BreakerEligible()
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		WITH claimable AS (
-			SELECT DISTINCT d.customer_id
-			FROM deliveries d
-			JOIN webhooks w ON w.id = d.webhook_id
-			LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
-			WHERE d.customer_id = ANY($1)
-			  AND %s
-			  AND %s
-			UNION
-			SELECT DISTINCT d.customer_id
-			FROM delivery_claims dc
-			JOIN deliveries d ON d.id = dc.delivery_id
-			JOIN webhooks w ON w.id = d.webhook_id
-			WHERE d.customer_id = ANY($1)
-			  AND %s
-			  AND %s
-		)
-		SELECT customer_id FROM claimable
-	`, claimSelection.Ready(), breakerEligible, claimSelection.Stale(s.claimLease.Milliseconds()), breakerEligible), customerIDs)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT customer_id FROM claimable_customers
+		WHERE customer_id = ANY($1)
+	`, customerIDs)
 	if err != nil {
 		return nil, fmt.Errorf("has claimable work batch with breaker: %w", err)
 	}
@@ -603,32 +588,10 @@ func scanClaimableWorkBatch(rows *sql.Rows, capacity int) (map[string]bool, erro
 
 func (s *Store) hasClaimableWorkSplit(ctx context.Context, customerID string) (bool, error) {
 	var exists bool
-	claimSelection := sqlClaimSelectionFor("d", "dc")
-	if s.breakerConfig.FailureThreshold == 0 {
-		err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
-			SELECT EXISTS (
-				SELECT 1
-				FROM deliveries d
-				LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
-				WHERE d.customer_id = $1
-				  AND %s
-			)
-		`, claimSelection.Any(s.claimLease.Milliseconds())), customerID).Scan(&exists)
-		return exists, err
-	}
-
-	claimSelection = claimSelection.WithWebhookAlias("w")
-	breakerEligible := claimSelection.BreakerEligible()
-	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
+	err := s.db.QueryRowContext(ctx, `
 		SELECT EXISTS (
-			SELECT 1
-			FROM deliveries d
-			JOIN webhooks w ON w.id = d.webhook_id
-			LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
-			WHERE d.customer_id = $1
-			  AND %s
-			  AND %s
+			SELECT 1 FROM claimable_customers WHERE customer_id = $1
 		)
-	`, claimSelection.Any(s.claimLease.Milliseconds()), breakerEligible), customerID).Scan(&exists)
+	`, customerID).Scan(&exists)
 	return exists, err
 }
