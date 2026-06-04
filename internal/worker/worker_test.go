@@ -16,6 +16,7 @@ import (
 	neturl "net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -61,6 +62,31 @@ func (r *recordingScheduler) Notified() []string {
 	copy(out, r.notified)
 	return out
 }
+
+type hintPick struct {
+	customerID string
+	batchHint  uint32
+}
+
+type hintScheduler struct {
+	mu    sync.Mutex
+	picks []hintPick
+	idx   int
+}
+
+func (s *hintScheduler) Pick(ctx context.Context) (string, uint32, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.idx >= len(s.picks) {
+		return "", 0, false, ctx.Err()
+	}
+	pick := s.picks[s.idx]
+	s.idx++
+	return pick.customerID, pick.batchHint, true, nil
+}
+
+func (s *hintScheduler) Notify(string) {}
+func (s *hintScheduler) Remove(string) {}
 
 type oneShotScheduler struct {
 	mu       sync.Mutex
@@ -144,6 +170,188 @@ func newTestWorker(opts ...worker.Option) *worker.Worker {
 	return worker.New(stubScheduler{}, opts...)
 }
 
+func TestConfigValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mutate  func(*worker.Config)
+		wantErr string
+	}{
+		{
+			name: "default",
+		},
+		{
+			name: "unbounded max batch",
+			mutate: func(c *worker.Config) {
+				c.MaxBatchHint = 0
+			},
+		},
+		{
+			name: "max equals min",
+			mutate: func(c *worker.Config) {
+				c.MinBatchHint = 16
+				c.MaxBatchHint = 16
+			},
+		},
+		{
+			name: "min batch below one",
+			mutate: func(c *worker.Config) {
+				c.MinBatchHint = 0
+			},
+			wantErr: "min batch hint must be >= 1",
+		},
+		{
+			name: "max batch below zero",
+			mutate: func(c *worker.Config) {
+				c.MaxBatchHint = -1
+			},
+			wantErr: "max batch hint must be >= 0",
+		},
+		{
+			name: "max conflicts with min",
+			mutate: func(c *worker.Config) {
+				c.MinBatchHint = 50
+				c.MaxBatchHint = 10
+			},
+			wantErr: "max batch hint must be 0 or >= min batch hint",
+		},
+		{
+			name: "multi-pick below one",
+			mutate: func(c *worker.Config) {
+				c.MultiPickCount = 0
+			},
+			wantErr: "multi-pick count must be >= 1",
+		},
+		{
+			name: "empty claim backoff missing",
+			mutate: func(c *worker.Config) {
+				c.EmptyClaimBackoff = 0
+			},
+			wantErr: "empty claim backoff must be > 0",
+		},
+		{
+			name: "request timeout missing",
+			mutate: func(c *worker.Config) {
+				c.RequestTimeout = 0
+			},
+			wantErr: "request timeout must be > 0",
+		},
+		{
+			name: "delivery concurrency below one",
+			mutate: func(c *worker.Config) {
+				c.DeliveryConcurrency = 0
+			},
+			wantErr: "delivery concurrency must be >= 1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			config := worker.DefaultConfig()
+			if tt.mutate != nil {
+				tt.mutate(&config)
+			}
+
+			err := config.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate error: got %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Validate error: got nil, want %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate error: got %q, want containing %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestConfigClaimLimit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		mutate    func(*worker.Config)
+		batchHint uint32
+		want      int
+	}{
+		{
+			name:      "raises scheduler hint to min",
+			batchHint: 1,
+			want:      32,
+		},
+		{
+			name:      "caps scheduler hint at max",
+			batchHint: 100,
+			want:      64,
+		},
+		{
+			name: "allows unbounded max",
+			mutate: func(c *worker.Config) {
+				c.MaxBatchHint = 0
+			},
+			batchHint: 100,
+			want:      100,
+		},
+		{
+			name: "uses custom bounds",
+			mutate: func(c *worker.Config) {
+				c.MinBatchHint = 10
+				c.MaxBatchHint = 40
+			},
+			batchHint: 100,
+			want:      40,
+		},
+		{
+			name: "defensively preserves min for invalid max below min",
+			mutate: func(c *worker.Config) {
+				c.MinBatchHint = 50
+				c.MaxBatchHint = 10
+			},
+			batchHint: 100,
+			want:      100,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			config := worker.DefaultConfig()
+			if tt.mutate != nil {
+				tt.mutate(&config)
+			}
+
+			if got := config.ClaimLimit(tt.batchHint); got != tt.want {
+				t.Fatalf("ClaimLimit(%d): got %d, want %d", tt.batchHint, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewWithConfigRejectsInvalidOptionOverride(t *testing.T) {
+	t.Parallel()
+
+	_, err := worker.NewWithConfig(
+		stubScheduler{},
+		worker.DefaultConfig(),
+		worker.WithMinBatchHint(50),
+		worker.WithMaxBatchHint(10),
+	)
+	if err == nil {
+		t.Fatal("NewWithConfig error: got nil, want invalid option override")
+	}
+	if !strings.Contains(err.Error(), "max batch hint must be 0 or >= min batch hint") {
+		t.Fatalf("NewWithConfig error: got %q, want max/min validation", err.Error())
+	}
+}
+
 type recordingDeliveryStore struct {
 	succeeded int
 	retried   int
@@ -197,6 +405,45 @@ func (r *recordingDeliveryStore) MarkDeadBatch(context.Context, []outbox.BatchMa
 	return nil
 }
 
+type claimLimitStore struct {
+	recordingDeliveryStore
+
+	done chan struct{}
+	once sync.Once
+
+	mu         sync.Mutex
+	limit      int
+	batchLimit int
+}
+
+func (s *claimLimitStore) ClaimNextN(_ context.Context, _ string, limit int) ([]outbox.Delivery, error) {
+	s.mu.Lock()
+	s.limit = limit
+	s.mu.Unlock()
+	s.once.Do(func() { close(s.done) })
+	return nil, nil
+}
+
+func (s *claimLimitStore) ClaimNextBatch(_ context.Context, _ []string, limit int) ([]outbox.Delivery, error) {
+	s.mu.Lock()
+	s.batchLimit = limit
+	s.mu.Unlock()
+	s.once.Do(func() { close(s.done) })
+	return nil, nil
+}
+
+func (s *claimLimitStore) HasClaimableWork(context.Context, string) (bool, error) {
+	return false, nil
+}
+
+func (s *claimLimitStore) HasClaimableWorkBatch(_ context.Context, customerIDs []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(customerIDs))
+	for _, customerID := range customerIDs {
+		out[customerID] = false
+	}
+	return out, nil
+}
+
 type removeOnEmptyClaimStore struct {
 	done            chan struct{}
 	once            sync.Once
@@ -245,6 +492,110 @@ func (s *removeOnEmptyClaimStore) MarkRetryBatch(context.Context, []outbox.Batch
 }
 func (s *removeOnEmptyClaimStore) MarkDeadBatch(context.Context, []outbox.BatchMarkItem) error {
 	return nil
+}
+
+func TestRun_ClaimSingleClampsSchedulerHintToMaxBatchHint(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := &claimLimitStore{done: make(chan struct{})}
+	sched := &hintScheduler{picks: []hintPick{{customerID: "cus_a", batchHint: 100}}}
+	w := worker.New(
+		sched,
+		worker.WithMinBatchHint(10),
+		worker.WithMaxBatchHint(40),
+		worker.WithEmptyClaimBackoff(time.Hour),
+	)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.Run(ctx, store) }()
+
+	<-store.done
+	cancel()
+
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error: got %v, want context.Canceled", err)
+	}
+
+	store.mu.Lock()
+	got := store.limit
+	store.mu.Unlock()
+	if got != 40 {
+		t.Fatalf("ClaimNextN limit: got %d, want 40", got)
+	}
+}
+
+func TestRun_ClaimSingleAllowsUnboundedMaxBatchHint(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := &claimLimitStore{done: make(chan struct{})}
+	sched := &hintScheduler{picks: []hintPick{{customerID: "cus_a", batchHint: 100}}}
+	w := worker.New(
+		sched,
+		worker.WithMinBatchHint(10),
+		worker.WithMaxBatchHint(0),
+		worker.WithEmptyClaimBackoff(time.Hour),
+	)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.Run(ctx, store) }()
+
+	<-store.done
+	cancel()
+
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error: got %v, want context.Canceled", err)
+	}
+
+	store.mu.Lock()
+	got := store.limit
+	store.mu.Unlock()
+	if got != 100 {
+		t.Fatalf("ClaimNextN limit: got %d, want 100", got)
+	}
+}
+
+func TestRun_ClaimMultiAppliesMaxBatchHintToBatchLimit(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := &claimLimitStore{done: make(chan struct{})}
+	sched := &hintScheduler{picks: []hintPick{
+		{customerID: "cus_a", batchHint: 100},
+		{customerID: "cus_b", batchHint: 100},
+		{customerID: "cus_c", batchHint: 100},
+	}}
+	w := worker.New(
+		sched,
+		worker.WithMinBatchHint(10),
+		worker.WithMaxBatchHint(40),
+		worker.WithMultiPickCount(3),
+		worker.WithEmptyClaimBackoff(time.Hour),
+	)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.Run(ctx, store) }()
+
+	<-store.done
+	cancel()
+
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error: got %v, want context.Canceled", err)
+	}
+
+	store.mu.Lock()
+	got := store.batchLimit
+	store.mu.Unlock()
+	if got != 120 {
+		t.Fatalf("ClaimNextBatch limit: got %d, want 120", got)
+	}
 }
 
 func TestRun_RemovesCustomerWhenEmptyClaimHasNoClaimableWork(t *testing.T) {

@@ -106,11 +106,11 @@ func main() {
 
 	runtimeCfg := loadWorkerRuntimeConfig()
 	runtimeCfg.WorkerCount = *workerCount
-	runtimeCfg.MinBatchHint = *minBatch
-	runtimeCfg.MaxBatchHint = *claimBatchHint
-	runtimeCfg.MultiPickCount = *multiPick
+	runtimeCfg.Worker.MinBatchHint = *minBatch
+	runtimeCfg.Worker.MaxBatchHint = *claimBatchHint
+	runtimeCfg.Worker.MultiPickCount = *multiPick
 	runtimeCfg.HostConcurrencyCap = *hostCap
-	runtimeCfg.EmptyClaimBackoff = *emptyClaimBackoff
+	runtimeCfg.Worker.EmptyClaimBackoff = *emptyClaimBackoff
 	runtimeCfg.BacklogSampleInterval = *backlogSampleInterval
 	runtimeCfg.EnablePgNotifyWakeups = *enablePgNotifyWakeups
 	runtimeCfg.PgNotifyDSN = *pgNotifyDSN

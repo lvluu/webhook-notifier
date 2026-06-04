@@ -8,12 +8,8 @@ import (
 
 type workerRuntimeConfig struct {
 	WorkerCount             int
-	MinBatchHint            int
-	MaxBatchHint            int
-	MultiPickCount          int
+	Worker                  worker.Config
 	HostConcurrencyCap      int
-	RequestTimeout          time.Duration
-	EmptyClaimBackoff       time.Duration
 	BacklogSampleInterval   time.Duration
 	EnablePgNotifyWakeups   bool
 	PgNotifyDSN             string
@@ -24,14 +20,11 @@ type workerRuntimeConfig struct {
 }
 
 func loadWorkerRuntimeConfig() workerRuntimeConfig {
+	workerConfig := worker.DefaultConfig()
 	return workerRuntimeConfig{
 		WorkerCount:           64,
-		MinBatchHint:          32,
-		MaxBatchHint:          64,
-		MultiPickCount:        1,
+		Worker:                workerConfig,
 		HostConcurrencyCap:    16,
-		RequestTimeout:        30 * time.Second,
-		EmptyClaimBackoff:     20 * time.Millisecond,
 		BacklogSampleInterval: 5 * time.Second,
 		EnablePgNotifyWakeups: true,
 		PgNotifyChannel:       "webhook_customer_ready",

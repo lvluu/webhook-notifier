@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -57,17 +58,72 @@ type DeliveryStore interface {
 
 // Worker sends webhook Deliveries and records retry outcomes.
 type Worker struct {
-	HTTP                *http.Client
-	RetryPolicy         retry.RetryPolicy
-	Scheduler           scheduler.Scheduler
-	HostLimiter         *HostLimiter
-	Logger              *slog.Logger
+	HTTP        *http.Client
+	RetryPolicy retry.RetryPolicy
+	Scheduler   scheduler.Scheduler
+	HostLimiter *HostLimiter
+	Logger      *slog.Logger
+	Config      Config
+}
+
+// Config contains the worker settings whose values interact at runtime.
+type Config struct {
 	RequestTimeout      time.Duration
 	MinBatchHint        int
 	MaxBatchHint        int
 	DeliveryConcurrency int
 	EmptyClaimBackoff   time.Duration
 	MultiPickCount      int
+}
+
+// DefaultConfig returns the worker runtime defaults.
+func DefaultConfig() Config {
+	return Config{
+		RequestTimeout:      30 * time.Second,
+		MinBatchHint:        32,
+		MaxBatchHint:        64,
+		DeliveryConcurrency: 16,
+		EmptyClaimBackoff:   20 * time.Millisecond,
+		MultiPickCount:      1,
+	}
+}
+
+// Validate rejects internally inconsistent worker settings.
+func (c Config) Validate() error {
+	if c.RequestTimeout <= 0 {
+		return fmt.Errorf("request timeout must be > 0")
+	}
+	if c.MinBatchHint < 1 {
+		return fmt.Errorf("min batch hint must be >= 1")
+	}
+	if c.MaxBatchHint < 0 {
+		return fmt.Errorf("max batch hint must be >= 0")
+	}
+	if c.MaxBatchHint > 0 && c.MaxBatchHint < c.MinBatchHint {
+		return fmt.Errorf("max batch hint must be 0 or >= min batch hint")
+	}
+	if c.DeliveryConcurrency < 1 {
+		return fmt.Errorf("delivery concurrency must be >= 1")
+	}
+	if c.EmptyClaimBackoff <= 0 {
+		return fmt.Errorf("empty claim backoff must be > 0")
+	}
+	if c.MultiPickCount < 1 {
+		return fmt.Errorf("multi-pick count must be >= 1")
+	}
+	return nil
+}
+
+// ClaimLimit returns the effective claim limit for one scheduler pick.
+func (c Config) ClaimLimit(batchHint uint32) int {
+	limit := int(batchHint)
+	if limit < c.MinBatchHint {
+		limit = c.MinBatchHint
+	}
+	if c.MaxBatchHint >= c.MinBatchHint && limit > c.MaxBatchHint {
+		limit = c.MaxBatchHint
+	}
+	return limit
 }
 
 // HTTPConfig configures the shared HTTP client used for webhook Attempts.
@@ -98,7 +154,7 @@ func WithHTTPConfig(config HTTPConfig) Option {
 func WithRequestTimeout(timeout time.Duration) Option {
 	return func(w *Worker) {
 		if timeout > 0 {
-			w.RequestTimeout = timeout
+			w.Config.RequestTimeout = timeout
 		}
 	}
 }
@@ -122,19 +178,20 @@ func WithLogger(logger *slog.Logger) Option {
 func WithMinBatchHint(minBatchHint int) Option {
 	return func(w *Worker) {
 		if minBatchHint > 0 {
-			w.MinBatchHint = minBatchHint
+			w.Config.MinBatchHint = minBatchHint
 		}
 	}
 }
 
 // WithMaxBatchHint sets the maximum claim batch size. The scheduler batchHint
 // (fairness weight) is clamped between MinBatchHint and MaxBatchHint before
-// the claim query. Default 64 (roundrobin ClaimBatchSize). Lower favours
-// fairness; higher favours throughput. Tunable via --claim-batch-hint flag.
+// the claim query. Default 64 (roundrobin ClaimBatchSize). A value of 0 makes
+// the upper bound unbounded. Lower favours fairness; higher favours throughput.
+// Tunable via --claim-batch-hint flag.
 func WithMaxBatchHint(maxBatchHint int) Option {
 	return func(w *Worker) {
-		if maxBatchHint > 0 {
-			w.MaxBatchHint = maxBatchHint
+		if maxBatchHint >= 0 {
+			w.Config.MaxBatchHint = maxBatchHint
 		}
 	}
 }
@@ -144,7 +201,7 @@ func WithMaxBatchHint(maxBatchHint int) Option {
 func WithDeliveryConcurrency(n int) Option {
 	return func(w *Worker) {
 		if n > 0 {
-			w.DeliveryConcurrency = n
+			w.Config.DeliveryConcurrency = n
 		}
 	}
 }
@@ -153,7 +210,7 @@ func WithDeliveryConcurrency(n int) Option {
 func WithEmptyClaimBackoff(delay time.Duration) Option {
 	return func(w *Worker) {
 		if delay > 0 {
-			w.EmptyClaimBackoff = delay
+			w.Config.EmptyClaimBackoff = delay
 		}
 	}
 }
@@ -165,27 +222,43 @@ func WithEmptyClaimBackoff(delay time.Duration) Option {
 func WithMultiPickCount(n int) Option {
 	return func(w *Worker) {
 		if n > 0 {
-			w.MultiPickCount = n
+			w.Config.MultiPickCount = n
 		}
 	}
 }
 
-// New returns a Worker using scheduler s and optional overrides.
-func New(s scheduler.Scheduler, opts ...Option) *Worker {
-	w := &Worker{
-		HTTP:                NewHTTPClient(DefaultHTTPConfig()),
-		RetryPolicy:         retry.New(retry.Config{}),
-		Scheduler:           s,
-		Logger:              observe.NewLogger(nil),
-		RequestTimeout:      30 * time.Second,
-		MinBatchHint:        32,
-		MaxBatchHint:        64,
-		DeliveryConcurrency: 16,
-		EmptyClaimBackoff:   20 * time.Millisecond,
-		MultiPickCount:      1,
+// NewWithConfig returns a Worker using a validated worker Config plus optional
+// dependency overrides.
+func NewWithConfig(s scheduler.Scheduler, config Config, opts ...Option) (*Worker, error) {
+	if err := config.Validate(); err != nil {
+		return nil, err
 	}
+	w := newWithConfig(s, config)
 	for _, opt := range opts {
 		opt(w)
+	}
+	if err := w.Config.Validate(); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+// New returns a Worker using scheduler s and optional overrides.
+func New(s scheduler.Scheduler, opts ...Option) *Worker {
+	w := newWithConfig(s, DefaultConfig())
+	for _, opt := range opts {
+		opt(w)
+	}
+	return w
+}
+
+func newWithConfig(s scheduler.Scheduler, config Config) *Worker {
+	w := &Worker{
+		HTTP:        NewHTTPClient(DefaultHTTPConfig()),
+		RetryPolicy: retry.New(retry.Config{}),
+		Scheduler:   s,
+		Logger:      observe.NewLogger(nil),
+		Config:      config,
 	}
 	return w
 }

@@ -21,8 +21,9 @@ state, plus the tuning knobs used by the service and benchmark harness.
    Scheduler.
 9. A Worker calls `Scheduler.Pick()` for the next Customer. With
    `MultiPickCount > 1`, it collects several Customers before one claim query.
-10. Single-Customer mode calls `ClaimNextN`. Multi-Customer mode calls
-    `ClaimNextBatch` with `totalLimit = len(customerIDs) * MinBatchHint`.
+10. Single-Customer mode calls `ClaimNextN` with the scheduler hint clamped by
+    `MinBatchHint` and `MaxBatchHint`. Multi-Customer mode calls
+    `ClaimNextBatch` with the sum of those per-pick limits.
 11. The claim SQL selects ready rows and stale-claim rows, applies breaker
     eligibility and half-open probe handling, locks candidate `deliveries` rows
     with `FOR UPDATE SKIP LOCKED`, and writes `delivery_claims`.
@@ -93,7 +94,8 @@ See [bench/README.md](../bench/README.md) for the full scenario map and
 | Layer | Knob | Effect | Typical Direction |
 |---|---|---|---|
 | Worker | `--workers` | Parallelism and DB contention | Increase until throughput knee |
-| Worker | `--min-batch` / `MinBatchHint` | Claim batch size per scheduler pick | Higher for throughput, lower for fairness |
+| Worker | `--min-batch` / `MinBatchHint` | Lower bound for claim batch size per scheduler pick | Higher for throughput, lower for fairness |
+| Worker | `--claim-batch-hint` / `MaxBatchHint` | Upper bound for claim batch size per scheduler pick (`0` = unbounded) | Higher for throughput, lower for fairness |
 | Worker | `--multi-pick` / `MultiPickCount` | Customers batched into one claim query | Increase for sparse-Customer workloads |
 | Worker | `--empty-claim-backoff` | Pause after empty claim cycle | Raise to reduce DB churn, lower for reactivity |
 | Worker | request timeout | HTTP timeout behavior and retries | Raise if false timeouts; lower to fail fast |
@@ -110,7 +112,7 @@ See [bench/README.md](../bench/README.md) for the full scenario map and
 ## Practical Tuning Order
 
 1. Reliability first: duplicate Attempt tuples must stay at zero.
-2. Throughput second: sweep `workers x max_conns x min_batch`.
+2. Throughput second: sweep `workers x max_conns x min_batch x claim_batch_hint`.
 3. Fairness third: verify Small Customer P95 first-attempt queue latency.
 4. Sparse workload fourth: tune `MultiPickCount` before raising per-Customer
    batch size.

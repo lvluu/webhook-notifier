@@ -227,6 +227,101 @@ func TestCustomerRegistration_IsIdempotentForWebhookRows(t *testing.T) {
 	}
 }
 
+func TestStartDeliveryRuntime_RejectsInvalidWorkerConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := loadWorkerRuntimeConfig()
+	cfg.WorkerCount = 1
+	cfg.Worker.MinBatchHint = 50
+	cfg.Worker.MaxBatchHint = 10
+
+	runtime, errCh, err := startDeliveryRuntimeWithDeps(
+		context.Background(),
+		slogDiscard(),
+		nil,
+		"",
+		cfg,
+		runtimeDeps{},
+	)
+	if err == nil {
+		t.Fatal("startDeliveryRuntimeWithDeps error: got nil, want invalid worker config")
+	}
+	if runtime != nil {
+		t.Fatalf("runtime: got %#v, want nil", runtime)
+	}
+	if errCh != nil {
+		t.Fatalf("errCh: got non-nil, want nil")
+	}
+	if !strings.Contains(err.Error(), "worker config: max batch hint must be 0 or >= min batch hint") {
+		t.Fatalf("error: got %q, want worker config validation error", err.Error())
+	}
+}
+
+func TestRuntimeGroup_ReportsLabeledErrorsAndRunsCleanup(t *testing.T) {
+	t.Parallel()
+
+	group := newRuntimeGroup(context.Background(), slogDiscard(), 1)
+	cleaned := make(chan struct{})
+	group.Cleanup(func() { close(cleaned) })
+	group.Go("sample task", func(context.Context) error {
+		return errors.New("boom")
+	})
+	group.Finish()
+
+	select {
+	case err, ok := <-group.errCh:
+		if !ok {
+			t.Fatal("runtime group error channel closed before reporting error")
+		}
+		if !strings.Contains(err.Error(), "sample task: boom") {
+			t.Fatalf("runtime group error: got %q, want labeled error", err.Error())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for runtime group error")
+	}
+
+	select {
+	case <-cleaned:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for runtime group cleanup")
+	}
+
+	select {
+	case <-group.done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for runtime group done")
+	}
+}
+
+func TestRuntimeGroup_StopCancelsTasks(t *testing.T) {
+	t.Parallel()
+
+	group := newRuntimeGroup(context.Background(), slogDiscard(), 1)
+	started := make(chan struct{})
+	group.Go("blocking task", func(ctx context.Context) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	group.Finish()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for runtime group task to start")
+	}
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := group.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop error: %v", err)
+	}
+
+	if _, ok := <-group.errCh; ok {
+		t.Fatal("runtime group reported context cancellation as an error")
+	}
+}
+
 func TestStartDeliveryRuntime_ColdBootDiscoveryDrainsExistingDeliveries(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)
@@ -253,17 +348,17 @@ func TestStartDeliveryRuntime_ColdBootDiscoveryDrainsExistingDeliveries(t *testi
 	}
 
 	logger := slogDiscard()
-	runtime, runtimeErrCh, err := startDeliveryRuntime(ctx, logger, db, "", workerRuntimeConfig{
-		WorkerCount:    2,
-		RequestTimeout: 2 * time.Second,
-		Discovery: worker.DiscoveryConfig{
-			Interval:     10 * time.Millisecond,
-			EmptyBackoff: 10 * time.Millisecond,
-			ErrorBackoff: 10 * time.Millisecond,
-			MaxBackoff:   50 * time.Millisecond,
-			Limit:        100,
-		},
-	})
+	runtimeCfg := loadWorkerRuntimeConfig()
+	runtimeCfg.WorkerCount = 2
+	runtimeCfg.Worker.RequestTimeout = 2 * time.Second
+	runtimeCfg.Discovery = worker.DiscoveryConfig{
+		Interval:     10 * time.Millisecond,
+		EmptyBackoff: 10 * time.Millisecond,
+		ErrorBackoff: 10 * time.Millisecond,
+		MaxBackoff:   50 * time.Millisecond,
+		Limit:        100,
+	}
+	runtime, runtimeErrCh, err := startDeliveryRuntime(ctx, logger, db, "", runtimeCfg)
 	if err != nil {
 		t.Fatalf("startDeliveryRuntime: %v", err)
 	}
