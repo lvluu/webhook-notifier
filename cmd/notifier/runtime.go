@@ -43,7 +43,7 @@ func defaultRuntimeDeps() runtimeDeps {
 			if cfg.EnableWeightedScheduler {
 				return swrr.New(dbweights.New(db))
 			}
-			return roundrobin.New()
+			return roundrobin.New(roundrobin.WithBatchHint(cfg.ClaimBatchHint))
 		},
 		newStore: func(db *sql.DB, cfg workerRuntimeConfig) *outbox.Store {
 			opts := []outbox.Option{

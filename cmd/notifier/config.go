@@ -9,6 +9,7 @@ import (
 type workerRuntimeConfig struct {
 	WorkerCount             int
 	MinBatchHint            int
+	ClaimBatchHint          uint32
 	MultiPickCount          int
 	HostConcurrencyCap      int
 	RequestTimeout          time.Duration
@@ -26,6 +27,7 @@ func loadWorkerRuntimeConfig() workerRuntimeConfig {
 	return workerRuntimeConfig{
 		WorkerCount:           64,
 		MinBatchHint:          32,
+		ClaimBatchHint:        64,
 		MultiPickCount:        1,
 		HostConcurrencyCap:    16,
 		RequestTimeout:        30 * time.Second,

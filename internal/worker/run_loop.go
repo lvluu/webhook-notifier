@@ -189,6 +189,13 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 	}
 	wg.Wait()
 
+	// Customer class by delivery ID, built once so the per-outcome metric
+	// loops below are O(1) lookups rather than O(n) scans of the batch.
+	classByID := make(map[string]uint32, len(deliveries))
+	for _, d := range deliveries {
+		classByID[d.ID] = d.CustomerClass
+	}
+
 	var succeeded, retries, dead []outbox.BatchMarkItem
 
 	for _, r := range results {
@@ -263,7 +270,7 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 			return fmt.Errorf("batch mark succeeded: %w", err)
 		}
 		for _, item := range succeeded {
-			customerClass := observe.CustomerClassFromValue(findDeliveryClass(item.DeliveryID, deliveries))
+			customerClass := observe.CustomerClassFromValue(classByID[item.DeliveryID])
 			recordSucceededMetrics(customerClass, item.Lifetime.Seconds(), item.AttemptNumber)
 		}
 	}
@@ -277,7 +284,7 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 			return fmt.Errorf("batch mark dead: %w", err)
 		}
 		for _, item := range dead {
-			customerClass := observe.CustomerClassFromValue(findDeliveryClass(item.DeliveryID, deliveries))
+			customerClass := observe.CustomerClassFromValue(classByID[item.DeliveryID])
 			recordDeadMetrics(customerClass, item.Lifetime.Seconds(), item.AttemptNumber, item.Reason)
 		}
 	}
@@ -290,13 +297,4 @@ func (w *Worker) requeueDelay() time.Duration {
 		return w.HostLimiter.RequeueDelay()
 	}
 	return 100 * time.Millisecond
-}
-
-func findDeliveryClass(id string, deliveries []outbox.Delivery) uint32 {
-	for _, d := range deliveries {
-		if d.ID == id {
-			return d.CustomerClass
-		}
-	}
-	return 1
 }

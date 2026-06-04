@@ -9,8 +9,10 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/scheduler"
 )
 
-// ClaimBatchSize is the number of deliveries a worker can claim per scheduler
-// pick. Higher values amortize DB transaction overhead across multiple deliveries.
+// ClaimBatchSize is the default number of deliveries a worker can claim per
+// scheduler pick. Higher values amortize DB transaction overhead across
+// multiple deliveries; lower values tighten per-Customer fairness because a
+// worker yields back to rotation sooner. Override with WithBatchHint.
 const ClaimBatchSize uint32 = 64
 
 // roundRobin is a plain round-robin Scheduler over the set of Customers with
@@ -25,18 +27,38 @@ const ClaimBatchSize uint32 = 64
 // explicitly removed via Remove, so multiple workers can claim from the same
 // Customer concurrently.
 type roundRobin struct {
-	mu     sync.Mutex
-	list   *list.List
-	index  map[scheduler.CustomerID]*list.Element
-	cursor *list.Element
+	mu        sync.Mutex
+	list      *list.List
+	index     map[scheduler.CustomerID]*list.Element
+	cursor    *list.Element
+	batchHint uint32
+}
+
+// Option configures a round-robin Scheduler.
+type Option func(*roundRobin)
+
+// WithBatchHint sets the batchHint returned by Pick. A hint of 0 falls back to
+// ClaimBatchSize. Lower hints favour fairness (worker yields sooner); higher
+// hints favour throughput (more DB amortization per pick).
+func WithBatchHint(hint uint32) Option {
+	return func(r *roundRobin) {
+		if hint > 0 {
+			r.batchHint = hint
+		}
+	}
 }
 
 // New returns a round-robin Scheduler with O(1) Notify and Remove.
-func New() scheduler.Scheduler {
-	return &roundRobin{
-		list:  list.New(),
-		index: make(map[scheduler.CustomerID]*list.Element),
+func New(opts ...Option) scheduler.Scheduler {
+	r := &roundRobin{
+		list:      list.New(),
+		index:     make(map[scheduler.CustomerID]*list.Element),
+		batchHint: ClaimBatchSize,
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // Pick returns the next Customer in rotation and advances the cursor.
@@ -62,7 +84,7 @@ func (r *roundRobin) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bo
 	customerID := r.cursor.Value.(scheduler.CustomerID)
 	r.cursor = r.cursor.Next()
 
-	return customerID, ClaimBatchSize, true, nil
+	return customerID, r.batchHint, true, nil
 }
 
 // Remove removes the Customer from the rotation. O(1). No-op if not present.
