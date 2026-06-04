@@ -52,7 +52,7 @@ func (s *Store) claimNextBatchWithoutBreaker(ctx context.Context, customerIDs []
 	claimStarted := time.Now()
 	perCustomerLimit := perCustomerClaimLimit(limit, len(customerIDs))
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		WITH input_customers AS (
 			SELECT DISTINCT customer_id
 			FROM unnest($1::text[]) AS input(customer_id)
@@ -109,28 +109,7 @@ func (s *Store) claimNextBatchWithoutBreaker(ctx context.Context, customerIDs []
 			        claimed_at = now()
 			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
 			RETURNING delivery_id, attempt_number, claimed_at
-		)
-		SELECT
-		    d.id, d.event_id, d.webhook_id, d.customer_id,
-		    COALESCE(cust.class, 1),
-		    e.type, e.payload, w.url, w.secret_encrypted,
-		    'in_flight' AS status,
-		    dc.attempt_number, d.next_attempt_at, dc.claimed_at,
-		    d.last_error, d.created_at, d.updated_at,
-		    CASE WHEN d.attempt_count = 0 THEN NULL ELSE (
-		        SELECT GREATEST(EXTRACT(EPOCH FROM (d.next_attempt_at - da.sent_at)) * 1000, 0)::bigint
-		        FROM delivery_attempts da
-		        WHERE da.delivery_id = d.id
-		        ORDER BY da.attempt_number DESC
-		        LIMIT 1
-		    ) END AS previous_delay_millis
-		FROM claimed dc
-		JOIN deliveries d ON d.id = dc.delivery_id
-		JOIN events e ON e.id = d.event_id
-		JOIN webhooks w ON w.id = d.webhook_id
-		LEFT JOIN customers cust ON cust.id = d.customer_id
-		ORDER BY d.next_attempt_at, d.created_at, d.id
-	`, customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
+		)%s`, sqlClaimedDeliveryProjection), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
 	if err != nil {
 		return nil, fmt.Errorf("cte claim batch: %w", err)
 	}
@@ -230,27 +209,7 @@ func (s *Store) claimNextBatchWithBreaker(ctx context.Context, customerIDs []str
 			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
 			RETURNING delivery_id, attempt_number, claimed_at
 		)
-		SELECT
-		    d.id, d.event_id, d.webhook_id, d.customer_id,
-		    COALESCE(cust.class, 1),
-		    e.type, e.payload, w.url, w.secret_encrypted,
-		    'in_flight' AS status,
-		    dc.attempt_number, d.next_attempt_at, dc.claimed_at,
-		    d.last_error, d.created_at, d.updated_at,
-		    CASE WHEN d.attempt_count = 0 THEN NULL ELSE (
-		        SELECT GREATEST(EXTRACT(EPOCH FROM (d.next_attempt_at - da.sent_at)) * 1000, 0)::bigint
-		        FROM delivery_attempts da
-		        WHERE da.delivery_id = d.id
-		        ORDER BY da.attempt_number DESC
-		        LIMIT 1
-		    ) END AS previous_delay_millis
-		FROM claimed dc
-		JOIN deliveries d ON d.id = dc.delivery_id
-		JOIN events e ON e.id = d.event_id
-		JOIN webhooks w ON w.id = d.webhook_id
-		LEFT JOIN customers cust ON cust.id = d.customer_id
-		ORDER BY d.next_attempt_at, d.created_at, d.id
-	`, breakerEligible, breakerEligible), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
+		%s`, breakerEligible, breakerEligible, sqlClaimedDeliveryProjection), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
 	if err != nil {
 		return nil, fmt.Errorf("cte claim batch with breaker: %w", err)
 	}
@@ -359,27 +318,7 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
 			RETURNING delivery_id, attempt_number, claimed_at
 		)
-		SELECT
-		    d.id, d.event_id, d.webhook_id, d.customer_id,
-		    COALESCE(cust.class, 1),
-		    e.type, e.payload, w.url, w.secret_encrypted,
-		    'in_flight' AS status,
-		    dc.attempt_number, d.next_attempt_at, dc.claimed_at,
-		    d.last_error, d.created_at, d.updated_at,
-		    CASE WHEN d.attempt_count = 0 THEN NULL ELSE (
-		        SELECT GREATEST(EXTRACT(EPOCH FROM (d.next_attempt_at - da.sent_at)) * 1000, 0)::bigint
-		        FROM delivery_attempts da
-		        WHERE da.delivery_id = d.id
-		        ORDER BY da.attempt_number DESC
-		        LIMIT 1
-		    ) END AS previous_delay_millis
-		FROM claimed dc
-		JOIN deliveries d ON d.id = dc.delivery_id
-		JOIN events e ON e.id = d.event_id
-		JOIN webhooks w ON w.id = d.webhook_id
-		LEFT JOIN customers cust ON cust.id = d.customer_id
-		ORDER BY d.next_attempt_at, d.created_at, d.id
-	`, breakerEligible, breakerEligible), customerID, s.claimLease.Milliseconds(), limit)
+		%s`, breakerEligible, breakerEligible, sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("cte claim: %w", err)
 	}
@@ -444,27 +383,7 @@ func (s *Store) claimNextNLegacy(ctx context.Context, customerID string, limit i
 			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
 			RETURNING delivery_id, attempt_number, claimed_at
 		)
-		SELECT
-		    d.id, d.event_id, d.webhook_id, d.customer_id,
-		    COALESCE(cust.class, 1),
-		    e.type, e.payload, w.url, w.secret_encrypted,
-		    'in_flight' AS status,
-		    dc.attempt_number, d.next_attempt_at, dc.claimed_at,
-		    d.last_error, d.created_at, d.updated_at,
-		    CASE WHEN d.attempt_count = 0 THEN NULL ELSE (
-		        SELECT GREATEST(EXTRACT(EPOCH FROM (d.next_attempt_at - da.sent_at)) * 1000, 0)::bigint
-		        FROM delivery_attempts da
-		        WHERE da.delivery_id = d.id
-		        ORDER BY da.attempt_number DESC
-		        LIMIT 1
-		    ) END AS previous_delay_millis
-		FROM claimed dc
-		JOIN deliveries d ON d.id = dc.delivery_id
-		JOIN events e ON e.id = d.event_id
-		JOIN webhooks w ON w.id = d.webhook_id
-		LEFT JOIN customers cust ON cust.id = d.customer_id
-		ORDER BY d.next_attempt_at, d.created_at, d.id
-	`, claimable, breakerEligible), customerID, s.claimLease.Milliseconds(), limit)
+		%s`, claimable, breakerEligible, sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("legacy claim: %w", err)
 	}
@@ -485,7 +404,7 @@ func (s *Store) claimNextNLegacy(ctx context.Context, customerID string, limit i
 func (s *Store) claimNextNWithoutBreaker(ctx context.Context, customerID string, limit int) ([]Delivery, error) {
 	claimStarted := time.Now()
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		WITH ready_candidate AS (
 			SELECT d.id, d.attempt_count
 			FROM deliveries d
@@ -522,28 +441,7 @@ func (s *Store) claimNextNWithoutBreaker(ctx context.Context, customerID string,
 			        claimed_at = now()
 			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
 			RETURNING delivery_id, attempt_number, claimed_at
-		)
-		SELECT
-		    d.id, d.event_id, d.webhook_id, d.customer_id,
-		    COALESCE(cust.class, 1),
-		    e.type, e.payload, w.url, w.secret_encrypted,
-		    'in_flight' AS status,
-		    dc.attempt_number, d.next_attempt_at, dc.claimed_at,
-		d.last_error, d.created_at, d.updated_at,
-		CASE WHEN d.attempt_count = 0 THEN NULL ELSE (
-		    SELECT GREATEST(EXTRACT(EPOCH FROM (d.next_attempt_at - da.sent_at)) * 1000, 0)::bigint
-		    FROM delivery_attempts da
-		    WHERE da.delivery_id = d.id
-		    ORDER BY da.attempt_number DESC
-		    LIMIT 1
-		) END AS previous_delay_millis
-		FROM claimed dc
-		JOIN deliveries d ON d.id = dc.delivery_id
-		JOIN events e ON e.id = d.event_id
-		JOIN webhooks w ON w.id = d.webhook_id
-		LEFT JOIN customers cust ON cust.id = d.customer_id
-		ORDER BY d.next_attempt_at, d.created_at, d.id
-		`, customerID, s.claimLease.Milliseconds(), limit)
+		)%s`, sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim without breaker: %w", err)
 	}
@@ -671,27 +569,7 @@ func (s *Store) claimNextNLegacyWithoutBreaker(ctx context.Context, customerID s
 			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
 			RETURNING delivery_id, attempt_number, claimed_at
 		)
-		SELECT
-		    d.id, d.event_id, d.webhook_id, d.customer_id,
-		    COALESCE(cust.class, 1),
-		    e.type, e.payload, w.url, w.secret_encrypted,
-		    'in_flight' AS status,
-		    dc.attempt_number, d.next_attempt_at, dc.claimed_at,
-		    d.last_error, d.created_at, d.updated_at,
-		    CASE WHEN d.attempt_count = 0 THEN NULL ELSE (
-		        SELECT GREATEST(EXTRACT(EPOCH FROM (d.next_attempt_at - da.sent_at)) * 1000, 0)::bigint
-		        FROM delivery_attempts da
-		        WHERE da.delivery_id = d.id
-		        ORDER BY da.attempt_number DESC
-		        LIMIT 1
-		    ) END AS previous_delay_millis
-		FROM claimed dc
-		JOIN deliveries d ON d.id = dc.delivery_id
-		JOIN events e ON e.id = d.event_id
-		JOIN webhooks w ON w.id = d.webhook_id
-		LEFT JOIN customers cust ON cust.id = d.customer_id
-		ORDER BY d.next_attempt_at, d.created_at, d.id
-		`, sqlClaimablePredicate("d", "dc")), customerID, s.claimLease.Milliseconds(), limit)
+		%s`, sqlClaimablePredicate("d", "dc"), sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("legacy claim without breaker: %w", err)
 	}

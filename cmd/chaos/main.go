@@ -33,7 +33,7 @@ func main() {
 	logger = logger.With("service", "chaos-loader")
 
 	client := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 120 * time.Second,
 		Transport: &http.Transport{
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 100,
@@ -57,7 +57,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupCtx, setupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	setupCtx, setupCancel := context.WithTimeout(context.Background(), 120*time.Second)
 	req, err := http.NewRequestWithContext(
 		setupCtx,
 		http.MethodPost,

@@ -21,5 +21,9 @@ coverage.*
 # Env
 .env
 .env.local
-chaos
-notifier
+# Built binaries (anchored to repo root)
+/chaos
+/notifier
+/bench
+/delivery-history-retention
+/webhook-receiver
