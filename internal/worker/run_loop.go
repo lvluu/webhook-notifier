@@ -189,13 +189,6 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 	}
 	wg.Wait()
 
-	// Customer class by delivery ID, built once so the per-outcome metric
-	// loops below are O(1) lookups rather than O(n) scans of the batch.
-	classByID := make(map[string]uint32, len(deliveries))
-	for _, d := range deliveries {
-		classByID[d.ID] = d.CustomerClass
-	}
-
 	var succeeded, retries, dead []outbox.BatchMarkItem
 
 	for _, r := range results {
@@ -262,6 +255,18 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 				"status_code", outcome.statusCode,
 				"duration_ms", outcome.duration.Milliseconds(),
 			)
+		}
+	}
+
+	// Customer class by delivery ID, built once so the per-outcome metric
+	// loops below are O(1) lookups rather than O(n) scans of the batch. Only
+	// built when an outcome that records metrics is present (a retry-only batch
+	// reads it nowhere).
+	var classByID map[string]uint32
+	if len(succeeded) > 0 || len(dead) > 0 {
+		classByID = make(map[string]uint32, len(deliveries))
+		for _, d := range deliveries {
+			classByID[d.ID] = d.CustomerClass
 		}
 	}
 
