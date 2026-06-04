@@ -1576,6 +1576,105 @@ func TestRequeue_ReturnsInFlightToFailedRetryWithoutAttemptRow(t *testing.T) {
 	assertAttemptCount(t, ctx, db, reclaimed.ID, 1)
 }
 
+// TestHasClaimableWorkBatchExcludesOpenBreaker proves the batch claimability
+// check applies the same breaker eligibility as the claim path (issue #105,
+// Fix A). A customer whose only work sits behind an open breaker that is not
+// yet in its probe window must be reported as having no claimable work, so the
+// worker drops it from rotation instead of busy-spinning empty claims.
+func TestHasClaimableWorkBatchExcludesOpenBreaker(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	store := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
+		FailureThreshold: 2,
+		InitialCooldown:  time.Hour,
+		MaxCooldown:      time.Hour,
+	}))
+
+	openBreaker := submitOneDelivery(t, ctx, db, "cus_open_breaker")
+	eligible := submitOneDelivery(t, ctx, db, "cus_eligible")
+
+	// Force the eligible customer's delivery to be due now.
+	if _, err := db.ExecContext(ctx, `
+		UPDATE deliveries SET next_attempt_at = now() - interval '1 second' WHERE id = $1
+	`, eligible); err != nil {
+		t.Fatalf("make eligible due: %v", err)
+	}
+
+	// Open the breaker on the other customer's webhook with the probe window
+	// still in the future, mirroring TestClaimNextSkipsOpenWebhookUntilHalfOpenProbe.
+	if _, err := db.ExecContext(ctx, `
+		UPDATE webhooks
+		SET breaker_state = 'open',
+		    breaker_opened_at = now(),
+		    breaker_next_probe_at = now() + interval '1 hour',
+		    breaker_failure_count = 5
+		WHERE id = (SELECT webhook_id FROM deliveries WHERE id = $1)
+	`, openBreaker); err != nil {
+		t.Fatalf("open breaker: %v", err)
+	}
+
+	got, err := store.HasClaimableWorkBatch(ctx, []string{"cus_open_breaker", "cus_eligible"})
+	if err != nil {
+		t.Fatalf("HasClaimableWorkBatch: %v", err)
+	}
+	if got["cus_open_breaker"] {
+		t.Errorf("cus_open_breaker: got hasWork=true, want false (work is behind an open breaker)")
+	}
+	if !got["cus_eligible"] {
+		t.Errorf("cus_eligible: got hasWork=false, want true")
+	}
+}
+
+// TestRequeueBatch_ReturnsInFlightToFailedRetryWithoutAttemptRows proves
+// RequeueBatch (issue #105, Fix C) requeues many claimed deliveries in one
+// transaction with the same semantics as the per-delivery Requeue: claims are
+// deleted, status moves to failed_retry, and attempt_count is not advanced.
+func TestRequeueBatch_ReturnsInFlightToFailedRetryWithoutAttemptRows(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	store := outbox.New(db)
+
+	first := submitOneDelivery(t, ctx, db, "cus_batch_requeue")
+	second, err := appendDeliveryForExistingWebhook(t, ctx, db, first)
+	if err != nil {
+		t.Fatalf("append delivery: %v", err)
+	}
+
+	claimed, err := store.ClaimNextN(ctx, "cus_batch_requeue", 10)
+	if err != nil {
+		t.Fatalf("ClaimNextN: %v", err)
+	}
+	if len(claimed) != 2 {
+		t.Fatalf("claimed count: got %d, want 2", len(claimed))
+	}
+
+	ids := []string{first, second}
+	if err := store.RequeueBatch(ctx, ids, 200*time.Millisecond); err != nil {
+		t.Fatalf("RequeueBatch: %v", err)
+	}
+
+	for _, id := range ids {
+		assertDeliveryStatus(t, ctx, db, id, "failed_retry")
+		assertAttemptCount(t, ctx, db, id, 0)
+
+		var claimExists bool
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM delivery_claims WHERE delivery_id = $1)`, id).Scan(&claimExists); err != nil {
+			t.Fatalf("check claim exists: %v", err)
+		}
+		if claimExists {
+			t.Errorf("delivery %s: claim row still present after RequeueBatch", id)
+		}
+
+		var attemptRows int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM delivery_attempts WHERE delivery_id = $1`, id).Scan(&attemptRows); err != nil {
+			t.Fatalf("count attempts: %v", err)
+		}
+		if attemptRows != 0 {
+			t.Errorf("delivery %s: got %d delivery_attempts rows, want 0", id, attemptRows)
+		}
+	}
+}
+
 func newPostgresDB(t *testing.T, ctx context.Context) *sql.DB {
 	t.Helper()
 

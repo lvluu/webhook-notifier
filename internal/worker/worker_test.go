@@ -393,6 +393,10 @@ func (r *recordingDeliveryStore) Requeue(context.Context, string, time.Duration)
 	return nil
 }
 
+func (r *recordingDeliveryStore) RequeueBatch(context.Context, []string, time.Duration) error {
+	return nil
+}
+
 func (r *recordingDeliveryStore) MarkSucceededBatch(context.Context, []outbox.BatchMarkItem) error {
 	return nil
 }
@@ -484,6 +488,9 @@ func (s *removeOnEmptyClaimStore) MarkDead(context.Context, string, int, string,
 	return nil
 }
 func (s *removeOnEmptyClaimStore) Requeue(context.Context, string, time.Duration) error { return nil }
+func (s *removeOnEmptyClaimStore) RequeueBatch(context.Context, []string, time.Duration) error {
+	return nil
+}
 func (s *removeOnEmptyClaimStore) MarkSucceededBatch(context.Context, []outbox.BatchMarkItem) error {
 	return nil
 }
@@ -492,6 +499,140 @@ func (s *removeOnEmptyClaimStore) MarkRetryBatch(context.Context, []outbox.Batch
 }
 func (s *removeOnEmptyClaimStore) MarkDeadBatch(context.Context, []outbox.BatchMarkItem) error {
 	return nil
+}
+
+// requeueBatchStore returns a single batch of deliveries on the first claim
+// then drains. It records RequeueBatch invocations so a Run-driven test can
+// assert processDeliveries collapses N requeues into one RequeueBatch call.
+type requeueBatchStore struct {
+	mu                sync.Mutex
+	once              sync.Once
+	done              chan struct{}
+	batch             []outbox.Delivery
+	requeueBatchCalls int
+	requeueCalls      int
+	requeuedIDs       []string
+}
+
+func (s *requeueBatchStore) ClaimNextN(context.Context, string, int) ([]outbox.Delivery, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.batch == nil {
+		return nil, nil
+	}
+	out := s.batch
+	s.batch = nil
+	return out, nil
+}
+func (s *requeueBatchStore) ClaimNextBatch(context.Context, []string, int) ([]outbox.Delivery, error) {
+	return nil, nil
+}
+func (s *requeueBatchStore) HasClaimableWork(context.Context, string) (bool, error) {
+	return false, nil
+}
+func (s *requeueBatchStore) HasClaimableWorkBatch(context.Context, []string) (map[string]bool, error) {
+	return nil, nil
+}
+func (s *requeueBatchStore) MarkSucceeded(context.Context, string, int, time.Duration) error {
+	return nil
+}
+func (s *requeueBatchStore) MarkRetry(context.Context, string, int, string, time.Duration, time.Duration) error {
+	return nil
+}
+func (s *requeueBatchStore) MarkDead(context.Context, string, int, string, string, time.Duration) error {
+	return nil
+}
+func (s *requeueBatchStore) Requeue(context.Context, string, time.Duration) error {
+	s.mu.Lock()
+	s.requeueCalls++
+	s.mu.Unlock()
+	return nil
+}
+func (s *requeueBatchStore) RequeueBatch(_ context.Context, ids []string, _ time.Duration) error {
+	s.mu.Lock()
+	s.requeueBatchCalls++
+	s.requeuedIDs = append(s.requeuedIDs, ids...)
+	s.mu.Unlock()
+	s.once.Do(func() { close(s.done) })
+	return nil
+}
+func (s *requeueBatchStore) MarkSucceededBatch(context.Context, []outbox.BatchMarkItem) error {
+	return nil
+}
+func (s *requeueBatchStore) MarkRetryBatch(context.Context, []outbox.BatchMarkItem) error {
+	return nil
+}
+func (s *requeueBatchStore) MarkDeadBatch(context.Context, []outbox.BatchMarkItem) error {
+	return nil
+}
+
+// TestRun_RequeuesWholeBatchInOneCall proves processDeliveries collapses a
+// host-saturated batch into a single RequeueBatch call instead of N per-delivery
+// Requeue transactions (issue #105, Fix C).
+func TestRun_RequeuesWholeBatchInOneCall(t *testing.T) {
+	t.Parallel()
+
+	hl := worker.NewHostLimiter(worker.HostLimiterConfig{
+		MaxPerHost:     1,
+		AcquireTimeout: 100 * time.Millisecond,
+		RequeueDelay:   10 * time.Millisecond,
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	hostname, err := urlHost(srv.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	release, err := hl.TryAcquire(hostname)
+	if err != nil {
+		t.Fatalf("pre-occupy slot: %v", err)
+	}
+	defer release()
+
+	store := &requeueBatchStore{
+		done: make(chan struct{}),
+		batch: []outbox.Delivery{
+			{ID: "dlv_1", URL: srv.URL, CustomerID: "cus_a", AttemptNumber: 1},
+			{ID: "dlv_2", URL: srv.URL, CustomerID: "cus_a", AttemptNumber: 1},
+			{ID: "dlv_3", URL: srv.URL, CustomerID: "cus_a", AttemptNumber: 1},
+		},
+	}
+
+	sched := &hintScheduler{picks: []hintPick{{customerID: "cus_a", batchHint: 8}}}
+	w := worker.New(
+		sched,
+		worker.WithHostLimiter(hl),
+		worker.WithEmptyClaimBackoff(time.Hour),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.Run(ctx, store) }()
+
+	<-store.done
+	cancel()
+
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error: got %v, want context.Canceled", err)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.requeueBatchCalls != 1 {
+		t.Errorf("RequeueBatch calls: got %d, want 1", store.requeueBatchCalls)
+	}
+	if store.requeueCalls != 0 {
+		t.Errorf("per-delivery Requeue calls: got %d, want 0", store.requeueCalls)
+	}
+	if len(store.requeuedIDs) != 3 {
+		t.Errorf("requeued IDs: got %d, want 3 (%v)", len(store.requeuedIDs), store.requeuedIDs)
+	}
 }
 
 func TestRun_ClaimSingleClampsSchedulerHintToMaxBatchHint(t *testing.T) {
@@ -802,6 +943,9 @@ func (s *whaleBatchStore) MarkDead(context.Context, string, int, string, string,
 	return nil
 }
 func (s *whaleBatchStore) Requeue(context.Context, string, time.Duration) error { return nil }
+func (s *whaleBatchStore) RequeueBatch(context.Context, []string, time.Duration) error {
+	return nil
+}
 
 func (s *whaleBatchStore) MarkSucceededBatch(_ context.Context, items []outbox.BatchMarkItem) error {
 	s.mu.Lock()

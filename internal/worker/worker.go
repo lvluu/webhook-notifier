@@ -51,6 +51,7 @@ type DeliveryStore interface {
 	MarkRetry(ctx context.Context, deliveryID string, statusCode int, errorClass string, delay time.Duration, duration time.Duration) error
 	MarkDead(ctx context.Context, deliveryID string, statusCode int, errorClass string, reason string, duration time.Duration) error
 	Requeue(ctx context.Context, deliveryID string, delay time.Duration) error
+	RequeueBatch(ctx context.Context, deliveryIDs []string, delay time.Duration) error
 	MarkSucceededBatch(ctx context.Context, items []outbox.BatchMarkItem) error
 	MarkRetryBatch(ctx context.Context, items []outbox.BatchMarkItem) error
 	MarkDeadBatch(ctx context.Context, items []outbox.BatchMarkItem) error

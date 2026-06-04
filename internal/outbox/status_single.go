@@ -205,3 +205,59 @@ func (s *Store) Requeue(ctx context.Context, deliveryID string, delay time.Durat
 		return nil
 	})
 }
+
+// RequeueBatch returns a set of claimed Deliveries to the retry pool in a
+// single transaction, collapsing what would otherwise be N per-delivery
+// Requeue transactions during host-cap backpressure. It mirrors Requeue's
+// semantics: claim rows are deleted, deliveries move to 'failed_retry' with
+// next_attempt_at = now() + delay, and attempt_count is not advanced (no
+// delivery_attempts row is inserted) because the retry budget only advances
+// when a real HTTP POST is recorded.
+//
+// The implementation locks both the delivery and claim rows FOR UPDATE before
+// touching them, matching the row-locking discipline of withInFlightDelivery.
+// Deliveries that no longer hold a live claim (already finished or taken over
+// by a stale-claim reclaim) are silently skipped — correct for the
+// backpressure path where losing the race is harmless.
+func (s *Store) RequeueBatch(ctx context.Context, deliveryIDs []string, delay time.Duration) error {
+	if len(deliveryIDs) == 0 {
+		return nil
+	}
+	if delay < 0 {
+		return fmt.Errorf("delay must be non-negative")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	if _, err := tx.ExecContext(ctx, `
+		WITH locked AS (
+			SELECT d.id
+			FROM deliveries d
+			JOIN delivery_claims dc ON dc.delivery_id = d.id
+			WHERE d.id = ANY($1)
+			FOR UPDATE OF d, dc
+		),
+		deleted AS (
+			DELETE FROM delivery_claims
+			WHERE delivery_id IN (SELECT id FROM locked)
+		)
+		UPDATE deliveries
+		SET status = 'failed_retry',
+		    next_attempt_at = now() + ($2 * interval '1 millisecond'),
+		    updated_at = now()
+		WHERE id IN (SELECT id FROM locked)
+	`, deliveryIDs, delay.Milliseconds()); err != nil {
+		return fmt.Errorf("requeue batch: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit requeue batch: %w", err)
+	}
+	return nil
+}

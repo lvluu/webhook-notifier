@@ -32,7 +32,7 @@ func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Deli
 		if resultErr == nil {
 			recordSucceededMetrics(customerClass, outcome.lifetime.Seconds(), d.AttemptNumber)
 		}
-		log.Info("delivery succeeded", "status_code", outcome.statusCode, "duration_ms", outcome.duration.Milliseconds())
+		log.Debug("delivery succeeded", "status_code", outcome.statusCode, "duration_ms", outcome.duration.Milliseconds())
 		return ProcessResult{Err: resultErr}
 	}
 	if outcome.reason != "" {

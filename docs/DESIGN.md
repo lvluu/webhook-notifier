@@ -257,6 +257,7 @@ Indexes:
 - `deliveries (customer_id, next_attempt_at, created_at, id) WHERE status IN ('pending', 'failed_retry')` — ready-candidate claim scan (partial, index-friendly).
 - `delivery_claims (claimed_at, delivery_id)` — stale-claim scan.
 - `delivery_attempts (delivery_id, attempt_number)` — audit lookup.
+- `delivery_attempts (delivery_id, sent_at)` — webhook circuit-breaker consecutive-failure scan: backs both the `max(sent_at)` last-success probe and the since-last-success failure range scan in `consecutiveWebhookFailures` / `batchConsecutiveWebhookFailures`, keeping the scan off the full delivery_attempts history during a partner outage.
 - `deliveries (webhook_id)` — webhook circuit-breaker consecutive-failure join (`delivery_attempts ⋈ deliveries` on `webhook_id`).
 - `deliveries (customer_id, next_attempt_at) WHERE status IN ('pending', 'failed_retry')` — claimable-customer discovery scan.
 - `dead_letters (final_at desc)` — ops inspection.

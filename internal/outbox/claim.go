@@ -634,11 +634,24 @@ func (s *Store) HasClaimableWork(ctx context.Context, customerID string) (bool, 
 // issues a single query. The returned map contains only customers that have
 // at least one claimable Delivery; absent keys should be removed from
 // rotation.
+//
+// It is intentionally claimMode-agnostic: legacy vs split modes differ only in
+// the shape of the claim and discovery queries, not in eligibility semantics
+// (claimable = ready-unclaimed OR stale-claimed, AND breaker-eligible). The
+// boolean result is therefore identical across modes, so no legacy variant is
+// needed. Only the breaker on/off branch matters here.
 func (s *Store) HasClaimableWorkBatch(ctx context.Context, customerIDs []string) (map[string]bool, error) {
 	if len(customerIDs) == 0 {
 		return nil, nil
 	}
 
+	if s.breakerConfig.FailureThreshold == 0 {
+		return s.hasClaimableWorkBatchWithoutBreaker(ctx, customerIDs)
+	}
+	return s.hasClaimableWorkBatchWithBreaker(ctx, customerIDs)
+}
+
+func (s *Store) hasClaimableWorkBatchWithoutBreaker(ctx context.Context, customerIDs []string) (map[string]bool, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		WITH claimable AS (
 			SELECT DISTINCT d.customer_id
@@ -660,9 +673,43 @@ func (s *Store) HasClaimableWorkBatch(ctx context.Context, customerIDs []string)
 	if err != nil {
 		return nil, fmt.Errorf("has claimable work batch: %w", err)
 	}
+	return scanClaimableWorkBatch(rows, len(customerIDs))
+}
+
+func (s *Store) hasClaimableWorkBatchWithBreaker(ctx context.Context, customerIDs []string) (map[string]bool, error) {
+	breakerEligible := sqlBreakerEligiblePredicate("w", "d")
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		WITH claimable AS (
+			SELECT DISTINCT d.customer_id
+			FROM deliveries d
+			JOIN webhooks w ON w.id = d.webhook_id
+			LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
+			WHERE d.customer_id = ANY($1)
+			  AND d.status IN ('pending', 'failed_retry')
+			  AND d.next_attempt_at <= now()
+			  AND dc.delivery_id IS NULL
+			  AND %s
+			UNION
+			SELECT DISTINCT d.customer_id
+			FROM delivery_claims dc
+			JOIN deliveries d ON d.id = dc.delivery_id
+			JOIN webhooks w ON w.id = d.webhook_id
+			WHERE d.customer_id = ANY($1)
+			  AND dc.claimed_at < now() - ($2 * interval '1 millisecond')
+			  AND %s
+		)
+		SELECT customer_id FROM claimable
+	`, breakerEligible, breakerEligible), customerIDs, s.claimLease.Milliseconds())
+	if err != nil {
+		return nil, fmt.Errorf("has claimable work batch with breaker: %w", err)
+	}
+	return scanClaimableWorkBatch(rows, len(customerIDs))
+}
+
+func scanClaimableWorkBatch(rows *sql.Rows, capacity int) (map[string]bool, error) {
 	defer func() { _ = rows.Close() }()
 
-	result := make(map[string]bool, len(customerIDs))
+	result := make(map[string]bool, capacity)
 	for rows.Next() {
 		var cid string
 		if err := rows.Scan(&cid); err != nil {
