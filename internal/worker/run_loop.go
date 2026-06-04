@@ -192,6 +192,7 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 	wg.Wait()
 
 	var succeeded, retries, dead []outbox.BatchMarkItem
+	var requeued []string
 
 	for _, r := range results {
 		delivery, outcome := r.delivery, r.outcome
@@ -200,10 +201,7 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 			return fmt.Errorf("process delivery %s: %w", delivery.ID, outcome.err)
 		}
 		if outcome.requeued {
-			delay := w.requeueDelay()
-			if err := store.Requeue(ctx, delivery.ID, delay); err != nil {
-				return fmt.Errorf("requeue delivery %s: %w", delivery.ID, err)
-			}
+			requeued = append(requeued, delivery.ID)
 			continue
 		}
 
@@ -223,7 +221,7 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 				Lifetime:      outcome.lifetime,
 				AttemptNumber: delivery.AttemptNumber,
 			})
-			log.Info("delivery succeeded",
+			log.Debug("delivery succeeded",
 				"status_code", outcome.statusCode,
 				"duration_ms", outcome.duration.Milliseconds(),
 			)
@@ -272,6 +270,11 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 		}
 	}
 
+	if len(requeued) > 0 {
+		if err := store.RequeueBatch(ctx, requeued, w.requeueDelay()); err != nil {
+			return fmt.Errorf("batch requeue: %w", err)
+		}
+	}
 	if len(succeeded) > 0 {
 		if err := store.MarkSucceededBatch(ctx, succeeded); err != nil {
 			return fmt.Errorf("batch mark succeeded: %w", err)

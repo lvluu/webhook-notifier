@@ -255,39 +255,48 @@ func batchLoadBreakerStates(ctx context.Context, tx *sql.Tx, webhookIDs []string
 }
 
 func batchConsecutiveWebhookFailures(ctx context.Context, tx *sql.Tx, webhookIDs []string, limit int) (map[string]int, error) {
+	// The LATERAL subquery caps the per-webhook failure scan at $2 rows using
+	// ORDER BY da.sent_at DESC LIMIT $2, preventing an unbounded scan when a
+	// webhook has been failing for a long time. The inner correlated scalar
+	// subquery for last_success_at is driven by the existing
+	// idx_delivery_attempts_delivery_id_sent_at index (delivery_id, sent_at)
+	// combined with idx_deliveries_webhook_id; the same pair backs the outer
+	// failure scan. Webhooks with zero failures since their last success return
+	// cnt=0 from the LATERAL and are excluded by the WHERE cnt > 0 filter,
+	// preserving the existing behaviour where absent map keys are treated as
+	// below threshold by the caller.
 	rows, err := tx.QueryContext(ctx, `
-		WITH latest_success AS (
-			SELECT d.webhook_id, max(da.sent_at) AS last_success_at
-			FROM delivery_attempts da
-			JOIN deliveries d ON d.id = da.delivery_id
-			WHERE d.webhook_id = ANY($1::uuid[])
-			  AND da.status_code >= 200
-			  AND da.status_code < 300
-			GROUP BY d.webhook_id
-		),
-		failure_attempts AS (
-			SELECT d.webhook_id, da.sent_at
-			FROM delivery_attempts da
-			JOIN deliveries d ON d.id = da.delivery_id
-			LEFT JOIN latest_success ls ON ls.webhook_id = d.webhook_id
-			WHERE d.webhook_id = ANY($1::uuid[])
-			  AND da.sent_at > COALESCE(ls.last_success_at, '-infinity'::timestamptz)
-			  AND (
-			      da.error_class IS NOT NULL
-			      OR da.status_code IS NULL
-			      OR da.status_code < 200
-			      OR da.status_code >= 300
-			  )
-		),
-		ranked AS (
-			SELECT webhook_id,
-			       ROW_NUMBER() OVER (PARTITION BY webhook_id ORDER BY sent_at DESC) AS rn
-			FROM failure_attempts
+		WITH wid AS (
+			SELECT DISTINCT unnest($1::uuid[]) AS webhook_id
 		)
-		SELECT webhook_id::text, count(*)::int
-		FROM ranked
-		WHERE rn <= $2
-		GROUP BY webhook_id
+		SELECT wid.webhook_id::text, capped.cnt
+		FROM wid
+		CROSS JOIN LATERAL (
+			SELECT count(*)::int AS cnt
+			FROM (
+				SELECT 1
+				FROM delivery_attempts da
+				JOIN deliveries d ON d.id = da.delivery_id
+				WHERE d.webhook_id = wid.webhook_id
+				  AND da.sent_at > COALESCE((
+				      SELECT max(da2.sent_at)
+				      FROM delivery_attempts da2
+				      JOIN deliveries d2 ON d2.id = da2.delivery_id
+				      WHERE d2.webhook_id = wid.webhook_id
+				        AND da2.status_code >= 200
+				        AND da2.status_code < 300
+				  ), '-infinity'::timestamptz)
+				  AND (
+				      da.error_class IS NOT NULL
+				      OR da.status_code IS NULL
+				      OR da.status_code < 200
+				      OR da.status_code >= 300
+				  )
+				ORDER BY da.sent_at DESC
+				LIMIT $2
+			) recent
+		) capped
+		WHERE capped.cnt > 0
 	`, webhookIDs, limit)
 	if err != nil {
 		return nil, fmt.Errorf("batch count consecutive webhook failures: %w", err)
