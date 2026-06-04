@@ -113,10 +113,7 @@ func defaultRuntimeDeps() runtimeDeps {
 			return roundrobin.New()
 		},
 		newStore: func(db *sql.DB, cfg workerRuntimeConfig) *outbox.Store {
-			opts := []outbox.Option{
-				outbox.WithClaimQueryMode(outbox.ClaimQueryMode(cfg.ClaimQueryMode)),
-			}
-			return outbox.New(db, opts...)
+			return outbox.New(db)
 		},
 		newLimiter: func(maxPerHost int) *worker.HostLimiter {
 			return worker.NewHostLimiter(worker.HostLimiterConfig{MaxPerHost: maxPerHost})

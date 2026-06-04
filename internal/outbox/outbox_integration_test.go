@@ -804,64 +804,50 @@ func TestClaimNextSkipsOpenWebhookUntilHalfOpenProbe(t *testing.T) {
 
 func TestHasClaimableWorkIgnoresBreakerWhenBreakerDisabled(t *testing.T) {
 	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	customerID := "cus_breaker_disabled"
+	deliveryID := submitOneDelivery(t, ctx, db, customerID)
+	store := outbox.New(db,
+		outbox.WithBreakerConfig(outbox.BreakerConfig{FailureThreshold: 0}),
+	)
 
-	tests := []struct {
-		name string
-		mode outbox.ClaimQueryMode
-	}{
-		{name: "split", mode: outbox.ClaimQueryModeSplit},
-		{name: "legacy", mode: outbox.ClaimQueryModeLegacy},
+	_, err := db.ExecContext(ctx, `
+		UPDATE webhooks
+		SET breaker_state = 'open',
+		    breaker_opened_at = now(),
+		    breaker_next_probe_at = now() + interval '1 hour',
+		    breaker_failure_count = 5
+		WHERE id = (SELECT webhook_id FROM deliveries WHERE id = $1)
+	`, deliveryID)
+	if err != nil {
+		t.Fatalf("open breaker: %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			db := newPostgresDB(t, ctx)
-			customerID := "cus_breaker_disabled_" + tt.name
-			deliveryID := submitOneDelivery(t, ctx, db, customerID)
-			store := outbox.New(db,
-				outbox.WithBreakerConfig(outbox.BreakerConfig{FailureThreshold: 0}),
-				outbox.WithClaimQueryMode(tt.mode),
-			)
+	hasWork, err := store.HasClaimableWork(ctx, customerID)
+	if err != nil {
+		t.Fatalf("HasClaimableWork: %v", err)
+	}
+	if !hasWork {
+		t.Fatal("HasClaimableWork with breaker disabled: got false, want true")
+	}
 
-			_, err := db.ExecContext(ctx, `
-				UPDATE webhooks
-				SET breaker_state = 'open',
-				    breaker_opened_at = now(),
-				    breaker_next_probe_at = now() + interval '1 hour',
-				    breaker_failure_count = 5
-				WHERE id = (SELECT webhook_id FROM deliveries WHERE id = $1)
-			`, deliveryID)
-			if err != nil {
-				t.Fatalf("open breaker: %v", err)
-			}
+	hasWorkBatch, err := store.HasClaimableWorkBatch(ctx, []string{customerID})
+	if err != nil {
+		t.Fatalf("HasClaimableWorkBatch: %v", err)
+	}
+	if !hasWorkBatch[customerID] {
+		t.Fatalf("HasClaimableWorkBatch with breaker disabled: got %v, want customer", hasWorkBatch)
+	}
 
-			hasWork, err := store.HasClaimableWork(ctx, customerID)
-			if err != nil {
-				t.Fatalf("HasClaimableWork: %v", err)
-			}
-			if !hasWork {
-				t.Fatal("HasClaimableWork with breaker disabled: got false, want true")
-			}
-
-			hasWorkBatch, err := store.HasClaimableWorkBatch(ctx, []string{customerID})
-			if err != nil {
-				t.Fatalf("HasClaimableWorkBatch: %v", err)
-			}
-			if !hasWorkBatch[customerID] {
-				t.Fatalf("HasClaimableWorkBatch with breaker disabled: got %v, want customer", hasWorkBatch)
-			}
-
-			claimed, ok, err := store.ClaimNext(ctx, customerID)
-			if err != nil {
-				t.Fatalf("ClaimNext: %v", err)
-			}
-			if !ok {
-				t.Fatal("ClaimNext with breaker disabled: got no delivery, want claim")
-			}
-			if claimed.ID != deliveryID {
-				t.Fatalf("ClaimNext with breaker disabled: got %s, want %s", claimed.ID, deliveryID)
-			}
-		})
+	claimed, ok, err := store.ClaimNext(ctx, customerID)
+	if err != nil {
+		t.Fatalf("ClaimNext: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext with breaker disabled: got no delivery, want claim")
+	}
+	if claimed.ID != deliveryID {
+		t.Fatalf("ClaimNext with breaker disabled: got %s, want %s", claimed.ID, deliveryID)
 	}
 }
 

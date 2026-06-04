@@ -37,7 +37,6 @@ func main() {
 	enablePgNotifyWakeups := flag.Bool("enable-pg-notify-wakeups", true, "use LISTEN/NOTIFY wakeups in addition to polling")
 	pgNotifyDSN := flag.String("pg-notify-db", "", "optional direct DATABASE_URL for LISTEN/NOTIFY connections")
 	pgNotifyChannel := flag.String("pg-notify-channel", "webhook_customer_ready", "LISTEN/NOTIFY channel for customer wakeups")
-	claimQueryMode := flag.String("claim-query-mode", "split", "claim query mode: split or legacy")
 	maxConns := flag.Int("max-conns", 0, "max DB connections (0 = workerCount + 10)")
 	flag.Parse()
 
@@ -54,7 +53,6 @@ func main() {
 		"pending_sample_interval", *backlogSampleInterval,
 		"pg_notify_wakeups", *enablePgNotifyWakeups,
 		"pg_notify_channel", *pgNotifyChannel,
-		"claim_query_mode", *claimQueryMode,
 	)
 
 	dsn := *db
@@ -115,7 +113,6 @@ func main() {
 	runtimeCfg.EnablePgNotifyWakeups = *enablePgNotifyWakeups
 	runtimeCfg.PgNotifyDSN = *pgNotifyDSN
 	runtimeCfg.PgNotifyChannel = *pgNotifyChannel
-	runtimeCfg.ClaimQueryMode = *claimQueryMode
 	runtimeCfg.Discovery.Interval = *discoveryInterval
 	observe.StartPendingDeliveriesSampler(runCtx, dbConn, runtimeCfg.BacklogSampleInterval, logger.With("component", "pending-backlog"))
 

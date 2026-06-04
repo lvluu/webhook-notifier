@@ -113,48 +113,6 @@ func TestSqlClaimSelectionAnyComposesReadyAndStale(t *testing.T) {
 	}
 }
 
-func TestSqlClaimablePredicateNoPositionalParams(t *testing.T) {
-	got := sqlClaimablePredicate("d", "dc", 5000)
-
-	if strings.Contains(got, "$2") {
-		t.Errorf("sqlClaimablePredicate must not contain $2, got: %s", got)
-	}
-	if strings.Contains(got, "$1") {
-		t.Errorf("sqlClaimablePredicate must not contain $1, got: %s", got)
-	}
-	if strings.Contains(got, "$") {
-		t.Errorf("sqlClaimablePredicate must not contain any positional parameters, got: %s", got)
-	}
-}
-
-func TestSqlClaimablePredicateEmbedsClaimLease(t *testing.T) {
-	got := sqlClaimablePredicate("d", "dc", 9999)
-
-	if !strings.Contains(got, "now() - (9999 * interval '1 millisecond')") {
-		t.Errorf("sqlClaimablePredicate should embed 9999, got: %s", got)
-	}
-}
-
-func TestSqlClaimablePredicateContainsNecessaryClauses(t *testing.T) {
-	got := sqlClaimablePredicate("d", "dc", 5000)
-
-	required := []string{
-		"d.status IN ('pending', 'failed_retry')",
-		"d.next_attempt_at <= now()",
-		"NOT EXISTS",
-		"delivery_claims dc",
-		"dc.delivery_id = d.id",
-		"EXISTS",
-		"dc.claimed_at < now() - (5000 * interval '1 millisecond')",
-	}
-
-	for _, clause := range required {
-		if !strings.Contains(got, clause) {
-			t.Errorf("sqlClaimablePredicate missing clause: %q", clause)
-		}
-	}
-}
-
 func TestSqlClaimSelectionBreakerEligible(t *testing.T) {
 	sel := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
 

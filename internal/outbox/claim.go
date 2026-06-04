@@ -250,9 +250,6 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 	if limit < 1 {
 		return nil, fmt.Errorf("limit must be >= 1")
 	}
-	if s.claimMode == ClaimQueryModeLegacy {
-		return s.claimNextNLegacy(ctx, customerID, limit)
-	}
 	if s.breakerConfig.FailureThreshold == 0 {
 		return s.claimNextNWithoutBreaker(ctx, customerID, limit)
 	}
@@ -326,70 +323,6 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 		return nil, err
 	}
 
-	if len(deliveries) == 0 {
-		observe.IncClaimEmpty()
-	}
-	observe.ObserveClaimDuration(time.Since(claimStarted).Seconds())
-	observe.ObserveClaimBatchSize(float64(len(deliveries)))
-	return deliveries, nil
-}
-
-func (s *Store) claimNextNLegacy(ctx context.Context, customerID string, limit int) ([]Delivery, error) {
-	if s.breakerConfig.FailureThreshold == 0 {
-		return s.claimNextNLegacyWithoutBreaker(ctx, customerID, limit)
-	}
-
-	claimStarted := time.Now()
-
-	claimable := sqlClaimablePredicate("d", "dc", s.claimLease.Milliseconds())
-	breakerEligible := sqlBreakerEligiblePredicate("w", "d")
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		WITH candidate AS (
-			SELECT d.id, d.webhook_id, d.attempt_count
-			FROM deliveries d
-			JOIN webhooks w ON w.id = d.webhook_id
-			LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
-			WHERE d.customer_id = $1
-			  AND %s
-			  AND %s
-			ORDER BY d.next_attempt_at, d.created_at, d.id
-			LIMIT $3
-			FOR UPDATE OF d SKIP LOCKED
-		),
-		probe AS (
-			UPDATE webhooks w
-			SET breaker_state = 'half_open',
-			    breaker_probe_delivery_id = c.id
-			FROM candidate c
-			WHERE w.id = c.webhook_id
-			  AND w.breaker_state = 'open'
-			  AND w.breaker_next_probe_at <= now()
-			RETURNING c.id
-		),
-		claimed AS (
-			INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
-			SELECT c.id, c.attempt_count + 1, now()
-			FROM candidate c
-			JOIN webhooks w ON w.id = c.webhook_id
-			WHERE w.breaker_state = 'closed'
-			   OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = c.id)
-			   OR c.id IN (SELECT id FROM probe)
-			ON CONFLICT (delivery_id) DO UPDATE
-			    SET attempt_number = EXCLUDED.attempt_number,
-			        claimed_at = now()
-			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
-			RETURNING delivery_id, attempt_number, claimed_at
-		)
-		%s`, claimable, breakerEligible, sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
-	if err != nil {
-		return nil, fmt.Errorf("legacy claim: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	deliveries, err := scanClaimedDeliveries(rows)
-	if err != nil {
-		return nil, err
-	}
 	if len(deliveries) == 0 {
 		observe.IncClaimEmpty()
 	}
@@ -491,9 +424,6 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 	if limit < 1 {
 		return nil, fmt.Errorf("limit must be >= 1")
 	}
-	if s.claimMode == ClaimQueryModeLegacy {
-		return s.discoverClaimableCustomersLegacy(ctx, afterCustomerID, limit)
-	}
 
 	claimSelection := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
 	breakerEligible := claimSelection.BreakerEligible()
@@ -540,88 +470,9 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 	return customerIDs, nil
 }
 
-func (s *Store) claimNextNLegacyWithoutBreaker(ctx context.Context, customerID string, limit int) ([]Delivery, error) {
-	claimStarted := time.Now()
-
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		WITH candidate AS (
-			SELECT d.id, d.attempt_count
-			FROM deliveries d
-			LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
-			WHERE d.customer_id = $1
-			  AND %s
-			ORDER BY d.next_attempt_at, d.created_at, d.id
-			LIMIT $3
-			FOR UPDATE OF d SKIP LOCKED
-		),
-		claimed AS (
-			INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
-			SELECT c.id, c.attempt_count + 1, now()
-			FROM candidate c
-			ON CONFLICT (delivery_id) DO UPDATE
-			    SET attempt_number = EXCLUDED.attempt_number,
-			        claimed_at = now()
-			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
-			RETURNING delivery_id, attempt_number, claimed_at
-		)
-		%s`, sqlClaimablePredicate("d", "dc", s.claimLease.Milliseconds()), sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
-	if err != nil {
-		return nil, fmt.Errorf("legacy claim without breaker: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	deliveries, err := scanClaimedDeliveries(rows)
-	if err != nil {
-		return nil, err
-	}
-	if len(deliveries) == 0 {
-		observe.IncClaimEmpty()
-	}
-	observe.ObserveClaimDuration(time.Since(claimStarted).Seconds())
-	observe.ObserveClaimBatchSize(float64(len(deliveries)))
-	return deliveries, nil
-}
-
-func (s *Store) discoverClaimableCustomersLegacy(ctx context.Context, afterCustomerID string, limit int) ([]string, error) {
-	breakerEligible := sqlBreakerEligiblePredicate("w", "d")
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT DISTINCT d.customer_id
-		FROM deliveries d
-		JOIN webhooks w ON w.id = d.webhook_id
-		LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
-		WHERE d.customer_id > $1
-		  AND %s
-		  AND %s
-		ORDER BY d.customer_id
-		LIMIT $2
-	`, sqlClaimablePredicate("d", "dc", s.claimLease.Milliseconds()), breakerEligible), afterCustomerID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("discover claimable customers legacy: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var customerIDs []string
-	for rows.Next() {
-		var customerID string
-		if err := rows.Scan(&customerID); err != nil {
-			return nil, fmt.Errorf("scan claimable customer: %w", err)
-		}
-		customerIDs = append(customerIDs, customerID)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate claimable customers: %w", err)
-	}
-	return customerIDs, nil
-}
-
 // HasClaimableWork reports whether the customer has any deliveries that are
 // currently eligible for claim, matching ClaimNextN and discovery semantics.
-// The split and legacy query modes share this semantic check on purpose even
-// though their claim/discovery SQL shapes differ.
 func (s *Store) HasClaimableWork(ctx context.Context, customerID string) (bool, error) {
-	if s.claimMode == ClaimQueryModeLegacy {
-		return s.hasClaimableWorkLegacy(ctx, customerID)
-	}
 	return s.hasClaimableWorkSplit(ctx, customerID)
 }
 
@@ -629,12 +480,6 @@ func (s *Store) HasClaimableWork(ctx context.Context, customerID string) (bool, 
 // issues a single query. The returned map contains only customers that have
 // at least one claimable Delivery; absent keys should be removed from
 // rotation.
-//
-// It is intentionally claimMode-agnostic: legacy vs split modes differ only in
-// the shape of the claim and discovery queries, not in eligibility semantics
-// (claimable = ready-unclaimed OR stale-claimed, AND breaker-eligible). The
-// boolean result is therefore identical across modes, so no legacy variant is
-// needed. Only the breaker on/off branch matters here.
 func (s *Store) HasClaimableWorkBatch(ctx context.Context, customerIDs []string) (map[string]bool, error) {
 	if len(customerIDs) == 0 {
 		return nil, nil
@@ -750,35 +595,3 @@ func (s *Store) hasClaimableWorkSplit(ctx context.Context, customerID string) (b
 	return exists, err
 }
 
-func (s *Store) hasClaimableWorkLegacy(ctx context.Context, customerID string) (bool, error) {
-	var exists bool
-	claimable := sqlClaimablePredicate("d", "dc", s.claimLease.Milliseconds())
-	if s.breakerConfig.FailureThreshold == 0 {
-		err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
-			SELECT EXISTS (
-				SELECT 1
-				FROM deliveries d
-				WHERE d.customer_id = $1
-				  AND %s
-			)
-		`, claimable), customerID).Scan(&exists)
-		return exists, err
-	}
-
-	breakerEligible := sqlBreakerEligiblePredicate("w", "d")
-	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT EXISTS (
-			SELECT 1
-			FROM deliveries d
-			WHERE d.customer_id = $1
-			  AND %s
-			  AND EXISTS (
-			      SELECT 1
-			      FROM webhooks w
-			      WHERE w.id = d.webhook_id
-			        AND %s
-			  )
-		)
-	`, claimable, breakerEligible), customerID).Scan(&exists)
-	return exists, err
-}
