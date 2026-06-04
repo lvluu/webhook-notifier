@@ -6,27 +6,26 @@ generated GIFs or videos are presentation artifacts.
 
 ## Recommended Workflow
 
-Use fanfa.dev for animated documentation. It is an animated Mermaid editor that
-can transform Mermaid diagrams into cinematic animations, shareable links,
-embeds, and exported video files.
+Use an animated Mermaid editor for presentation artifacts. The source diagrams
+in this directory remain the authoritative files; exported video files or
+share links are generated from them when needed.
 
-1. Open https://fanfa.dev/.
-2. Paste or submit one `.mmd` file.
-3. Pick a theme and animation style that keeps the sequence readable.
-4. Export MP4/WebM, or copy the share/embed URL.
-5. Save generated files next to the source using the same basename, for example
+1. Paste or submit one `.mmd` file to the renderer.
+2. Pick a theme and animation style that keeps the sequence readable.
+3. Export MP4/WebM, or copy the share/embed URL.
+4. Save generated files next to the source using the same basename, for example
    `claim-next-batch.mp4`.
 
-Fanfa is useful here because these diagrams are explanatory flow walkthroughs,
-not recordings of a terminal session.
+Animated Mermaid export is useful here because these diagrams are explanatory
+flow walkthroughs, not recordings of a terminal session.
 
 ## CLI / Automation Options
 
-There is no fanfa.dev CLI documented for rendering these files directly from
-the repo. Use one of these paths:
+There is no project-pinned animated Mermaid renderer for batch exports. Use one
+of these paths:
 
-- **fanfa.dev web editor** - preferred path for polished Mermaid animations,
-  share links, embeds, and MP4/WebM exports.
+- **Animated Mermaid web editor** - preferred path for polished Mermaid
+  animations, share links, embeds, and MP4/WebM exports.
 - **Mermaid CLI (`mmdc`)** - renders Mermaid to SVG, PNG, or PDF. It can inline
   custom CSS into SVG output, which can be used for simple SVG animation, but it
   does not produce step-through GIF walkthroughs on its own.

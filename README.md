@@ -56,6 +56,28 @@ just down
 
 Run `just` with no arguments to see all recipes.
 
+## Benchmarks
+
+The benchmark harness is the authoritative proof path for fairness,
+scalability, and reliability. Use the smaller `BENCH_PROFILE=dev` while
+iterating locally and `BENCH_PROFILE=stress` for report-quality runs.
+
+```bash
+just bench-6                  # mixed Whale/Small fairness proof
+just bench-8                  # multi-replica horizontal scalability proof
+just bench-partner-resilience # retry, terminal failure, breaker isolation
+just bench-7                  # internal breaker hardening
+```
+
+Direct runner form:
+
+```bash
+BENCH_PROFILE=stress go run ./cmd/bench scenario6
+```
+
+See [bench/README.md](bench/README.md) for all scenarios and
+[bench/RESULTS.md](bench/RESULTS.md) for the current report index.
+
 ## Low-Resource Compose Dev
 
 Start the lightweight Compose stack only when you want the app processes locally:
@@ -188,10 +210,22 @@ just stack-observe
 ```
 Grafana: `http://localhost:3000` (admin/admin) with the pre-built notifier dashboard.
 
-Future demo polish ideas:
-- Auto-start Grafana in the demo script
-- A "bad partner" toggle on the receiver
-- Terminal summary with p95 latency and DLQ count
+## Known Limitations
+
+- Webhook management APIs are demo helpers only; production auth and customer
+  self-service management are out of scope.
+- Host concurrency limiting is process-local. A horizontally scaled production
+  deployment needs fleet-wide coordination to enforce a global partner cap.
+- Scheduler state is process-local. Postgres claim semantics prevent duplicate
+  processing, while DB-backed discovery provides approximate cluster-wide
+  fairness rather than a single global ordering.
+- The default runtime uses equal-share round-robin. Weighted scheduling exists
+  behind an opt-in path and should be profiled before becoming the default.
+- Postgres is the queue for this PoC. Sustained very high throughput may need
+  partitioning or a broker-backed queue after benchmark evidence identifies
+  claim contention as the ceiling.
+- Strict per-Customer FIFO and multi-region delivery are intentionally out of
+  scope.
 
 ## Working across machines
 

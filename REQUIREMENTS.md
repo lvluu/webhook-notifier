@@ -3,8 +3,8 @@
 ## Problem Statement
 
 A multi-tenant SaaS platform exposes webhook integration so that Integration
-Partners can receive HTTP POST notifications of Events occurring in a
-Customer's account. All webhook Events carry JSON payloads.
+Partners can receive HTTP POSTs for Events occurring in a Customer's account.
+All webhook Events carry JSON payloads.
 
 The platform already provides APIs to manage webhook registrations (create,
 update, delete). What is missing is the **Webhook Notifier** — the component
