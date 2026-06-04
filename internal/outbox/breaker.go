@@ -384,7 +384,6 @@ func (s *Store) batchRecordBreakerSuccess(ctx context.Context, tx *sql.Tx, deliv
 		    breaker_cooldown_ms = $2,
 		    breaker_probe_delivery_id = NULL
 		WHERE id = ANY($1::uuid[])
-		  AND breaker_state <> 'closed'
 		  AND NOT (
 		      breaker_state = 'half_open'
 		      AND breaker_probe_delivery_id IS NOT NULL
@@ -407,14 +406,6 @@ func (s *Store) batchRecordBreakerSuccess(ctx context.Context, tx *sql.Tx, deliv
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate closed webhooks: %w", err)
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE webhooks
-		SET breaker_failure_count = 0
-		WHERE id = ANY($1::uuid[])
-	`, uniqueWIDs); err != nil {
-		return nil, fmt.Errorf("reset breaker failure count: %w", err)
 	}
 
 	return closed, nil
