@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -218,11 +219,17 @@ func batchLoadBreakerStates(ctx context.Context, tx *sql.Tx, webhookIDs []string
 }
 
 func batchIncrementBreakerFailureCount(ctx context.Context, tx *sql.Tx, webhookCounts map[string]int) (map[string]int, error) {
+	sortedIDs := make([]string, 0, len(webhookCounts))
+	for wid := range webhookCounts {
+		sortedIDs = append(sortedIDs, wid)
+	}
+	sort.Strings(sortedIDs)
+
 	webhookIDs := make([]string, 0, len(webhookCounts))
 	increments := make([]int, 0, len(webhookCounts))
-	for wid, n := range webhookCounts {
+	for _, wid := range sortedIDs {
 		webhookIDs = append(webhookIDs, wid)
-		increments = append(increments, n)
+		increments = append(increments, webhookCounts[wid])
 	}
 
 	rows, err := tx.QueryContext(ctx, `
@@ -289,11 +296,17 @@ func batchOpenHalfOpenBreakers(ctx context.Context, tx *sql.Tx, webhookIDs []str
 }
 
 func batchOpenClosedBreakers(ctx context.Context, tx *sql.Tx, failureCounts map[string]int, initialCooldownMs int64) ([]string, error) {
+	sortedIDs := make([]string, 0, len(failureCounts))
+	for wid := range failureCounts {
+		sortedIDs = append(sortedIDs, wid)
+	}
+	sort.Strings(sortedIDs)
+
 	webhookIDs := make([]string, 0, len(failureCounts))
 	counts := make([]int, 0, len(failureCounts))
-	for wid, n := range failureCounts {
+	for _, wid := range sortedIDs {
 		webhookIDs = append(webhookIDs, wid)
-		counts = append(counts, n)
+		counts = append(counts, failureCounts[wid])
 	}
 
 	rows, err := tx.QueryContext(ctx, `
@@ -360,6 +373,7 @@ func (s *Store) batchRecordBreakerSuccess(ctx context.Context, tx *sql.Tx, deliv
 			uniqueWIDs = append(uniqueWIDs, wid)
 		}
 	}
+	sort.Strings(uniqueWIDs)
 
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE webhooks
@@ -441,6 +455,7 @@ func (s *Store) batchRecordBreakerFailure(ctx context.Context, tx *sql.Tx, deliv
 	for wid := range deduped {
 		uniqueIDs = append(uniqueIDs, wid)
 	}
+	sort.Strings(uniqueIDs)
 
 	states, err := batchLoadBreakerStates(ctx, tx, uniqueIDs)
 	if err != nil {
@@ -462,6 +477,7 @@ func (s *Store) batchRecordBreakerFailure(ctx context.Context, tx *sql.Tx, deliv
 	}
 
 	if len(halfOpenIDs) > 0 {
+		sort.Strings(halfOpenIDs)
 		opened, err := batchOpenHalfOpenBreakers(ctx, tx, halfOpenIDs, s.breakerConfig.MaxCooldown.Milliseconds())
 		if err != nil {
 			return nil, err
