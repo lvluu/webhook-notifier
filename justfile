@@ -221,7 +221,7 @@ stack-production-all:
 stack-production-down:
     {{compose_prod}} {{stack_prod_profiles}} down -v
 
-# end-to-end demo: start stack, register customers, post events, verify delivery (under 2 min)
+# end-to-end demo: reset stack, register customers, post events, verify delivery, tear down (under 2 min)
 demo:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -229,8 +229,22 @@ demo:
     echo "=== Webhook Notifier Demo ==="
     echo ""
 
-    # 1. Start the dev stack
-    echo "[1/6] Starting services..."
+    cleanup() {
+        if [[ "${DEMO_KEEP_STACK:-0}" == "1" ]]; then
+            echo ""
+            echo "DEMO_KEEP_STACK=1 set; leaving stack running."
+            return
+        fi
+        echo ""
+        echo "Tearing down demo stack..."
+        {{compose}} {{stack_all_profiles}} down -v --remove-orphans >/dev/null
+    }
+    trap cleanup EXIT
+
+    # 1. Reset and start the dev stack. The Postgres init hook applies migrations
+    # on fresh volume creation.
+    echo "[1/6] Resetting and starting services..."
+    {{compose}} {{stack_all_profiles}} down -v --remove-orphans >/dev/null
     {{compose}} up -d --scale notifier=2 {{stack_base_services}}
 
     echo "    Waiting for services..."
@@ -268,9 +282,21 @@ demo:
     wait
     echo "    20 whale + 10 small events posted."
 
-    # 4. Wait for processing
+    # 4. Wait for processing and assert all demo deliveries succeeded.
     echo "[4/6] Waiting for delivery processing..."
-    sleep 5
+    for i in $(seq 1 60); do
+        succeeded="$({{compose}} exec -T postgres psql -U notifier -d notifier -At -c "SELECT COUNT(*) FROM deliveries WHERE customer_id IN ('demo-whale', 'demo-small') AND status = 'succeeded';" | tr -d '[:space:]')"
+        total="$({{compose}} exec -T postgres psql -U notifier -d notifier -At -c "SELECT COUNT(*) FROM deliveries WHERE customer_id IN ('demo-whale', 'demo-small');" | tr -d '[:space:]')"
+        if [[ "${succeeded}" == "30" && "${total}" == "30" ]]; then
+            echo "    All 30 deliveries succeeded."
+            break
+        fi
+        sleep 1
+    done
+    if [[ "${succeeded:-0}" != "30" || "${total:-0}" != "30" ]]; then
+        echo "    Expected 30 succeeded demo deliveries; got succeeded=${succeeded:-0}, total=${total:-0}." >&2
+        exit 1
+    fi
 
     # 5. Show results
     echo ""
@@ -303,13 +329,7 @@ demo:
     echo ""
     echo "=== Demo complete ==="
     echo ""
-    echo "Grafana:     http://localhost:3000 (admin/admin)"
-    echo "Prometheus:  http://localhost:9091"
-    echo ""
-    echo "To inspect further:"
-    echo "  just stack-status    # queue health"
-    echo "  just stack-logs notifier  # worker logs"
-    echo "  just stack-down      # tear down"
+    echo "Set DEMO_KEEP_STACK=1 to leave containers running for inspection."
 
 # fairness under load + late-arrival reactivity (issue #12)
 bench-1:
