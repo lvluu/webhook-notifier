@@ -103,8 +103,6 @@ services:
       - postgres://notifier:notifier@postgres:5432/notifier?sslmode=disable
       - -pg-notify-channel
       - webhook_customer_ready
-      - -claim-query-mode
-      - split
       - -max-conns
       - "30"
     healthcheck:

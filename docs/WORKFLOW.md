@@ -105,7 +105,6 @@ See [bench/README.md](../bench/README.md) for the full scenario map and
 | Breaker | threshold/cooldown | Isolation of broken Webhooks | Lower to protect workers earlier |
 | Discovery | interval/backoff/limit | How quickly retries and stale claims are rediscovered | Lower for responsiveness, higher to reduce DB load |
 | DB pool | `--max-conns` | DB concurrency and wait time | Tune with worker count and PgBouncer |
-| DB | claim query mode | Claim SQL shape | Prefer `split`; keep `legacy` for rollback/bench comparison |
 | DB | indexes/partitioning | Claim path cost at scale | Add/tune when queue tables grow |
 | DB | autovacuum/WAL/checkpoints | Write-heavy stability | Tune for sustained queue writes |
 
