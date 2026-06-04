@@ -261,10 +261,10 @@ demo:
     echo "[2/6] Registering customers and webhooks..."
     curl -fsS -X POST http://localhost:8080/api/customers \
       -H 'Content-Type: application/json' \
-      -d '{"id":"demo-whale","class":3,"url":"http://webhook-receiver:8080/hooks/fast"}' >/dev/null
+      -d '{"id":"demo-whale","class":3,"url":"http://webhook-receiver:8080/hooks"}' >/dev/null
     curl -fsS -X POST http://localhost:8080/api/customers \
       -H 'Content-Type: application/json' \
-      -d '{"id":"demo-small","class":1,"url":"http://webhook-receiver:8080/hooks/slow"}' >/dev/null
+      -d '{"id":"demo-small","class":1,"url":"http://webhook-receiver:8080/hooks"}' >/dev/null
     echo "    Customers registered: demo-whale, demo-small"
 
     # 3. Post events
