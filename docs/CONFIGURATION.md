@@ -22,8 +22,8 @@ All flags for `cmd/notifier`:
 | Flag | Default | Purpose |
 |---|---|---|
 | `--workers` | `64` | Number of delivery worker goroutines |
-| `--min-batch` | `32` | Minimum claim batch size per Customer per scheduler pick |
-| `--claim-batch-hint` | `64` | Upper bound for per-pick claim batch size. The worker clamps each scheduler `batchHint` (fairness weight) between `--min-batch` and this value. Lower favours fairness (worker yields to rotation sooner); higher favours throughput (more DB amortization per pick). Applied to both roundrobin and weighted scheduler. |
+| `--min-batch` | `32` | Lower bound for claim batch size per Customer per scheduler pick. Must be at least `1` |
+| `--claim-batch-hint` | `64` | Upper bound for per-pick claim batch size. Must be `0` (unbounded) or greater than/equal to `--min-batch`. The worker clamps each scheduler `batchHint` (fairness weight) between `--min-batch` and this value. Lower favours fairness (worker yields to rotation sooner); higher favours throughput (more DB amortization per pick). Applied to both roundrobin and weighted scheduler. |
 | `--multi-pick` | `1` | Customers to batch per claim query (1 = single, >1 = `ClaimNextBatch`) |
 | `--host-cap` | `20` | Max concurrent in-flight requests per Integration Partner hostname |
 
@@ -179,7 +179,7 @@ Defined in `bench/profiles.yaml`:
 
 1. **Reliability first**: verify zero duplicate `(delivery_id, attempt_number)`
    tuples under load and acceptable dead-letter rate.
-2. **Throughput second**: sweep `worker_count × db_conns × min_batch`.
+2. **Throughput second**: sweep `worker_count × db_conns × min_batch × claim_batch_hint`.
 3. **Fairness third**: verify Small Customer P95 first-attempt queue latency
    stays within SLO under concurrent Whale load. If a Whale occupies workers
    too long per pick, lower `--claim-batch-hint` (and `--min-batch`) toward

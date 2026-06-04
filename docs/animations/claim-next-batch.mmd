@@ -12,7 +12,7 @@ flowchart TD
 
     subgraph Worker["worker.claimMulti"]
       P["Pick up to MultiPickCount Customers"]
-      TL["totalLimit = len(customerIDs) * MinBatchHint"]
+      TL["totalLimit = sum(clamp(batchHint, MinBatchHint, MaxBatchHint))"]
       CS["claimedSet from returned Deliveries"]
       E["empty Customers = picked - claimedSet"]
       HW["HasClaimableWorkBatch(empty Customers)"]
