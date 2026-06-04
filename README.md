@@ -135,7 +135,6 @@ DATABASE_URL=postgres://notifier:notifier@localhost:5432/notifier?sslmode=disabl
 ```
 .
 ├── REQUIREMENTS.md       # assignment requirements (de-branded)
-├── EMAIL_DRAFT.md         # submission email draft
 ├── CONTEXT.md             # domain glossary — read first
 ├── docs/
 │   ├── DESIGN.md          # architecture, components, bench scenarios
