@@ -1,7 +1,7 @@
 # DB Query Monitoring Runbook
 
 This runbook defines how to monitor query-level Postgres health for notifier
-claim/discovery/retention paths under sustained load.
+claim, discovery, and retention paths under sustained load.
 
 ## Quick Start
 
@@ -11,11 +11,48 @@ Run every 60s during load tests:
 psql "$DATABASE_URL" -f bench/scripts/db_query_health.sql
 ```
 
+For a lighter queue/backlog-only probe:
+
+```bash
+psql "$DATABASE_URL" -f bench/scripts/issue54_health.sql
+```
+
+To keep the queue saturated while watching for throughput decay:
+
+```bash
+just sustained-load-watch 500 900 30
+```
+
 Pair with app-level Prometheus metrics:
 - `webhook_claim_duration_seconds`
 - `webhook_claim_batch_size`
 - `webhook_claim_empty_total`
 - `webhook_pg_pool_*`
+
+## Sustained-Load Gates
+
+A run passes only if all gates pass:
+
+1. Dead-tuple ratio on `deliveries` stays bounded.
+- Gate: `dead_pct <= 35%` at steady-state windows.
+- Gate: no monotonic rise over 3 consecutive samples at 1-minute cadence.
+
+2. Backlog does not run away.
+- Gate: `pending_retry_total` plateaus or declines after warmup.
+- Gate: `oldest_pending_age_sec` does not grow unbounded after warmup.
+
+3. Claim path remains healthy.
+- Gate: p95 `webhook_claim_duration_seconds` stays within the run target.
+- Gate: `webhook_claim_empty_total` growth is not paired with rising backlog.
+
+4. Fairness remains intact.
+- Gate: Small Customer p95 first-attempt latency remains within the scenario
+  threshold in [bench/README.md](../../bench/README.md).
+
+5. Retention does not collapse throughput.
+- Gate: while retention is active, end-to-end throughput regression is within
+  the agreed tolerance. Use `<= 10%` as an initial guardrail until environment
+  data says otherwise.
 
 ## What To Watch
 
@@ -67,8 +104,21 @@ Use as starting points; tune from environment data.
 5. Tune in order:
 - retention batch/cadence
 - worker count and `min-batch`
+- `multi-pick` for sparse-Customer workloads
 - discovery cadence or notify/wakeup optimization
 - DB/PgBouncer capacity
+
+## Evidence Template
+
+For each sustained-load run, record:
+
+- Commit SHA and migration set.
+- Load shape: replicas, workers per replica, profile/scenario.
+- Retention config: retention window, batch size, enrichment mode, cadence.
+- Throughput result: baseline versus retention-on.
+- Dead tuple trend summary.
+- Backlog trend summary.
+- Fairness summary: Small Customer p95 versus Whale Customer p95.
 
 ## pg_stat_statements Setup
 

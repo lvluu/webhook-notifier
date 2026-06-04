@@ -1,4 +1,4 @@
--- Issue #54 sustained-load queue health probes.
+-- Sustained-load queue health probes.
 -- Usage: psql "$DATABASE_URL" -f bench/scripts/issue54_health.sql
 
 \timing on

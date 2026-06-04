@@ -155,7 +155,7 @@ The **benchmark harness** (`cmd/bench`) remains the **authoritative proof**
 for fairness, scalability, and reliability claims. The Compose stack is a
 supplementary tool for live demos and manual exploration.
 
-## Sustained-Load Health Checks (Issue #54)
+## Sustained-Load Health Checks
 
 For dead-tuple/backlog drift validation under sustained load, run:
 
@@ -165,7 +165,7 @@ psql "$DATABASE_URL" -f bench/scripts/issue54_health.sql
 
 Checklist and pass/fail gates:
 
-- `docs/operations/issue-54-throughput-hardening.md`
+- `docs/operations/db-query-monitoring.md`
 
 To keep the queue saturated while you watch for throughput decay, use the sustained-load watcher:
 
