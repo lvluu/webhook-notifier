@@ -389,6 +389,10 @@ func (s *Store) batchRecordBreakerSuccess(ctx context.Context, tx *sql.Tx, deliv
 		      AND breaker_probe_delivery_id IS NOT NULL
 		      AND breaker_probe_delivery_id <> ALL($3::uuid[])
 		  )
+		  AND (
+		      breaker_state <> 'closed'
+		      OR breaker_failure_count > 0
+		  )
 		RETURNING id::text
 	`, uniqueWIDs, s.breakerConfig.InitialCooldown.Milliseconds(), deliveryIDs)
 	if err != nil {
