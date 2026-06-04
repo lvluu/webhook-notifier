@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -107,7 +108,11 @@ func main() {
 	runtimeCfg := loadWorkerRuntimeConfig()
 	runtimeCfg.WorkerCount = *workerCount
 	runtimeCfg.MinBatchHint = *minBatch
-	runtimeCfg.ClaimBatchHint = uint32(*claimBatchHint)
+	claimBatchHintVal := *claimBatchHint
+	if claimBatchHintVal > math.MaxUint32 {
+		claimBatchHintVal = math.MaxUint32
+	}
+	runtimeCfg.ClaimBatchHint = uint32(claimBatchHintVal)
 	runtimeCfg.MultiPickCount = *multiPick
 	runtimeCfg.HostConcurrencyCap = *hostCap
 	runtimeCfg.EmptyClaimBackoff = *emptyClaimBackoff
