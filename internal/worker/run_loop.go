@@ -18,8 +18,8 @@ const (
 )
 
 func (w *Worker) emptyClaimDelay() time.Duration {
-	if w.EmptyClaimBackoff > 0 {
-		return w.EmptyClaimBackoff
+	if w.Config.EmptyClaimBackoff > 0 {
+		return w.Config.EmptyClaimBackoff
 	}
 	return defaultEmptyClaimBackoff
 }
@@ -62,7 +62,7 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 }
 
 func (w *Worker) claimOrCollect(ctx context.Context, store DeliveryStore) ([]outbox.Delivery, error) {
-	if w.MultiPickCount <= 1 {
+	if w.Config.MultiPickCount <= 1 {
 		return w.claimSingle(ctx, store)
 	}
 	return w.claimMulti(ctx, store)
@@ -77,13 +77,7 @@ func (w *Worker) claimSingle(ctx context.Context, store DeliveryStore) ([]outbox
 		return nil, nil
 	}
 
-	limit := int(batchHint)
-	if limit < w.MinBatchHint {
-		limit = w.MinBatchHint
-	}
-	if w.MaxBatchHint > 0 && limit > w.MaxBatchHint {
-		limit = w.MaxBatchHint
-	}
+	limit := w.Config.ClaimLimit(batchHint)
 	deliveries, err := store.ClaimNextN(ctx, customerID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim delivery for %s: %w", customerID, err)
@@ -110,9 +104,10 @@ func (w *Worker) claimSingle(ctx context.Context, store DeliveryStore) ([]outbox
 }
 
 func (w *Worker) claimMulti(ctx context.Context, store DeliveryStore) ([]outbox.Delivery, error) {
-	customerIDs := make([]string, 0, w.MultiPickCount)
-	for range w.MultiPickCount {
-		id, _, ok, err := w.Scheduler.Pick(ctx)
+	customerIDs := make([]string, 0, w.Config.MultiPickCount)
+	totalLimit := 0
+	for range w.Config.MultiPickCount {
+		id, batchHint, ok, err := w.Scheduler.Pick(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -120,13 +115,13 @@ func (w *Worker) claimMulti(ctx context.Context, store DeliveryStore) ([]outbox.
 			break
 		}
 		customerIDs = append(customerIDs, id)
+		totalLimit += w.Config.ClaimLimit(batchHint)
 	}
 
 	if len(customerIDs) == 0 {
 		return nil, nil
 	}
 
-	totalLimit := len(customerIDs) * w.MinBatchHint
 	deliveries, err := store.ClaimNextBatch(ctx, customerIDs, totalLimit)
 	if err != nil {
 		return nil, fmt.Errorf("claim batch: %w", err)
@@ -180,7 +175,7 @@ type classified struct {
 
 func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, deliveries []outbox.Delivery) error {
 	results := make([]classified, len(deliveries))
-	sem := make(chan struct{}, w.DeliveryConcurrency)
+	sem := make(chan struct{}, w.Config.DeliveryConcurrency)
 	var wg sync.WaitGroup
 	for i, d := range deliveries {
 		wg.Add(1)

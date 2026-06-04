@@ -64,8 +64,8 @@ func (w *Worker) Send(ctx context.Context, d Delivery) (*http.Response, error) {
 		w.HTTP = NewHTTPClient(DefaultHTTPConfig())
 	}
 	var cancel context.CancelFunc
-	if w.RequestTimeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, w.RequestTimeout)
+	if w.Config.RequestTimeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, w.Config.RequestTimeout)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.URL, bytes.NewReader(d.Body))

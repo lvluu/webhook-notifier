@@ -18,8 +18,7 @@ import (
 type deliveryRuntime struct {
 	scheduler roundrobinScheduler
 	notifier  schedulerNotifier
-	cancel    context.CancelFunc
-	done      chan struct{}
+	group     *runtimeGroup
 }
 
 type roundrobinScheduler interface {
@@ -36,6 +35,74 @@ type runtimeDeps struct {
 }
 
 const pgNotifyQueueSize = 1024
+
+type runtimeGroup struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	logger *slog.Logger
+	errCh  chan error
+	done   chan struct{}
+
+	wg       sync.WaitGroup
+	cleanups []func()
+}
+
+func newRuntimeGroup(parent context.Context, logger *slog.Logger, errBuffer int) *runtimeGroup {
+	ctx, cancel := context.WithCancel(parent)
+	return &runtimeGroup{
+		ctx:    ctx,
+		cancel: cancel,
+		logger: logger,
+		errCh:  make(chan error, errBuffer),
+		done:   make(chan struct{}),
+	}
+}
+
+func (g *runtimeGroup) Go(label string, run func(context.Context) error) {
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		err := run(g.ctx)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			g.report(fmt.Errorf("%s: %w", label, err))
+		}
+	}()
+}
+
+func (g *runtimeGroup) Cleanup(fn func()) {
+	g.cleanups = append(g.cleanups, fn)
+}
+
+func (g *runtimeGroup) Finish() {
+	go func() {
+		g.wg.Wait()
+		for _, cleanup := range g.cleanups {
+			cleanup()
+		}
+		close(g.done)
+		close(g.errCh)
+	}()
+}
+
+func (g *runtimeGroup) Stop(ctx context.Context) error {
+	g.cancel()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-g.done:
+		return nil
+	}
+}
+
+func (g *runtimeGroup) report(err error) {
+	select {
+	case g.errCh <- err:
+	default:
+		if g.logger != nil {
+			g.logger.Error("runtime error channel full; dropping runtime error", "error", err)
+		}
+	}
+}
 
 func defaultRuntimeDeps() runtimeDeps {
 	return runtimeDeps{
@@ -61,13 +128,7 @@ func defaultRuntimeDeps() runtimeDeps {
 }
 
 func (r *deliveryRuntime) Stop(ctx context.Context) error {
-	r.cancel()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-r.done:
-		return nil
-	}
+	return r.group.Stop(ctx)
 }
 
 func startDeliveryRuntime(
@@ -91,10 +152,11 @@ func startDeliveryRuntimeWithDeps(
 	if cfg.WorkerCount < 1 {
 		return nil, nil, fmt.Errorf("worker count must be >= 1")
 	}
+	if err := cfg.Worker.Validate(); err != nil {
+		return nil, nil, fmt.Errorf("worker config: %w", err)
+	}
 
-	runCtx, cancel := context.WithCancel(parent)
-	done := make(chan struct{})
-	errCh := make(chan error, cfg.WorkerCount+1)
+	group := newRuntimeGroup(parent, logger, cfg.WorkerCount+1)
 
 	sched := deps.newScheduler(db, cfg)
 	notify := schedulerNotifier{
@@ -104,7 +166,6 @@ func startDeliveryRuntimeWithDeps(
 	limiter := deps.newLimiter(cfg.HostConcurrencyCap)
 	httpClient := worker.NewHTTPClient(worker.DefaultHTTPConfig())
 
-	var wg sync.WaitGroup
 	var broadcastDB *sql.DB
 	pgNotifyDSN := cfg.PgNotifyDSN
 	if pgNotifyDSN == "" {
@@ -114,7 +175,7 @@ func startDeliveryRuntimeWithDeps(
 		var err error
 		broadcastDB, err = sql.Open("pgx", pgNotifyDSN)
 		if err != nil {
-			cancel()
+			group.cancel()
 			return nil, nil, fmt.Errorf("open pg_notify database: %w", err)
 		}
 		broadcastDB.SetMaxOpenConns(1)
@@ -126,83 +187,46 @@ func startDeliveryRuntimeWithDeps(
 			pgNotifyQueueSize,
 		)
 		notify.broadcaster = broadcaster
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			err := broadcaster.Run(runCtx)
-			if err != nil && !errors.Is(err, context.Canceled) {
-				trySendRuntimeError(logger, errCh, fmt.Errorf("pg_notify broadcaster: %w", err))
-			}
-		}()
-	}
-
-	for i := 0; i < cfg.WorkerCount; i++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-			w := worker.New(
-				sched,
-				worker.WithHTTPClient(httpClient),
-				worker.WithHostLimiter(limiter),
-				worker.WithMinBatchHint(cfg.MinBatchHint),
-				worker.WithMaxBatchHint(cfg.MaxBatchHint),
-				worker.WithMultiPickCount(cfg.MultiPickCount),
-				worker.WithRequestTimeout(cfg.RequestTimeout),
-				worker.WithEmptyClaimBackoff(cfg.EmptyClaimBackoff),
-				worker.WithLogger(logger.With("component", "worker", "worker_id", workerID)),
-			)
-			err := w.Run(runCtx, outboxStore)
-			if err != nil && !errors.Is(err, context.Canceled) {
-				trySendRuntimeError(logger, errCh, fmt.Errorf("worker %d: %w", workerID, err))
-			}
-		}(i + 1)
-	}
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		err := deps.runDiscovery(runCtx, outboxStore, sched, cfg.Discovery)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			trySendRuntimeError(logger, errCh, fmt.Errorf("discovery: %w", err))
-		}
-	}()
-
-	if cfg.EnablePgNotifyWakeups && pgNotifyDSN != "" {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			err := runCustomerWakeListener(runCtx, logger.With("component", "pg-listener"), pgNotifyDSN, cfg.PgNotifyChannel, sched)
-			if err != nil && !errors.Is(err, context.Canceled) {
-				trySendRuntimeError(logger, errCh, fmt.Errorf("wake listener: %w", err))
-			}
-		}()
-	}
-
-	go func() {
-		wg.Wait()
-		if broadcastDB != nil {
+		group.Go("pg_notify broadcaster", broadcaster.Run)
+		group.Cleanup(func() {
 			if err := broadcastDB.Close(); err != nil && logger != nil {
 				logger.Warn("pg_notify database close failed", "error", err)
 			}
-		}
-		close(done)
-		close(errCh)
-	}()
+		})
+	}
+
+	for i := 0; i < cfg.WorkerCount; i++ {
+		workerID := i + 1
+		group.Go(fmt.Sprintf("worker %d", workerID), func(ctx context.Context) error {
+			w, err := worker.NewWithConfig(
+				sched,
+				cfg.Worker,
+				worker.WithHTTPClient(httpClient),
+				worker.WithHostLimiter(limiter),
+				worker.WithLogger(logger.With("component", "worker", "worker_id", workerID)),
+			)
+			if err != nil {
+				return fmt.Errorf("config: %w", err)
+			}
+			return w.Run(ctx, outboxStore)
+		})
+	}
+
+	group.Go("discovery", func(ctx context.Context) error {
+		return deps.runDiscovery(ctx, outboxStore, sched, cfg.Discovery)
+	})
+
+	if cfg.EnablePgNotifyWakeups && pgNotifyDSN != "" {
+		group.Go("wake listener", func(ctx context.Context) error {
+			return runCustomerWakeListener(ctx, logger.With("component", "pg-listener"), pgNotifyDSN, cfg.PgNotifyChannel, sched)
+		})
+	}
+
+	group.Finish()
 
 	return &deliveryRuntime{
 		scheduler: sched,
 		notifier:  notify,
-		cancel:    cancel,
-		done:      done,
-	}, errCh, nil
-}
-
-func trySendRuntimeError(logger *slog.Logger, errCh chan<- error, err error) {
-	select {
-	case errCh <- err:
-	default:
-		if logger != nil {
-			logger.Error("runtime error channel full; dropping runtime error", "error", err)
-		}
-	}
+		group:     group,
+	}, group.errCh, nil
 }
