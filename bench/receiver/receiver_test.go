@@ -11,6 +11,11 @@ import (
 	"time"
 )
 
+// testHTTP uses a dedicated transport so parallel tests don't poison each
+// other's connections when httptest.Server.Close() calls CloseIdleConnections
+// on http.DefaultTransport.
+var testHTTP = &http.Client{Transport: &http.Transport{}}
+
 func TestDowntime(t *testing.T) {
 	t.Parallel()
 
@@ -27,7 +32,7 @@ func TestDowntime(t *testing.T) {
 
 	t.Run("before threshold", func(t *testing.T) {
 		for i := range 4 {
-			resp, err := http.Post(url+"/dt", "application/json", strings.NewReader(`{}`))
+			resp, err := testHTTP.Post(url+"/dt", "application/json", strings.NewReader(`{}`))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -40,7 +45,7 @@ func TestDowntime(t *testing.T) {
 
 	t.Run("trigger downtime", func(t *testing.T) {
 		fakeNow = fakeNow.Add(time.Second)
-		resp, err := http.Post(url+"/dt", "application/json", strings.NewReader(`{}`))
+		resp, err := testHTTP.Post(url+"/dt", "application/json", strings.NewReader(`{}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -52,7 +57,7 @@ func TestDowntime(t *testing.T) {
 
 	t.Run("during window", func(t *testing.T) {
 		fakeNow = fakeNow.Add(500 * time.Millisecond)
-		resp, err := http.Post(url+"/dt", "application/json", strings.NewReader(`{}`))
+		resp, err := testHTTP.Post(url+"/dt", "application/json", strings.NewReader(`{}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -64,7 +69,7 @@ func TestDowntime(t *testing.T) {
 
 	t.Run("after recovery", func(t *testing.T) {
 		fakeNow = fakeNow.Add(2 * time.Second)
-		resp, err := http.Post(url+"/dt", "application/json", strings.NewReader(`{}`))
+		resp, err := testHTTP.Post(url+"/dt", "application/json", strings.NewReader(`{}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -81,7 +86,7 @@ func TestRandIsolation(t *testing.T) {
 	collect := func(srv *ReceiverServer) []int {
 		var seq []int
 		for range 20 {
-			resp, err := http.Get(srv.URL())
+			resp, err := testHTTP.Get(srv.URL())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -126,7 +131,7 @@ func TestReset(t *testing.T) {
 	defer srv.Close()
 
 	body := `{"hello": "world"}`
-	resp, err := http.Post(srv.URL()+"/reset-me", "application/json", strings.NewReader(body))
+	resp, err := testHTTP.Post(srv.URL()+"/reset-me", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +155,7 @@ func TestRecorded(t *testing.T) {
 	defer srv.Close()
 
 	body := `{"test": true}`
-	resp, err := http.Post(srv.URL()+"/record-me", "application/json", strings.NewReader(body))
+	resp, err := testHTTP.Post(srv.URL()+"/record-me", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +200,7 @@ func TestDowntimePrecedence(t *testing.T) {
 	url := srv.URL()
 
 	t.Run("before downtime", func(t *testing.T) {
-		resp, err := http.Post(url+"/prec", "application/json", strings.NewReader(`{}`))
+		resp, err := testHTTP.Post(url+"/prec", "application/json", strings.NewReader(`{}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -207,7 +212,7 @@ func TestDowntimePrecedence(t *testing.T) {
 
 	t.Run("downtime overrides status", func(t *testing.T) {
 		fakeNow = fakeNow.Add(time.Second)
-		resp, err := http.Post(url+"/prec", "application/json", strings.NewReader(`{}`))
+		resp, err := testHTTP.Post(url+"/prec", "application/json", strings.NewReader(`{}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -229,7 +234,7 @@ func TestLatencyInjection(t *testing.T) {
 	url := srv.URL()
 	for i := range 10 {
 		start := time.Now()
-		resp, err := http.Post(url+"/latency-test", "application/json", strings.NewReader(`{}`))
+		resp, err := testHTTP.Post(url+"/latency-test", "application/json", strings.NewReader(`{}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -284,7 +289,7 @@ func TestRouteStatusOverridesServer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resp, err := http.Post(base+tt.path, "application/json", strings.NewReader(`{}`))
+			resp, err := testHTTP.Post(base+tt.path, "application/json", strings.NewReader(`{}`))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -305,7 +310,7 @@ func TestRouteStatusZeroProbOverridesServer(t *testing.T) {
 	)
 	defer srv.Close()
 
-	resp, err := http.Post(srv.URL()+"/opt-out", "application/json", strings.NewReader(`{}`))
+	resp, err := testHTTP.Post(srv.URL()+"/opt-out", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +351,7 @@ func TestRouteStatusFunc(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fakeNow = tt.now
 
-			resp, err := http.Post(srv.URL()+"/recovering", "application/json", strings.NewReader(`{}`))
+			resp, err := testHTTP.Post(srv.URL()+"/recovering", "application/json", strings.NewReader(`{}`))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -368,7 +373,7 @@ func TestRouteLatency(t *testing.T) {
 	defer srv.Close()
 
 	start := time.Now()
-	resp, err := http.Post(srv.URL()+"/slow", "application/json", strings.NewReader(`{}`))
+	resp, err := testHTTP.Post(srv.URL()+"/slow", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +394,7 @@ func TestRouteLatencyZeroProbOverridesServer(t *testing.T) {
 	defer srv.Close()
 
 	start := time.Now()
-	resp, err := http.Post(srv.URL()+"/fast", "application/json", strings.NewReader(`{}`))
+	resp, err := testHTTP.Post(srv.URL()+"/fast", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +426,7 @@ func TestConcurrentInjection(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			resp, err := http.Post(srv.URL()+"/concurrent", "application/json", strings.NewReader(`{}`))
+			resp, err := testHTTP.Post(srv.URL()+"/concurrent", "application/json", strings.NewReader(`{}`))
 			if err != nil {
 				errs <- err
 				return
@@ -462,7 +467,7 @@ func TestStatusInjection(t *testing.T) {
 	url := srv.URL()
 	var got500 int
 	for range n {
-		resp, err := http.Post(url+"/status-test", "application/json", strings.NewReader(`{}`))
+		resp, err := testHTTP.Post(url+"/status-test", "application/json", strings.NewReader(`{}`))
 		if err != nil {
 			t.Fatal(err)
 		}
