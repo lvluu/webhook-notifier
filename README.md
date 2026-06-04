@@ -2,17 +2,17 @@
 
 A reliable, horizontally scalable webhook delivery service with per-tenant fair scheduling. Receives business Events from a multi-tenant platform and POSTs them to Integration Partners' configured URLs, with retries, signing, and protection against any one Customer monopolising delivery capacity.
 
-Design: [docs/DESIGN.md](docs/DESIGN.md) · Vocabulary: [CONTEXT.md](CONTEXT.md) · Decisions: [docs/adr/](docs/adr/)
+Design: [docs/DESIGN.md](docs/DESIGN.md) · Requirements: [REQUIREMENTS.md](REQUIREMENTS.md) · Configuration: [docs/CONFIGURATION.md](docs/CONFIGURATION.md) · Vocabulary: [CONTEXT.md](CONTEXT.md) · Decisions: [docs/adr/](docs/adr/)
 
 ## Status
 
-PoC scaffolding stage. Track progress via GitHub issues — work is sliced into vertical tracer-bullet tickets, each independently grabbable.
+PoC complete. All 8 benchmark scenarios pass. Ready for submission and pair-session review.
 
 ```bash
 gh issue list --label ready-for-agent --state open
 ```
 
-The PRD lives at [#1](https://github.com/lvluu/flodesk-home-assignment/issues/1).
+The PRD lives at [#1](https://github.com/lvluu/webhook-notifier/issues/1).
 
 ## Prerequisites
 
@@ -29,8 +29,8 @@ Everything else (`golangci-lint`, `golang-migrate`) is fetched on first use by t
 
 ```bash
 # 1. Clone
-git clone https://github.com/lvluu/flodesk-home-assignment.git
-cd flodesk-home-assignment
+git clone https://github.com/lvluu/webhook-notifier.git
+cd webhook-notifier
 
 # 2. Start Postgres
 just up
@@ -47,11 +47,36 @@ just test
 # 6. Lint
 just lint
 
-# 7. Tear down
+# 7. Run the e2e demo
+just demo
+
+# 8. Tear down
 just down
 ```
 
 Run `just` with no arguments to see all recipes.
+
+## Benchmarks
+
+The benchmark harness is the authoritative proof path for fairness,
+scalability, and reliability. Use the smaller `BENCH_PROFILE=dev` while
+iterating locally and `BENCH_PROFILE=stress` for report-quality runs.
+
+```bash
+just bench-6                  # mixed Whale/Small fairness proof
+just bench-8                  # multi-replica horizontal scalability proof
+just bench-partner-resilience # retry, terminal failure, breaker isolation
+just bench-7                  # internal breaker hardening
+```
+
+Direct runner form:
+
+```bash
+BENCH_PROFILE=stress go run ./cmd/bench scenario6
+```
+
+See [bench/README.md](bench/README.md) for all scenarios and
+[bench/RESULTS.md](bench/RESULTS.md) for the current report index.
 
 ## Low-Resource Compose Dev
 
@@ -131,43 +156,76 @@ DATABASE_URL=postgres://notifier:notifier@localhost:5432/notifier?sslmode=disabl
 
 ```
 .
-├── CONTEXT.md           # domain glossary — read first
+├── REQUIREMENTS.md       # assignment requirements (de-branded)
+├── CONTEXT.md             # domain glossary — read first
 ├── docs/
-│   ├── DESIGN.md        # architecture, components, bench scenarios
-│   └── adr/             # numbered architectural decisions
+│   ├── DESIGN.md          # architecture, components, bench scenarios
+│   ├── CONFIGURATION.md   # full configuration reference
+│   ├── WORKFLOW.md        # step-by-step execution path + tuning checklist
+│   └── adr/               # numbered architectural decisions
 ├── cmd/
-│   ├── notifier/        # service entrypoint
-│   └── bench/           # benchmark scenario runner
+│   ├── notifier/          # service entrypoint
+│   └── bench/             # benchmark scenario runner
 ├── internal/
-│   ├── ingest/          # Event ingest + fan-out to Deliveries
-│   ├── scheduler/       # Scheduler interface + round-robin impl (ADR-0001)
-│   ├── retry/           # RetryPolicy (ADR-0003)
-│   ├── signer/          # HMAC-SHA256 outbound signing
-│   ├── worker/          # claim, sign, POST, retry; per-host limiter
-│   ├── outbox/          # Postgres claim semantics (ADR-0002)
-│   ├── registry/        # Customer → []Webhook lookup + LRU cache
-│   └── observe/         # slog, Prometheus, /health, pprof
+│   ├── ingest/            # Event ingest + fan-out to Deliveries
+│   ├── scheduler/         # Scheduler interface + round-robin impl (ADR-0001)
+│   ├── retry/             # RetryPolicy (ADR-0003)
+│   ├── signer/            # HMAC-SHA256 outbound signing
+│   ├── worker/            # claim, sign, POST, retry; per-host limiter
+│   ├── outbox/            # Postgres claim semantics (ADR-0002)
+│   ├── registry/          # Customer → []Webhook lookup + LRU cache
+│   └── observe/           # slog, Prometheus, /health, pprof
 ├── bench/
-│   ├── receiver/        # configurable test HTTP server fixture
-│   ├── scenarios/       # the five benchmark scenarios
-│   └── results/         # committed scenario reports
-├── compose/caddy/       # local ingress config for scaled Compose stack
-├── compose/grafana/     # provisioned datasource and notifier dashboard
-├── compose/prometheus/  # scrape config for notifier + receiver metrics
-├── migrations/          # golang-migrate SQL files
+│   ├── RESULTS.md         # scenario results index
+│   ├── receiver/          # configurable test HTTP server fixture
+│   ├── scenarios/         # benchmark scenario drivers
+│   └── results/           # committed scenario reports
+├── compose/caddy/         # local ingress config for scaled Compose stack
+├── compose/grafana/       # provisioned datasource and notifier dashboard
+├── compose/prometheus/    # scrape config for notifier + receiver metrics
+├── migrations/            # golang-migrate SQL files
 ├── compose/docker-compose.yml   # production-like local stack
 └── justfile
 ```
 
-## Demo polish ideas
+## Demo
 
-The current stack demonstrates scale, fairness, delivery, and observability. To make the demo more interview-impressive, the highest-leverage next steps are:
+`just demo` starts the full dev stack, registers a Whale and Small Customer,
+posts Events, and verifies delivery — all in under 2 minutes.
 
-- Add a one-command scripted demo that resets the stack, starts `stack-chaos`, opens Grafana, and prints a short "what to watch" checklist.
-- Add a Grafana row for the fairness story: pending Deliveries by Customer class, scheduler picks, successful Deliveries/sec, and Postgres pool usage side by side.
-- Add a "bad partner" toggle to the receiver so the demo can show healthy Customers continuing while one Integration Partner fails.
-- Add a short terminal summary after chaos runs: total Deliveries, success rate, p95 latency, DLQ count, and receiver request count.
-- Add a Caddy access log panel or simple request counter so the ingress layer is visible without distracting from notifier internals.
+```
+just demo
+```
+
+What the demo shows:
+- Two notifier replicas behind Caddy ingress
+- A Whale Customer and a Small Customer registered with webhooks
+- 20 Whale + 10 Small Events ingested concurrently (scheduler treats both equally via round-robin)
+- Delivery processing with status breakdown and attempt counts
+- Receiver metrics and notifier health check
+
+For the full observability experience, start Grafana and Prometheus alongside:
+```
+just stack-observe
+```
+Grafana: `http://localhost:3000` (admin/admin) with the pre-built notifier dashboard.
+
+## Known Limitations
+
+- Webhook management APIs are demo helpers only; production auth and customer
+  self-service management are out of scope.
+- Host concurrency limiting is process-local. A horizontally scaled production
+  deployment needs fleet-wide coordination to enforce a global partner cap.
+- Scheduler state is process-local. Postgres claim semantics prevent duplicate
+  processing, while DB-backed discovery provides approximate cluster-wide
+  fairness rather than a single global ordering.
+- The default runtime uses equal-share round-robin. Weighted scheduling exists
+  behind an opt-in path and should be profiled before becoming the default.
+- Postgres is the queue for this PoC. Sustained very high throughput may need
+  partitioning or a broker-backed queue after benchmark evidence identifies
+  claim contention as the ceiling.
+- Strict per-Customer FIFO and multi-region delivery are intentionally out of
+  scope.
 
 ## Working across machines
 
@@ -182,7 +240,7 @@ To pick up work on a new machine:
 
 ```bash
 git clone <repo>
-cd flodesk-home-assignment
+cd webhook-notifier
 git config user.name "lvluu"
 git config user.email "luuvanloi@duck.com"
 

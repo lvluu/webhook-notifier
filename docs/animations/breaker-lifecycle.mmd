@@ -1,0 +1,49 @@
+flowchart LR
+    %% Animation intent:
+    %% 1. Closed Webhook is normally claimable.
+    %% 2. Failures are recorded from delivery attempts.
+    %% 3. Consecutive failures at threshold open the breaker.
+    %% 4. Open Webhooks are filtered from claim and discovery until probe time.
+    %% 5. Claim SQL moves an eligible open Webhook to half_open for one probe.
+    %% 6. Probe success closes; probe failure reopens with longer cooldown.
+
+    C["closed: normally claimable"]
+    F["failure recorded"]
+    CNT["count consecutive failures"]
+    O["open: excluded from claim and discovery"]
+    WAIT["queued Deliveries remain pending"]
+    D["cooldown elapsed"]
+    P["claim SQL selects one probe Delivery"]
+    H["half_open: probe in progress"]
+    PS["probe succeeds"]
+    PF["probe fails"]
+    RESET["reset failures and clear probe"]
+    BACKOFF["increase cooldown up to max"]
+    OK["success recorded"]
+
+    C -->|"Attempt fails"| F
+    F --> CNT
+    CNT -->|"below threshold"| C
+    CNT -->|"threshold reached"| O
+    C -->|"Attempt succeeds"| OK
+    OK --> RESET
+    RESET --> C
+    O --> WAIT
+    WAIT --> O
+    O -->|"breaker_next_probe_at reached"| D
+    D --> P
+    P -->|"set breaker_probe_delivery_id"| H
+    H --> PS
+    PS --> RESET
+    H --> PF
+    PF --> BACKOFF
+    BACKOFF --> O
+
+    classDef healthy fill:#ecfdf3,stroke:#3b8f5f,color:#123524;
+    classDef warning fill:#fff7e6,stroke:#c48225,color:#4a2c00;
+    classDef openState fill:#fff0f0,stroke:#c45050,color:#4c1111;
+    classDef probe fill:#e8f1ff,stroke:#4d6fb3,color:#10233f;
+    class C,OK,PS,RESET healthy;
+    class F,CNT,PF,BACKOFF warning;
+    class O,WAIT openState;
+    class D,P,H probe;

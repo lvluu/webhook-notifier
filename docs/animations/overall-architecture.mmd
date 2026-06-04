@@ -1,0 +1,45 @@
+flowchart LR
+    %% Animation intent:
+    %% Top-level path only: Event enters the notifier, Postgres acts as the
+    %% durable queue, workers fan out Delivery attempts to Integration Partners.
+
+    EVENT["Business Event"]
+    INGRESS["Notifier ingress"]
+    PG["Postgres queue"]
+    W1["Worker"]
+    W2["Worker"]
+    W3["Worker"]
+    P1["Partner endpoint A"]
+    P2["Partner endpoint B"]
+    P3["Partner endpoint C"]
+    RESULT["delivery status"]
+
+    EVENT -->|"POST /api/events"| INGRESS
+    INGRESS -->|"store Event"| PG
+    INGRESS -->|"create Delivery rows"| PG
+
+    PG -->|"claim next Delivery"| W1
+    PG -->|"claim next Delivery"| W2
+    PG -->|"claim next Delivery"| W3
+
+    W1 -->|"HTTP POST"| P1
+    W2 -->|"HTTP POST"| P2
+    W3 -->|"HTTP POST"| P3
+
+    P1 --> RESULT
+    P2 --> RESULT
+    P3 --> RESULT
+
+    RESULT -->|"success, retry, or dead"| PG
+    PG -->|"retry later if needed"| W1
+
+    classDef event fill:#e8f1ff,stroke:#4d6fb3,color:#10233f;
+    classDef queue fill:#f5f0ff,stroke:#7b61b8,color:#2b2147;
+    classDef worker fill:#fff7e6,stroke:#c48225,color:#4a2c00;
+    classDef partner fill:#fff0f0,stroke:#c45050,color:#4c1111;
+    classDef result fill:#ecfdf3,stroke:#3b8f5f,color:#123524;
+    class EVENT,INGRESS event;
+    class PG queue;
+    class W1,W2,W3 worker;
+    class P1,P2,P3 partner;
+    class RESULT result;

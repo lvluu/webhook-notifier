@@ -1,0 +1,74 @@
+flowchart TD
+    %% Animation intent:
+    %% 1. claimMulti co-picks several Customers from the process-local Scheduler.
+    %% 2. ClaimNextBatch computes a total limit and a per-Customer candidate cap.
+    %% 3. SQL de-duplicates input Customers.
+    %% 4. Each Customer contributes ready candidates and stale-claim candidates.
+    %% 5. Optional breaker filtering/probe handling happens inside the claim SQL.
+    %% 6. A final time-ordered cut chooses the batch; there is no per-Customer
+    %%    return guarantee.
+    %% 7. Worker re-notifies Customers that produced rows, checks empty Customers
+    %%    with HasClaimableWorkBatch, then Notify/Remove keeps rotation accurate.
+
+    subgraph Worker["worker.claimMulti"]
+      P["Pick up to MultiPickCount Customers"]
+      TL["totalLimit = len(customerIDs) * MinBatchHint"]
+      CS["claimedSet from returned Deliveries"]
+      E["empty Customers = picked - claimedSet"]
+      HW["HasClaimableWorkBatch(empty Customers)"]
+      RN["Notify Customers with claimed rows"]
+      ER["Notify empties with work; Remove empties without work"]
+    end
+
+    subgraph SQL["outbox.ClaimNextBatch(customerIDs, totalLimit)"]
+      PC["perCustomerLimit = max(totalLimit / len(input), 1)"]
+      U["input_customers; SELECT DISTINCT"]
+      RC["ready_candidate; pending/failed_retry; next_attempt_at <= now; no active claim"]
+      SC["stale_candidate; delivery_claims.claimed_at; older than lease"]
+      BF["breaker eligibility; and half_open probe; (enabled path)"]
+      POOL["candidate_pool; ready UNION ALL stale"]
+      CUT["candidate; ORDER BY next_attempt_at, created_at, id; LIMIT totalLimit"]
+      INS["INSERT delivery_claims; ON CONFLICT only if stale"]
+      RET["return claimed Delivery rows; ordered by delivery time"]
+    end
+
+    subgraph Tables["Postgres tables"]
+      DV[("deliveries")]
+      DC[("delivery_claims")]
+      WH[("webhooks")]
+      EV[("events")]
+      CU[("customers")]
+    end
+
+    P --> TL
+    TL --> PC
+    PC --> U
+    U --> RC
+    U --> SC
+    RC --> DV
+    SC --> DC
+    SC --> DV
+    RC --> BF
+    SC --> BF
+    BF --> WH
+    BF --> POOL
+    POOL --> CUT
+    CUT --> INS
+    INS --> DC
+    INS --> RET
+    RET --> DV
+    RET --> EV
+    RET --> WH
+    RET --> CU
+    RET --> CS
+    CS --> RN
+    CS --> E
+    E --> HW
+    HW --> ER
+
+    classDef worker fill:#e8f1ff,stroke:#4d6fb3,color:#10233f;
+    classDef sql fill:#ecfdf3,stroke:#3b8f5f,color:#123524;
+    classDef db fill:#f5f0ff,stroke:#7b61b8,color:#2b2147;
+    class P,TL,CS,E,HW,RN,ER worker;
+    class PC,U,RC,SC,BF,POOL,CUT,INS,RET sql;
+    class DV,DC,WH,EV,CU db;

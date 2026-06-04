@@ -1,7 +1,7 @@
 # Delivery History Retention Tuning
 
-This runbook captures the issue #45 follow-up checks for archive query shape,
-cache pressure, and vacuum behavior under sustained terminal-row churn.
+This runbook captures archive query shape, cache pressure, and vacuum behavior
+under sustained terminal-row churn.
 
 ## Recommended Starting Defaults
 

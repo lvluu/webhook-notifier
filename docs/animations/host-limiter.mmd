@@ -1,0 +1,50 @@
+flowchart TD
+    %% Animation intent:
+    %% 1. Worker has already claimed a Delivery.
+    %% 2. Before HTTP POST, Worker asks HostLimiter for a hostname slot.
+    %% 3. If a slot is available, Worker sends the Attempt and records outcome.
+    %% 4. If host is at local cap, Worker requeues without sending HTTP.
+    %% 5. Requeue does not record an Attempt or consume retry budget.
+    %% 6. Worker yields so another Customer can proceed.
+
+    A["Worker has claimed a Delivery"]
+    B["Parse delivery URL hostname"]
+    C{"HostLimiter.TryAcquire(hostname)"}
+
+    D["slot acquired"]
+    E["send HTTP POST Attempt"]
+    F["Partner returns response or error"]
+    G["release host slot"]
+    H["Outbox marks success, retry, or dead"]
+
+    I["capacity reached"]
+    J["Outbox requeues Delivery with short delay"]
+    K["no HTTP request sent"]
+    L["no Attempt recorded and retry budget unchanged"]
+    M["Worker yields to Scheduler"]
+    N["Scheduler can pick another Customer"]
+
+    A --> B
+    B --> C
+
+    C -->|"slot available"| D
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+
+    C -->|"host at local cap"| I
+    I --> J
+    J --> K
+    K --> L
+    L --> M
+    M --> N
+
+    classDef start fill:#e8f1ff,stroke:#4d6fb3,color:#10233f;
+    classDef success fill:#ecfdf3,stroke:#3b8f5f,color:#123524;
+    classDef delayed fill:#fff7e6,stroke:#c48225,color:#4a2c00;
+    classDef decision fill:#f5f0ff,stroke:#7b61b8,color:#2b2147;
+    class A,B start;
+    class C decision;
+    class D,E,F,G,H success;
+    class I,J,K,L,M,N delayed;

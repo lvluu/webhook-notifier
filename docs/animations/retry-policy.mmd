@@ -1,0 +1,33 @@
+flowchart TD
+    %% Animation intent:
+    %% 1. Worker sends an Attempt.
+    %% 2. RetryPolicy classifies response/error.
+    %% 3. Success and terminal failures end the Delivery.
+    %% 4. Retryable failures compute delay and re-enter claimable work later.
+    %% 5. MaxAge and attempt exhaustion force terminal dead.
+
+    A["Worker sends Attempt"] --> B{"RetryPolicy.NextWithKey"}
+
+    B -->|"2xx"| S["MarkSucceededBatch; status = succeeded"]
+    B -->|"4xx except 408 / 429"| D["MarkDeadBatch; reason = terminal_4xx"]
+    B -->|"MaxAge exceeded"| D2["MarkDeadBatch; reason = age_exceeded"]
+    B -->|"attempts exhausted"| D3["MarkDeadBatch; reason = exhausted"]
+    B -->|"408 / 429 / 5xx / network"| R["decorrelated jitter; or Retry-After"]
+
+    R --> M["MarkRetryBatch; status = failed_retry; next_attempt_at = now + delay"]
+    M --> Q["DB-backed discovery; re-adds Customer when due"]
+    Q --> A
+
+    S --> H[("delivery_history; after retention")]
+    D --> DL[("dead_letters")]
+    D2 --> DL
+    D3 --> DL
+
+    classDef attempt fill:#e8f1ff,stroke:#4d6fb3,color:#10233f;
+    classDef retry fill:#fff7e6,stroke:#c48225,color:#4a2c00;
+    classDef done fill:#ecfdf3,stroke:#3b8f5f,color:#123524;
+    classDef dead fill:#fff0f0,stroke:#c45050,color:#4c1111;
+    class A,B attempt;
+    class R,M,Q retry;
+    class S,H done;
+    class D,D2,D3,DL dead;
