@@ -27,3 +27,6 @@ coverage.*
 /bench
 /delivery-history-retention
 /webhook-receiver
+
+# Drafts
+EMAIL_DRAFT.md
