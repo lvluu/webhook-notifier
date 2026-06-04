@@ -26,27 +26,27 @@ func (s sqlClaimSelection) Ready() string {
           AND %s.delivery_id IS NULL`, s.deliveryAlias, s.deliveryAlias, s.claimAlias)
 }
 
-func (s sqlClaimSelection) Stale() string {
-	return fmt.Sprintf(`%s.claimed_at < now() - ($2 * interval '1 millisecond')`, s.claimAlias)
+func (s sqlClaimSelection) Stale(claimLeaseMS int64) string {
+	return fmt.Sprintf(`%s.claimed_at < now() - (%d * interval '1 millisecond')`, s.claimAlias, claimLeaseMS)
 }
 
-func (s sqlClaimSelection) Any() string {
+func (s sqlClaimSelection) Any(claimLeaseMS int64) string {
 	return fmt.Sprintf(`(
       (%s)
       OR (%s)
-  )`, s.Ready(), s.Stale())
+  )`, s.Ready(), s.Stale(claimLeaseMS))
 }
 
 func (s sqlClaimSelection) BreakerEligible() string {
 	return sqlBreakerEligiblePredicate(s.webhookAlias, s.deliveryAlias)
 }
 
-func sqlClaimablePredicate(deliveryAlias, claimAlias string) string {
+func sqlClaimablePredicate(deliveryAlias, claimAlias string, claimLeaseMS int64) string {
 	return fmt.Sprintf(`(
       (%s.status IN ('pending', 'failed_retry') AND %s.next_attempt_at <= now()
        AND NOT EXISTS (SELECT 1 FROM delivery_claims %s WHERE %s.delivery_id = %s.id))
-      OR EXISTS (SELECT 1 FROM delivery_claims %s WHERE %s.delivery_id = %s.id AND %s.claimed_at < now() - ($2 * interval '1 millisecond'))
-  )`, deliveryAlias, deliveryAlias, claimAlias, claimAlias, deliveryAlias, claimAlias, claimAlias, deliveryAlias, claimAlias)
+      OR EXISTS (SELECT 1 FROM delivery_claims %s WHERE %s.delivery_id = %s.id AND %s.claimed_at < now() - (%d * interval '1 millisecond'))
+  )`, deliveryAlias, deliveryAlias, claimAlias, claimAlias, deliveryAlias, claimAlias, claimAlias, deliveryAlias, claimAlias, claimLeaseMS)
 }
 
 func sqlBreakerEligiblePredicate(webhookAlias, deliveryAlias string) string {

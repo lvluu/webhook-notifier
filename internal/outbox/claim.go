@@ -108,7 +108,7 @@ func (s *Store) claimNextBatchWithoutBreaker(ctx context.Context, customerIDs []
 			        claimed_at = now()
 			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
 			RETURNING delivery_id, attempt_number, claimed_at
-		)%s`, claimSelection.Ready(), claimSelection.Stale(), sqlClaimedDeliveryProjection), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
+		)%s`, claimSelection.Ready(), claimSelection.Stale(s.claimLease.Milliseconds()), sqlClaimedDeliveryProjection), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
 	if err != nil {
 		return nil, fmt.Errorf("cte claim batch: %w", err)
 	}
@@ -207,7 +207,7 @@ func (s *Store) claimNextBatchWithBreaker(ctx context.Context, customerIDs []str
 			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
 			RETURNING delivery_id, attempt_number, claimed_at
 		)
-		%s`, claimSelection.Ready(), breakerEligible, claimSelection.Stale(), breakerEligible, sqlClaimedDeliveryProjection), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
+		%s`, claimSelection.Ready(), breakerEligible, claimSelection.Stale(s.claimLease.Milliseconds()), breakerEligible, sqlClaimedDeliveryProjection), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
 	if err != nil {
 		return nil, fmt.Errorf("cte claim batch with breaker: %w", err)
 	}
@@ -315,7 +315,7 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
 			RETURNING delivery_id, attempt_number, claimed_at
 		)
-		%s`, claimSelection.Ready(), breakerEligible, claimSelection.Stale(), breakerEligible, sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
+		%s`, claimSelection.Ready(), breakerEligible, claimSelection.Stale(s.claimLease.Milliseconds()), breakerEligible, sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("cte claim: %w", err)
 	}
@@ -341,7 +341,7 @@ func (s *Store) claimNextNLegacy(ctx context.Context, customerID string, limit i
 
 	claimStarted := time.Now()
 
-	claimable := sqlClaimablePredicate("d", "dc")
+	claimable := sqlClaimablePredicate("d", "dc", s.claimLease.Milliseconds())
 	breakerEligible := sqlBreakerEligiblePredicate("w", "d")
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		WITH candidate AS (
@@ -437,7 +437,7 @@ func (s *Store) claimNextNWithoutBreaker(ctx context.Context, customerID string,
 			        claimed_at = now()
 			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
 			RETURNING delivery_id, attempt_number, claimed_at
-		)%s`, claimSelection.Ready(), claimSelection.Stale(), sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
+		)%s`, claimSelection.Ready(), claimSelection.Stale(s.claimLease.Milliseconds()), sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim without breaker: %w", err)
 	}
@@ -518,8 +518,8 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 		SELECT customer_id
 		FROM claimable_customers
 		ORDER BY customer_id
-		LIMIT $3
-	`, claimSelection.Ready(), breakerEligible, claimSelection.Stale(), breakerEligible), afterCustomerID, s.claimLease.Milliseconds(), limit)
+		LIMIT $2
+	`, claimSelection.Ready(), breakerEligible, claimSelection.Stale(s.claimLease.Milliseconds()), breakerEligible), afterCustomerID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("discover claimable customers: %w", err)
 	}
@@ -564,7 +564,7 @@ func (s *Store) claimNextNLegacyWithoutBreaker(ctx context.Context, customerID s
 			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
 			RETURNING delivery_id, attempt_number, claimed_at
 		)
-		%s`, sqlClaimablePredicate("d", "dc"), sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
+		%s`, sqlClaimablePredicate("d", "dc", s.claimLease.Milliseconds()), sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("legacy claim without breaker: %w", err)
 	}
@@ -593,8 +593,8 @@ func (s *Store) discoverClaimableCustomersLegacy(ctx context.Context, afterCusto
 		  AND %s
 		  AND %s
 		ORDER BY d.customer_id
-		LIMIT $3
-	`, sqlClaimablePredicate("d", "dc"), breakerEligible), afterCustomerID, s.claimLease.Milliseconds(), limit)
+		LIMIT $2
+	`, sqlClaimablePredicate("d", "dc", s.claimLease.Milliseconds()), breakerEligible), afterCustomerID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("discover claimable customers legacy: %w", err)
 	}
@@ -663,7 +663,7 @@ func (s *Store) hasClaimableWorkBatchWithoutBreaker(ctx context.Context, custome
 			  AND %s
 		)
 		SELECT customer_id FROM claimable
-	`, claimSelection.Ready(), claimSelection.Stale()), customerIDs, s.claimLease.Milliseconds())
+	`, claimSelection.Ready(), claimSelection.Stale(s.claimLease.Milliseconds())), customerIDs)
 	if err != nil {
 		return nil, fmt.Errorf("has claimable work batch: %w", err)
 	}
@@ -694,7 +694,7 @@ func (s *Store) hasClaimableWorkBatchWithBreaker(ctx context.Context, customerID
 			  AND %s
 		)
 		SELECT customer_id FROM claimable
-	`, claimSelection.Ready(), breakerEligible, claimSelection.Stale(), breakerEligible), customerIDs, s.claimLease.Milliseconds())
+	`, claimSelection.Ready(), breakerEligible, claimSelection.Stale(s.claimLease.Milliseconds()), breakerEligible), customerIDs)
 	if err != nil {
 		return nil, fmt.Errorf("has claimable work batch with breaker: %w", err)
 	}
@@ -730,7 +730,7 @@ func (s *Store) hasClaimableWorkSplit(ctx context.Context, customerID string) (b
 				WHERE d.customer_id = $1
 				  AND %s
 			)
-		`, claimSelection.Any()), customerID, s.claimLease.Milliseconds()).Scan(&exists)
+		`, claimSelection.Any(s.claimLease.Milliseconds())), customerID).Scan(&exists)
 		return exists, err
 	}
 
@@ -746,13 +746,13 @@ func (s *Store) hasClaimableWorkSplit(ctx context.Context, customerID string) (b
 			  AND %s
 			  AND %s
 		)
-	`, claimSelection.Any(), breakerEligible), customerID, s.claimLease.Milliseconds()).Scan(&exists)
+	`, claimSelection.Any(s.claimLease.Milliseconds()), breakerEligible), customerID).Scan(&exists)
 	return exists, err
 }
 
 func (s *Store) hasClaimableWorkLegacy(ctx context.Context, customerID string) (bool, error) {
 	var exists bool
-	claimable := sqlClaimablePredicate("d", "dc")
+	claimable := sqlClaimablePredicate("d", "dc", s.claimLease.Milliseconds())
 	if s.breakerConfig.FailureThreshold == 0 {
 		err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 			SELECT EXISTS (
@@ -761,7 +761,7 @@ func (s *Store) hasClaimableWorkLegacy(ctx context.Context, customerID string) (
 				WHERE d.customer_id = $1
 				  AND %s
 			)
-		`, claimable), customerID, s.claimLease.Milliseconds()).Scan(&exists)
+		`, claimable), customerID).Scan(&exists)
 		return exists, err
 	}
 
@@ -779,6 +779,6 @@ func (s *Store) hasClaimableWorkLegacy(ctx context.Context, customerID string) (
 			        AND %s
 			  )
 		)
-	`, claimable, breakerEligible), customerID, s.claimLease.Milliseconds()).Scan(&exists)
+	`, claimable, breakerEligible), customerID).Scan(&exists)
 	return exists, err
 }
