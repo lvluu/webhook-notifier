@@ -184,8 +184,9 @@ flowchart LR
       - POST with a shared tuned HTTP client and per-Attempt request timeout.
       - Drain and close the response body so the transport can reuse the connection.
       - `RetryPolicy.Next()` decides outcome.
-  5. Batch-mark all outcomes by kind in one SQL round-trip per outcome (`MarkSucceededBatch`, `MarkRetryBatch`, `MarkDeadBatch`) using `UNNEST` arrays + CTE transactions that delete `delivery_claims` rows and update `deliveries` atomically, including breaker state recording via set-based SQL (no per-item loops).
-  6. Return to step 1.
+  5. Batch-mark all outcomes by kind in one SQL round-trip per outcome (`MarkSucceededBatch`, `MarkRetryBatch`, `MarkDeadBatch`) using `UNNEST` arrays + CTE transactions that delete `delivery_claims` rows and update `deliveries` atomically (no per-item loops). These mark transactions do **not** touch the Webhook breaker row; breaker bookkeeping is deferred off the mark path (ADR-0015).
+  6. Enqueue breaker outcomes to a single per-process `BreakerCoalescer`, which batches them across all workers and applies breaker state (counter increment / reset, open / close) via set-based SQL out of band — collapsing breaker write concurrency from (workers × replicas) to (replicas) and removing hot-Webhook-row contention. A transient mark abort (statement timeout `57014`, deadlock `40P01`) is non-fatal: the Worker backs off (ADR-0014), the Delivery stays claimed, and it is re-claimed and re-marked after lease expiry (at-least-once).
+  7. Return to step 1.
 - **SubscriptionRegistry** — Read-only `customer_id → []Webhook`. In-memory LRU with short TTL; cache miss falls back to PG. Avoids hot lookup on every Delivery.
 - **DLQ** (`dead_letters` table) — Terminal Deliveries with reason (`exhausted`, `terminal_4xx`, `terminal_network`). Written at MarkDead time alongside the `deliveries.status = 'dead'` update.
   Terminal `deliveries` rows stay in the live queue for a configurable operational retention window (initially 24 hours), after which the archive process copies them into a time-partitioned `delivery_history` table and removes them from `deliveries` so claim indexes do not accumulate unbounded terminal rows (ADR-0010).

@@ -85,6 +85,46 @@ contended path.
 - Transient DB errors during a coalescer flush are logged and the batch dropped
   (self-correcting), consistent with the breaker's best-effort nature.
 
+### Measured result
+
+Live under the chaos profile (3 replicas, whale partner outage, ~6 min window),
+Postgres `deadlock detected` counts:
+
+| Configuration | Deadlocks | Window |
+|---|---|---|
+| Inline breaker on the mark tx (before any fix) | ~340 | 6 min |
+| Mark-path lock ordering, `FOR UPDATE` | 914 | 4 min |
+| Mark-path lock ordering, `FOR NO KEY UPDATE` | 651 | 4 min |
+| **Off-mark coalescer (this ADR)** | **34** | 6.5 min |
+
+Statement timeouts (57014) stayed at 0 (ADR-0014 counter), and all replicas
+stayed healthy throughout.
+
+### Residual deadlocks are on the mark path, not the breaker
+
+The remaining ~34 deadlocks no longer involve `webhooks` at all. They are
+concurrent batch-mark transactions colliding on `deliveries` / `delivery_claims`
+rows (the `FOR UPDATE OF d` lock plus the `DELETE FROM delivery_claims` and the
+`delivery_attempts` foreign-key locks). They are **safe and self-healing**:
+
+- A mark transaction is atomic, so a 40P01 abort leaves no half-state — the
+  Delivery is not updated, its claim is not deleted, no Attempt row is written.
+- The worker run loop classifies 40P01 as transient (ADR-0014), logs, backs off,
+  and continues rather than failing fatally. (This is why observed
+  `webhook_worker_transient_db_errors_total` tracks the deadlock count.)
+- Because the mark rolled back, the Delivery stays claimed; its claim lease
+  expires and it is re-claimed via `FOR UPDATE SKIP LOCKED` and re-marked. The
+  mark is retried, never lost, and `delivery_claims` + `SKIP LOCKED` keep
+  processing correct.
+- Caveat (pre-existing at-least-once): the HTTP attempt was sent before marking,
+  so a deadlock-forced re-process re-sends the POST — the partner may receive a
+  duplicate. This is the same at-least-once property the lease model always had;
+  the deadlock only triggers one extra delivery cycle.
+
+Driving these mark-path collisions down further (ordering the
+`delivery_claims`/`delivery_attempts` locks) is possible but out of scope: at
+34 / 6.5 min they are rare and safely retried.
+
 ## Considered options
 
 - **Lock ordering on the mark path** (`FOR UPDATE`, then `FOR NO KEY UPDATE`).
