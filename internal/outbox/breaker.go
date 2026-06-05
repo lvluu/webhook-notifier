@@ -117,6 +117,7 @@ func (s *Store) recordBreakerFailure(ctx context.Context, tx *sql.Tx, webhookID 
 		UPDATE webhooks
 		SET breaker_failure_count = breaker_failure_count + 1
 		WHERE id = $1::uuid
+		ORDER BY id
 		RETURNING breaker_state, breaker_failure_count, breaker_cooldown_ms
 	`, webhookID).Scan(&state, &failureCount, &cooldownMillis)
 	if err != nil {
@@ -235,6 +236,13 @@ func batchIncrementBreakerFailureCount(ctx context.Context, tx *sql.Tx, webhookC
 	rows, err := tx.QueryContext(ctx, `
 		WITH input AS (
 			SELECT * FROM unnest($1::text[], $2::int[]) AS t(webhook_id, increment)
+		),
+		locked AS (
+			SELECT w.id FROM webhooks w
+			JOIN input ON w.id = input.webhook_id::uuid
+			WHERE w.breaker_state = 'closed'
+			ORDER BY w.id
+			FOR UPDATE OF w
 		)
 		UPDATE webhooks w
 		SET breaker_failure_count = w.breaker_failure_count + input.increment
@@ -274,6 +282,7 @@ func batchOpenHalfOpenBreakers(ctx context.Context, tx *sql.Tx, webhookIDs []str
 		    breaker_probe_delivery_id = NULL
 		WHERE id = ANY($1::uuid[])
 		  AND breaker_state = 'half_open'
+		ORDER BY id
 		RETURNING id::text
 	`, webhookIDs, maxCooldownMs)
 	if err != nil {
@@ -312,6 +321,13 @@ func batchOpenClosedBreakers(ctx context.Context, tx *sql.Tx, failureCounts map[
 	rows, err := tx.QueryContext(ctx, `
 		WITH input AS (
 			SELECT * FROM unnest($1::text[], $2::int[]) AS t(webhook_id, failure_count)
+		),
+		locked AS (
+			SELECT w.id FROM webhooks w
+			JOIN input ON w.id = input.webhook_id::uuid
+			WHERE w.breaker_state = 'closed'
+			ORDER BY w.id
+			FOR UPDATE OF w
 		)
 		UPDATE webhooks w
 		SET breaker_state = 'open',
@@ -393,6 +409,7 @@ func (s *Store) batchRecordBreakerSuccess(ctx context.Context, tx *sql.Tx, deliv
 		      breaker_state <> 'closed'
 		      OR breaker_failure_count > 0
 		  )
+		ORDER BY id
 		RETURNING id::text
 	`, uniqueWIDs, s.breakerConfig.InitialCooldown.Milliseconds(), deliveryIDs)
 	if err != nil {
