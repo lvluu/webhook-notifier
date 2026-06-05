@@ -57,6 +57,14 @@ type DeliveryStore interface {
 	MarkDeadBatch(ctx context.Context, items []outbox.BatchMarkItem) error
 }
 
+// BreakerOutcomeSink receives breaker-relevant delivery outcomes after a batch
+// mark commits, for out-of-band application by a per-process coalescer. A nil
+// sink means the worker does not defer breaker bookkeeping (the store applies it
+// inline).
+type BreakerOutcomeSink interface {
+	Enqueue(outcomes []outbox.BreakerOutcome)
+}
+
 // Worker sends webhook Deliveries and records retry outcomes.
 type Worker struct {
 	HTTP        *http.Client
@@ -64,6 +72,7 @@ type Worker struct {
 	Scheduler   scheduler.Scheduler
 	HostLimiter *HostLimiter
 	Logger      *slog.Logger
+	BreakerSink BreakerOutcomeSink
 	Config      Config
 }
 
@@ -173,6 +182,13 @@ func WithHostLimiter(hl *HostLimiter) Option {
 // WithLogger sets the base structured logger used by the Worker.
 func WithLogger(logger *slog.Logger) Option {
 	return func(w *Worker) { w.Logger = logger }
+}
+
+// WithBreakerSink sets the sink that receives breaker outcomes after batch
+// marks commit. Set in tandem with outbox.WithDeferredBreaker so breaker state
+// is applied by a per-process coalescer rather than inline on every mark.
+func WithBreakerSink(sink BreakerOutcomeSink) Option {
+	return func(w *Worker) { w.BreakerSink = sink }
 }
 
 // WithMinBatchHint sets the minimum batch size used during ClaimNextN.

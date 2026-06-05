@@ -237,6 +237,12 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 
 	var succeeded, retries, dead []outbox.BatchMarkItem
 	var requeued []string
+	// Breaker outcomes are collected here and enqueued to the per-process
+	// coalescer only after all marks commit, so the hot webhook breaker rows are
+	// not updated inside these high-concurrency mark transactions (ADR-0015).
+	// Nil sink (e.g. tests, breaker disabled) means the store applies breaker
+	// state inline as before.
+	var breakerOutcomes []outbox.BreakerOutcome
 
 	for _, r := range results {
 		delivery, outcome := r.delivery, r.outcome
@@ -265,6 +271,13 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 				Lifetime:      outcome.lifetime,
 				AttemptNumber: delivery.AttemptNumber,
 			})
+			if w.BreakerSink != nil {
+				breakerOutcomes = append(breakerOutcomes, outbox.BreakerOutcome{
+					WebhookID:  delivery.WebhookID,
+					DeliveryID: delivery.ID,
+					Success:    true,
+				})
+			}
 			log.Debug("delivery succeeded",
 				"status_code", outcome.statusCode,
 				"duration_ms", outcome.duration.Milliseconds(),
@@ -279,6 +292,13 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 				Lifetime:      outcome.lifetime,
 				AttemptNumber: delivery.AttemptNumber,
 			})
+			if w.BreakerSink != nil {
+				breakerOutcomes = append(breakerOutcomes, outbox.BreakerOutcome{
+					WebhookID:  delivery.WebhookID,
+					DeliveryID: delivery.ID,
+					Reason:     outcome.reason,
+				})
+			}
 			log.Warn("delivery dead",
 				"reason", outcome.reason,
 				"status_code", outcome.statusCode,
@@ -293,6 +313,13 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 				Delay:         outcome.delay,
 				AttemptNumber: delivery.AttemptNumber,
 			})
+			if w.BreakerSink != nil {
+				breakerOutcomes = append(breakerOutcomes, outbox.BreakerOutcome{
+					WebhookID:  delivery.WebhookID,
+					DeliveryID: delivery.ID,
+					Reason:     outcome.errorClass,
+				})
+			}
 			log.Warn("delivery scheduled for retry",
 				"reason", outcome.errorClass,
 				"retry_delay_ms", outcome.delay.Milliseconds(),
@@ -341,6 +368,13 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 			customerClass := observe.CustomerClassFromValue(classByID[item.DeliveryID])
 			recordDeadMetrics(customerClass, item.Lifetime.Seconds(), item.AttemptNumber, item.Reason)
 		}
+	}
+
+	// All marks committed: hand breaker outcomes to the coalescer for out-of-band
+	// application. Done last so a failed mark (early return above) never records
+	// a breaker outcome for work that was not persisted.
+	if w.BreakerSink != nil && len(breakerOutcomes) > 0 {
+		w.BreakerSink.Enqueue(breakerOutcomes)
 	}
 
 	return nil

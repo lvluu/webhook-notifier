@@ -101,7 +101,7 @@ func (s *Store) MarkSucceededBatch(ctx context.Context, items []BatchMarkItem) e
 	if marked != len(items) {
 		return fmt.Errorf("batch mark succeeded: marked %d of %d deliveries", marked, len(items))
 	}
-	if s.breakerConfig.FailureThreshold == 0 {
+	if s.breakerConfig.FailureThreshold == 0 || s.deferBreaker {
 		return s.commitBatchTx(tx, "success")
 	}
 	closedBreakers, err := s.batchRecordBreakerSuccess(ctx, tx, base.ids)
@@ -180,7 +180,7 @@ func (s *Store) MarkRetryBatch(ctx context.Context, items []BatchMarkItem) error
 	if marked != len(items) {
 		return fmt.Errorf("batch mark retry: marked %d of %d deliveries", marked, len(items))
 	}
-	if s.breakerConfig.FailureThreshold == 0 {
+	if s.breakerConfig.FailureThreshold == 0 || s.deferBreaker {
 		return s.commitBatchTx(tx, "retry")
 	}
 	trippedBreakers, err := s.batchRecordBreakerFailure(ctx, tx, retryBatch.ids, items, func(item BatchMarkItem) string { return item.ErrorClass })
@@ -265,7 +265,7 @@ func (s *Store) MarkDeadBatch(ctx context.Context, items []BatchMarkItem) error 
 	if attemptsMarked != len(items) || deadLettersMarked != len(items) {
 		return fmt.Errorf("batch mark dead: marked %d attempts and %d dead letters of %d deliveries", attemptsMarked, deadLettersMarked, len(items))
 	}
-	if s.breakerConfig.FailureThreshold == 0 {
+	if s.breakerConfig.FailureThreshold == 0 || s.deferBreaker {
 		return s.commitBatchTx(tx, "dead")
 	}
 	trippedBreakers, err := s.batchRecordBreakerFailure(ctx, tx, deadBatch.ids, items, func(item BatchMarkItem) string { return item.Reason })
