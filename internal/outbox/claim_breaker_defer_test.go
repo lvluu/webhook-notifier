@@ -86,7 +86,7 @@ func TestDeferBlocked_SingleMarkRetryPath(t *testing.T) {
 	assertWebhookBreaker(t, ctx, db, firstID, "open", 2)
 
 	// The untouched backlog delivery must be deferred ~1h out, not ready.
-	if got := nextAttemptAt(t, ctx, db, backlogID); !got.After(time.Now().Add(50*time.Minute)) {
+	if got := nextAttemptAt(t, ctx, db, backlogID); !got.After(time.Now().Add(50 * time.Minute)) {
 		t.Errorf("backlog next_attempt_at: got %s, want deferred ~1h out", got)
 	}
 	if ready := readyCount(t, ctx, db, customerID); ready != 0 {
@@ -120,7 +120,7 @@ func TestDeferBlocked_OnlyAffectsOpenedWebhook(t *testing.T) {
 	assertWebhookBreaker(t, ctx, db, blockedA, "open", 1)
 
 	// blockedB deferred; healthy still ready.
-	if got := nextAttemptAt(t, ctx, db, blockedB); !got.After(time.Now().Add(50*time.Minute)) {
+	if got := nextAttemptAt(t, ctx, db, blockedB); !got.After(time.Now().Add(50 * time.Minute)) {
 		t.Errorf("blockedB next_attempt_at: got %s, want deferred", got)
 	}
 	if got := nextAttemptAt(t, ctx, db, healthy); got.After(time.Now().Add(time.Minute)) {
