@@ -22,42 +22,32 @@ import (
 )
 
 func main() {
-	db := flag.String("db", "", "DATABASE_URL")
-	addr := flag.String("addr", ":8080", "business HTTP server address")
-	metricsAddr := flag.String("metrics-addr", ":9090", "metrics HTTP server address")
-	workerCount := flag.Int("workers", 64, "number of delivery workers")
-	replicaID := flag.String("replica-id", "", "optional replica identity for diagnostics header")
-	minBatch := flag.Int("min-batch", 32, "minimum claim batch size per customer")
-	claimBatchHint := flag.Int("claim-batch-hint", 64, "maximum per-pick claim batch size; lower favours fairness, higher favours throughput. 0 = unbounded")
-	multiPick := flag.Int("multi-pick", 1, "customers to batch per claim query (1 = single-customer ClaimNextN, >1 = ClaimNextBatch)")
-	hostCap := flag.Int("host-cap", 20, "maximum concurrent in-flight requests per Integration Partner hostname")
-	requestTimeout := flag.Duration("request-timeout", 30*time.Second, "per-Attempt HTTP request timeout; a stalled partner holds a delivery slot for this long")
-	deliveryConcurrency := flag.Int("delivery-concurrency", 16, "maximum concurrent in-flight delivery attempts per worker")
-	discoveryInterval := flag.Duration("discovery-interval", time.Second, "claimable customer discovery interval")
-	emptyClaimBackoff := flag.Duration("empty-claim-backoff", 20*time.Millisecond, "pause after an empty claim cycle")
-	backlogSampleInterval := flag.Duration("pending-sample-interval", 5*time.Second, "sample interval for pending-delivery backlog gauge (0 disables)")
-	enablePgNotifyWakeups := flag.Bool("enable-pg-notify-wakeups", true, "use LISTEN/NOTIFY wakeups in addition to polling")
-	pgNotifyDSN := flag.String("pg-notify-db", "", "optional direct DATABASE_URL for LISTEN/NOTIFY connections")
-	pgNotifyChannel := flag.String("pg-notify-channel", "webhook_customer_ready", "LISTEN/NOTIFY channel for customer wakeups")
-	maxConns := flag.Int("max-conns", 0, "max DB connections (0 = workerCount + 10)")
-	flag.Parse()
+	cliCfg, err := parseCLIConfig(flag.CommandLine, os.Args[1:])
+	if err != nil {
+		// flag.CommandLine uses ExitOnError, so Parse already exited; this
+		// guards future error-handling modes.
+		os.Exit(2)
+	}
+	runtimeCfg := cliCfg.Runtime
 
 	logger := observe.NewLogger(os.Stderr)
 	logger = logger.With("service", "webhook-notifier")
 	logger.Info("starting webhook-notifier",
-		"addr", *addr,
-		"metrics_addr", *metricsAddr,
-		"workers", *workerCount,
-		"min_batch", *minBatch,
-		"host_cap", *hostCap,
-		"discovery_interval", *discoveryInterval,
-		"empty_claim_backoff", *emptyClaimBackoff,
-		"pending_sample_interval", *backlogSampleInterval,
-		"pg_notify_wakeups", *enablePgNotifyWakeups,
-		"pg_notify_channel", *pgNotifyChannel,
+		"addr", cliCfg.Addr,
+		"metrics_addr", cliCfg.MetricsAddr,
+		"workers", runtimeCfg.WorkerCount,
+		"min_batch", runtimeCfg.Worker.MinBatchHint,
+		"host_cap", runtimeCfg.HostConcurrencyCap,
+		"request_timeout", runtimeCfg.Worker.RequestTimeout,
+		"delivery_concurrency", runtimeCfg.Worker.DeliveryConcurrency,
+		"discovery_interval", runtimeCfg.Discovery.Interval,
+		"empty_claim_backoff", runtimeCfg.Worker.EmptyClaimBackoff,
+		"pending_sample_interval", runtimeCfg.BacklogSampleInterval,
+		"pg_notify_wakeups", runtimeCfg.EnablePgNotifyWakeups,
+		"pg_notify_channel", runtimeCfg.PgNotifyChannel,
 	)
 
-	dsn := *db
+	dsn := cliCfg.DBDSN
 	if dsn == "" {
 		// #nosec G101 -- local Docker Compose default only; production supplies DATABASE_URL.
 		dsn = os.Getenv("DATABASE_URL")
@@ -72,52 +62,38 @@ func main() {
 		os.Exit(1)
 	}
 	dbConn := stdlib.OpenDB(*connConfig)
-	if *maxConns > 0 {
-		dbConn.SetMaxOpenConns(*maxConns)
-		dbConn.SetMaxIdleConns(*maxConns)
+	if cliCfg.MaxConns > 0 {
+		dbConn.SetMaxOpenConns(cliCfg.MaxConns)
+		dbConn.SetMaxIdleConns(cliCfg.MaxConns)
 	} else {
-		dbConn.SetMaxOpenConns(*workerCount + 10)
-		dbConn.SetMaxIdleConns(*workerCount + 5)
+		dbConn.SetMaxOpenConns(runtimeCfg.WorkerCount + 10)
+		dbConn.SetMaxIdleConns(runtimeCfg.WorkerCount + 5)
 	}
 	dbConn.SetConnMaxLifetime(30 * time.Minute)
 
 	promRegistry := prometheus.NewRegistry()
 	observe.RegisterMetrics(promRegistry)
 	observe.RegisterPoolGauges(promRegistry, dbConn)
-	observe.SetConfiguredWorkers(*workerCount)
+	observe.SetConfiguredWorkers(runtimeCfg.WorkerCount)
 
 	infra := observe.NewInfraServer(observe.InfraServerConfig{
-		Addr:      *metricsAddr,
+		Addr:      cliCfg.MetricsAddr,
 		DB:        dbConn,
 		Pprof:     false,
 		Collector: promRegistry,
 	})
 	infraErrCh := infra.Start()
-	logger.Info("infra server started", "addr", *metricsAddr)
+	logger.Info("infra server started", "addr", cliCfg.MetricsAddr)
 
 	runCtx, cancel := context.WithCancel(context.Background())
 
-	if *replicaID != "" {
-		if err := os.Setenv("NOTIFIER_REPLICA_ID", *replicaID); err != nil {
+	if cliCfg.ReplicaID != "" {
+		if err := os.Setenv("NOTIFIER_REPLICA_ID", cliCfg.ReplicaID); err != nil {
 			logger.Error("failed to set notifier replica id env", "error", err)
 			os.Exit(1)
 		}
 	}
 
-	runtimeCfg := loadWorkerRuntimeConfig()
-	runtimeCfg.WorkerCount = *workerCount
-	runtimeCfg.Worker.MinBatchHint = *minBatch
-	runtimeCfg.Worker.MaxBatchHint = *claimBatchHint
-	runtimeCfg.Worker.MultiPickCount = *multiPick
-	runtimeCfg.HostConcurrencyCap = *hostCap
-	runtimeCfg.Worker.EmptyClaimBackoff = *emptyClaimBackoff
-	runtimeCfg.Worker.RequestTimeout = *requestTimeout
-	runtimeCfg.Worker.DeliveryConcurrency = *deliveryConcurrency
-	runtimeCfg.BacklogSampleInterval = *backlogSampleInterval
-	runtimeCfg.EnablePgNotifyWakeups = *enablePgNotifyWakeups
-	runtimeCfg.PgNotifyDSN = *pgNotifyDSN
-	runtimeCfg.PgNotifyChannel = *pgNotifyChannel
-	runtimeCfg.Discovery.Interval = *discoveryInterval
 	observe.StartPendingDeliveriesSampler(runCtx, dbConn, runtimeCfg.BacklogSampleInterval, logger.With("component", "pending-backlog"))
 
 	// Ingest only needs a notifier handle; this object also broadcasts
@@ -131,7 +107,7 @@ func main() {
 
 	ingestStore := ingest.New(dbConn, registry.New(dbConn), deliveryRuntime.notifier)
 	business := &http.Server{
-		Addr:              *addr,
+		Addr:              cliCfg.Addr,
 		Handler:           newBusinessHandler(logger.With("component", "business-http"), ingestStore, dbConn),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
@@ -142,7 +118,7 @@ func main() {
 		}
 		close(businessErrCh)
 	}()
-	logger.Info("business server started", "addr", *addr)
+	logger.Info("business server started", "addr", cliCfg.Addr)
 
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
