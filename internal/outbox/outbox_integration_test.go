@@ -433,7 +433,16 @@ func TestClaimNextRecoversStaleInFlightDelivery(t *testing.T) {
 	}
 }
 
-func TestDiscoverClaimableCustomersMatchesClaimEligibility(t *testing.T) {
+// TestDiscoverClaimableCustomersSurfacesReadyCustomers pins the claim-agnostic
+// discovery contract (issue #124): discovery is a rotation hint that surfaces
+// every customer with a ready, breaker-eligible Delivery, *regardless of claim
+// state*. It deliberately includes customers whose ready Deliveries are already
+// claimed (fresh in-flight) - dropping the delivery_claims anti-join is what
+// keeps discovery cheap under a large in-flight backlog. ClaimNextN (FOR UPDATE
+// SKIP LOCKED) stays the authority on actual claimability, and the worker loop
+// removes customers that yield no claim. Only the schedule (next_attempt_at in
+// the future) excludes a customer here.
+func TestDiscoverClaimableCustomersSurfacesReadyCustomers(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)
 
@@ -481,7 +490,10 @@ func TestDiscoverClaimableCustomersMatchesClaimEligibility(t *testing.T) {
 		t.Fatalf("DiscoverClaimableCustomers: %v", err)
 	}
 
-	want := []string{"cus_pending", "cus_retry_due", "cus_stale_inflight"}
+	// cus_fresh_inflight is surfaced even though its only Delivery is freshly
+	// claimed: discovery is claim-agnostic. cus_retry_future is excluded only
+	// because its next_attempt_at is in the future (not ready).
+	want := []string{"cus_fresh_inflight", "cus_pending", "cus_retry_due", "cus_stale_inflight"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("claimable customers: got %v, want %v", got, want)
 	}
@@ -499,7 +511,7 @@ func TestDiscoverClaimableCustomersMatchesClaimEligibility(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DiscoverClaimableCustomers limited: %v", err)
 	}
-	wantLimited := []string{"cus_pending", "cus_retry_due"}
+	wantLimited := []string{"cus_fresh_inflight", "cus_pending"}
 	if !slices.Equal(limited, wantLimited) {
 		t.Fatalf("limited claimable customers: got %v, want %v", limited, wantLimited)
 	}

@@ -146,11 +146,9 @@ func explainDiscoveryScan(t *testing.T, ctx context.Context, db *sql.DB) string 
 				SELECT d.customer_id
 				FROM deliveries d
 				JOIN webhooks w ON w.id = d.webhook_id
-				LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
 				WHERE d.customer_id > ''
 				  AND d.status IN ('pending', 'failed_retry')
 				  AND d.next_attempt_at <= now()
-				  AND dc.delivery_id IS NULL
 				  AND (
 				      w.breaker_state = 'closed'
 				      OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = d.id)
@@ -165,11 +163,9 @@ func explainDiscoveryScan(t *testing.T, ctx context.Context, db *sql.DB) string 
 					SELECT d.customer_id
 					FROM deliveries d
 					JOIN webhooks w ON w.id = d.webhook_id
-					LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
 					WHERE d.customer_id > rc.customer_id
 					  AND d.status IN ('pending', 'failed_retry')
 					  AND d.next_attempt_at <= now()
-					  AND dc.delivery_id IS NULL
 					  AND (
 					      w.breaker_state = 'closed'
 					      OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = d.id)
@@ -182,26 +178,10 @@ func explainDiscoveryScan(t *testing.T, ctx context.Context, db *sql.DB) string 
 			FROM ready_customers rc
 			WHERE rc.customer_id IS NOT NULL
 			  AND rc.depth < 64
-		),
-		stale_customers AS (
-			SELECT DISTINCT d.customer_id
-			FROM delivery_claims dc
-			JOIN deliveries d ON d.id = dc.delivery_id
-			JOIN webhooks w ON w.id = d.webhook_id
-			WHERE d.customer_id > ''
-			  AND dc.claimed_at < now() - interval '30 seconds'
-			  AND (
-			      w.breaker_state = 'closed'
-			      OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = d.id)
-			      OR (w.breaker_state = 'open' AND w.breaker_next_probe_at <= now())
-			  )
 		)
 		SELECT customer_id
-		FROM (
-			SELECT customer_id FROM ready_customers WHERE customer_id IS NOT NULL
-			UNION
-			SELECT customer_id FROM stale_customers
-		) claimable_customers
+		FROM ready_customers
+		WHERE customer_id IS NOT NULL
 		ORDER BY customer_id
 		LIMIT 64
 	`)

@@ -415,30 +415,38 @@ func scanClaimedDeliveries(rows *sql.Rows) ([]Delivery, error) {
 }
 
 // DiscoverClaimableCustomers returns up to limit Customer IDs greater than
-// afterCustomerID that have at least one Delivery eligible for claim.
+// afterCustomerID that have at least one ready, breaker-eligible Delivery.
 //
-// Uses two branch-specific scans - one for ready rows without an active claim
-// and one for stale claims - so discovery stays index-friendly without a
-// recursive loose-index walk.
+// This is a claim-agnostic rotation hint, not an exact claimability check: it
+// ignores whether ready Deliveries already carry an active claim. ClaimNextN
+// (FOR UPDATE SKIP LOCKED) remains the authority on what is actually claimable;
+// the worker loop drops customers that yield no claim via HasClaimableWork. The
+// claim-agnostic predicate is what keeps discovery cheap under a large in-flight
+// backlog (issue #124): claimed Deliveries stay status='pending' and remain in
+// idx_deliveries_ready, so an anti-join against delivery_claims forced the
+// recursive LIMIT-1 scan to walk every claimed row (collapsing into a full hash
+// anti-join once unclaimed rows went sparse). Dropping the anti-join lets each
+// step stop at the first ready row per customer.
 func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID string, limit int) ([]string, error) {
 	if limit < 1 {
 		return nil, fmt.Errorf("limit must be >= 1")
 	}
 
 	claimSelection := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
+	ready := claimSelection.ReadyWithoutClaim()
 	breakerEligible := claimSelection.BreakerEligible()
-	// The ready branch is enumerated with a recursive loose index-scan (the
-	// PostgreSQL "loose indexscan" pattern) over idx_deliveries_ready so that
-	// finding the next distinct claimable customer costs ~one index probe per
-	// customer instead of scanning the whole ready backlog. A plain
-	// UNION/DISTINCT here has to materialise every ready delivery row before the
-	// outer LIMIT, so its cost grows with the backlog row count rather than the
-	// number of distinct customers returned (finding B-5). Each recursive step's
-	// LIMIT-1 subquery also naturally skips customers whose ready deliveries are
-	// all breaker-ineligible. The stale branch reclaims expired leases, which
-	// are rare and served by a small dedicated index, so it stays a normal
-	// distinct scan and is merged in at the end. depth is capped at the limit so
-	// the recursion stops once enough ready customers are found.
+	// Enumerate distinct claimable-hint customers with a recursive loose
+	// index-scan (the PostgreSQL "loose indexscan" pattern) over
+	// idx_deliveries_ready so that finding the next distinct customer costs
+	// ~one index probe per customer instead of scanning the whole ready
+	// backlog. A plain UNION/DISTINCT would materialise every ready delivery
+	// row before the outer LIMIT, so its cost grows with the backlog row count
+	// rather than the number of distinct customers returned (finding B-5). Each
+	// step's LIMIT-1 subquery also naturally skips customers whose ready
+	// deliveries are all breaker-ineligible. Stale-claim recovery needs no
+	// dedicated branch here: a stale-claimed Delivery is still status='pending'
+	// and so is already covered by the ready predicate. depth is capped at the
+	// limit so the recursion stops once enough customers are found.
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		WITH RECURSIVE ready_customers AS (
 			SELECT seed.customer_id, 1 AS depth
@@ -446,7 +454,6 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 				SELECT d.customer_id
 				FROM deliveries d
 				JOIN webhooks w ON w.id = d.webhook_id
-				LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
 				WHERE d.customer_id > $1
 				  AND %s
 				  AND %s
@@ -459,7 +466,6 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 					SELECT d.customer_id
 					FROM deliveries d
 					JOIN webhooks w ON w.id = d.webhook_id
-					LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
 					WHERE d.customer_id > rc.customer_id
 					  AND %s
 					  AND %s
@@ -470,25 +476,13 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 			FROM ready_customers rc
 			WHERE rc.customer_id IS NOT NULL
 			  AND rc.depth < $2
-		),
-		stale_customers AS (
-			SELECT DISTINCT d.customer_id
-			FROM delivery_claims dc
-			JOIN deliveries d ON d.id = dc.delivery_id
-			JOIN webhooks w ON w.id = d.webhook_id
-			WHERE d.customer_id > $1
-			  AND %s
-			  AND %s
 		)
 		SELECT customer_id
-		FROM (
-			SELECT customer_id FROM ready_customers WHERE customer_id IS NOT NULL
-			UNION
-			SELECT customer_id FROM stale_customers
-		) claimable_customers
+		FROM ready_customers
+		WHERE customer_id IS NOT NULL
 		ORDER BY customer_id
 		LIMIT $2
-	`, claimSelection.Ready(), breakerEligible, claimSelection.Ready(), breakerEligible, claimSelection.Stale(s.claimLease.Milliseconds()), breakerEligible), afterCustomerID, limit)
+	`, ready, breakerEligible, ready, breakerEligible), afterCustomerID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("discover claimable customers: %w", err)
 	}

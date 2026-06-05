@@ -1,5 +1,17 @@
 # DB-backed claimable Customer discovery for horizontal fairness
 
+## Amended by
+
+[ADR-0013](./0013-claim-agnostic-claimable-customer-discovery.md) supersedes the
+requirement below that discovery eligibility match claim eligibility exactly
+(the `delivery_claims` anti-join and the dedicated stale-claim branch). Under
+ADR-0011 a claimed Delivery keeps `status = 'pending'` and stays in the ready
+index, so that anti-join forced discovery to walk the entire in-flight backlog
+(issue #124). Discovery is now a claim-agnostic superset hint over ready,
+breaker-eligible Deliveries; `ClaimNextN` with `FOR UPDATE SKIP LOCKED` is the
+sole claim-eligibility authority. The DB-backed discovery-loop architecture and
+cursor/backoff semantics in this ADR are otherwise unchanged.
+
 ## Context
 
 The Scheduler is intentionally process-local. ADR-0001 commits to Smooth
