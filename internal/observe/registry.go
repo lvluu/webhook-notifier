@@ -31,6 +31,9 @@ var (
 	WebhookBreakerState                 *prometheus.GaugeVec
 	WebhookBreakerTripsTotal            *prometheus.CounterVec
 	WebhookPgNotifyBroadcastTotal       *prometheus.CounterVec
+	HostConcurrencyAcquiredTotal        *prometheus.CounterVec
+	HostConcurrencyRejectedTotal        *prometheus.CounterVec
+	HostConcurrencyInFlight             *prometheus.GaugeVec
 	metricsRegistrationWarned           atomic.Bool
 )
 
@@ -59,6 +62,9 @@ func ResetMetricsForTest() {
 	WebhookBreakerState = nil
 	WebhookBreakerTripsTotal = nil
 	WebhookPgNotifyBroadcastTotal = nil
+	HostConcurrencyAcquiredTotal = nil
+	HostConcurrencyRejectedTotal = nil
+	HostConcurrencyInFlight = nil
 	metricsRegistrationWarned.Store(false)
 }
 
@@ -196,6 +202,21 @@ func initMetrics(reg prometheus.Registerer) {
 		Help: "Total number of remote Customer wake hints handled by the pg_notify broadcaster.",
 	}, []string{"result"})
 
+	HostConcurrencyAcquiredTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "host_concurrency_acquired_total",
+		Help: "Total number of host concurrency slots acquired, by hostname.",
+	}, []string{"hostname"})
+
+	HostConcurrencyRejectedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "host_concurrency_rejected_total",
+		Help: "Total number of host concurrency acquisitions rejected at capacity, by hostname.",
+	}, []string{"hostname"})
+
+	HostConcurrencyInFlight = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "host_concurrency_in_flight",
+		Help: "Current number of in-flight host concurrency slots per hostname.",
+	}, []string{"hostname"})
+
 	reg.MustRegister(
 		WebhookDeliveriesTotal,
 		WebhookDeliveryLatencySeconds,
@@ -218,5 +239,8 @@ func initMetrics(reg prometheus.Registerer) {
 		WebhookBreakerState,
 		WebhookBreakerTripsTotal,
 		WebhookPgNotifyBroadcastTotal,
+		HostConcurrencyAcquiredTotal,
+		HostConcurrencyRejectedTotal,
+		HostConcurrencyInFlight,
 	)
 }

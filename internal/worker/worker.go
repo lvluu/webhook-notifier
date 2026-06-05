@@ -62,7 +62,7 @@ type Worker struct {
 	HTTP        *http.Client
 	RetryPolicy retry.RetryPolicy
 	Scheduler   scheduler.Scheduler
-	HostLimiter *HostLimiter
+	HostLimiter HostLimiter
 	Logger      *slog.Logger
 	Config      Config
 }
@@ -166,7 +166,7 @@ func WithRetryPolicy(rp retry.RetryPolicy) Option {
 }
 
 // WithHostLimiter sets the optional per-host concurrency limiter.
-func WithHostLimiter(hl *HostLimiter) Option {
+func WithHostLimiter(hl HostLimiter) Option {
 	return func(w *Worker) { w.HostLimiter = hl }
 }
 

@@ -189,7 +189,9 @@ flowchart LR
 - **SubscriptionRegistry** — Read-only `customer_id → []Webhook`. In-memory LRU with short TTL; cache miss falls back to PG. Avoids hot lookup on every Delivery.
 - **DLQ** (`dead_letters` table) — Terminal Deliveries with reason (`exhausted`, `terminal_4xx`, `terminal_network`). Written at MarkDead time alongside the `deliveries.status = 'dead'` update.
   Terminal `deliveries` rows stay in the live queue for a configurable operational retention window (initially 24 hours), after which the archive process copies them into a time-partitioned `delivery_history` table and removes them from `deliveries` so claim indexes do not accumulate unbounded terminal rows (ADR-0010).
-- **Process-local HostLimiter** — `map[host]*semaphore.Weighted`. Enforces a per-process limit per Integration Partner hostname, default 20. This is the PoC's partial enforcement of the Host Concurrency Cap; a horizontally scaled production deployment needs fleet-wide coordination to preserve the partner-protection invariant. Animation source: [host-limiter.mmd](animations/host-limiter.mmd).
+- **HostLimiter** — `HostLimiter` interface with two implementations. Workers call `TryAcquire` before every HTTP POST; if the host is at capacity the Delivery is requeued with a short `RequeueDelay` so the worker can serve another Customer. The Host Concurrency Cap is orthogonal to per-Customer fairness — it protects partners, not Customers.
+  - **Local (`LocalHostLimiter`)** — Default. In-memory `map[host]*semaphore.Weighted`. Enforces per-process limit per Integration Partner hostname. Single-replica deployment scale is bounded by the local cap; multi-replica deployments multiply the actual concurrent in-flight by replica count (N × cap), which is acceptable for development but not for production partner protection.
+  - **Distributed (`DistributedHostLimiter`)** — Fleet-wide lease store backed by the `host_concurrency_leases` Postgres table. All replicas coordinate through the same database to enforce exactly `--host-cap` concurrent in-flight Attempts per hostname regardless of replica count. Acquire inserts a lease row with an `expires_at` TTL; release deletes it. Expired leases self-recover from replica crashes without a sweeper process. Opt-in via `--host-limiter=distributed`. Same `HostLimiter` interface, drop-in swap.
 - **Webhook circuit breaker** — Persisted per-Webhook breaker state (`closed`, `open`, `half_open`) that keeps chronically failing Webhooks out of claim/discovery until a cooldown permits one probe. Complements RetryPolicy and the Host Concurrency Cap: RetryPolicy decides the outcome of an Attempt, HostLimiter limits local pressure on a hostname, and the breaker stops a broken Webhook from repeatedly occupying worker capacity across many Deliveries. Animation source: [breaker-lifecycle.mmd](animations/breaker-lifecycle.mmd).
 
 ## Data model
@@ -225,16 +227,17 @@ breaker_next_probe_at
 breaker_cooldown_ms
 breaker_probe_delivery_id
 
-customers                              delivery_history (partitioned)
-──────────                             ─────────────────────────────
-id (uuid)                              delivery_id + final_at (PK)
-class (int, default 1, check >= 0)     event_id, webhook_id, customer_id
-                                       event_type, url_host
-                                       final_status, terminal_reason
+customers                              delivery_history (partitioned)      host_concurrency_leases
+──────────                             ─────────────────────────────        ──────────────────────
+id (uuid)                              delivery_id + final_at (PK)          hostname (text)
+class (int, default 1, check >= 0)     event_id, webhook_id, customer_id    lease_id (uuid)
+                                       event_type, url_host                 acquired_at (timestamptz)
+                                       final_status, terminal_reason        expires_at (timestamptz)
                                        attempt_count, first/last_attempt_at
                                        last_status_code, last_error_class, last_error
                                        delivery_created_at, final_at, archived_at
 ```
+Index on `host_concurrency_leases (hostname, expires_at)`. Used by the distributed HostLimiter for fleet-wide per-host concurrent attempt capping across replicas.
 
 Table purposes:
 
@@ -246,6 +249,7 @@ Table purposes:
 - `delivery_attempts` is the audit trail of HTTP Attempts that reached dispatch.
 - `dead_letters` stores terminal failure metadata for operational inspection.
 - `delivery_history` archives terminal Deliveries after the live-queue retention window.
+- `host_concurrency_leases` stores fleet-wide per-host concurrency leases for the distributed `HostLimiter` (opt-in, `--host-limiter=distributed`). Leases carry an `expires_at` TTL; rows with expired TTLs are excluded from the active count so crashed replica slots self-recover.
 
 `delivery_claims` is the authoritative claim store (ADR-0011). A Delivery is claimed when a row exists in `delivery_claims` with `claimed_at` within the claim lease window. The `deliveries.status` column no longer stores `in_flight`; claim queries join against `delivery_claims` to detect already-claimed rows. `deliveries.claimed_at` (a residual column from the initial schema) is no longer used as the claim source.
 
@@ -356,13 +360,15 @@ spread across multiple partner hostnames; concentrated traffic to one hostname
 needs either lower partner latency, a higher configured cap, or more host-level
 coordination capacity.
 
-The Host Concurrency Cap is a fleet-wide partner-protection invariant. The PoC's
-in-memory HostLimiter enforces only the local portion of that allowance. A
-horizontally scaled production deployment needs distributed coordination, such
-as a lease-based distributed semaphore. The mechanism is deferred until
-deployment scale and failure semantics are known. A request-rate policy, such
-as a token bucket, would be a separate control with separate configuration; it
-does not enforce the Host Concurrency Cap.
+The Host Concurrency Cap is a fleet-wide partner-protection invariant. The PoC
+provides two implementations:
+
+- `LocalHostLimiter` — in-memory semaphore. Enforces per-process limit (N replicas = N × cap). Single-replica or dev use.
+- `DistributedHostLimiter` — Postgres lease store (`host_concurrency_leases` table). All replicas coordinate through the same database. Enforces exactly the configured cap fleet-wide. Use for multi-replica production deployments.
+
+Select via `--host-limiter=local|distributed` (default: `local`). The `HostLimiter`
+interface is the load-bearing contract; the implementation is a drop-in swap
+without touching worker or classify code.
 
 If distributed coordination is configured but unavailable, new Attempts for
 affected hostnames fail closed: Requeue them with a short delay rather than

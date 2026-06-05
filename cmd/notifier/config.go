@@ -10,6 +10,7 @@ type workerRuntimeConfig struct {
 	WorkerCount             int
 	Worker                  worker.Config
 	HostConcurrencyCap      int
+	HostLimiterMode         string
 	BacklogSampleInterval   time.Duration
 	EnablePgNotifyWakeups   bool
 	PgNotifyDSN             string
@@ -24,6 +25,7 @@ func loadWorkerRuntimeConfig() workerRuntimeConfig {
 		WorkerCount:           64,
 		Worker:                workerConfig,
 		HostConcurrencyCap:    16,
+		HostLimiterMode:       "local",
 		BacklogSampleInterval: 5 * time.Second,
 		EnablePgNotifyWakeups: true,
 		PgNotifyChannel:       "webhook_customer_ready",

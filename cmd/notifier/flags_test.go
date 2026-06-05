@@ -100,3 +100,21 @@ func TestParseCLIConfig_RejectsUnknownFlag(t *testing.T) {
 type discardWriter struct{}
 
 func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+func TestParseCLIConfig_HostLimiterDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg := parseForTest(t, nil)
+	if cfg.Runtime.HostLimiterMode != "local" {
+		t.Errorf("HostLimiterMode default: got %q, want local", cfg.Runtime.HostLimiterMode)
+	}
+}
+
+func TestParseCLIConfig_HostLimiterDistributed(t *testing.T) {
+	t.Parallel()
+
+	cfg := parseForTest(t, []string{"--host-limiter=distributed"})
+	if cfg.Runtime.HostLimiterMode != "distributed" {
+		t.Errorf("HostLimiterMode: got %q, want distributed", cfg.Runtime.HostLimiterMode)
+	}
+}

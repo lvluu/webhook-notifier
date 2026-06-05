@@ -38,6 +38,7 @@ func main() {
 		"workers", runtimeCfg.WorkerCount,
 		"min_batch", runtimeCfg.Worker.MinBatchHint,
 		"host_cap", runtimeCfg.HostConcurrencyCap,
+		"host_limiter", runtimeCfg.HostLimiterMode,
 		"request_timeout", runtimeCfg.Worker.RequestTimeout,
 		"delivery_concurrency", runtimeCfg.Worker.DeliveryConcurrency,
 		"discovery_interval", runtimeCfg.Discovery.Interval,

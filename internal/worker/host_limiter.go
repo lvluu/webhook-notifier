@@ -10,6 +10,15 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
+// HostLimiter caps concurrent in-flight requests per partner hostname.
+// Implementations may be process-local (single replica) or fleet-wide
+// (distributed across replicas via a lease store).
+type HostLimiter interface {
+	Acquire(ctx context.Context, host string) (release func(), err error)
+	TryAcquire(host string) (release func(), err error)
+	RequeueDelay() time.Duration
+}
+
 // HostLimiterConfig configures the per-host concurrency limiter.
 type HostLimiterConfig struct {
 	MaxPerHost     int
@@ -31,23 +40,24 @@ func (c HostLimiterConfig) defaults() HostLimiterConfig {
 	return cfg
 }
 
-// HostLimiter caps concurrent in-flight requests per partner hostname.
-type HostLimiter struct {
+// LocalHostLimiter enforces a per-host concurrency cap within a single process
+// using an in-memory weighted semaphore. Suitable for single-replica deployments.
+type LocalHostLimiter struct {
 	mu   sync.Mutex
 	sems map[string]*semaphore.Weighted
 	cfg  HostLimiterConfig
 }
 
-// NewHostLimiter returns a limiter with the given configuration.
-func NewHostLimiter(cfg HostLimiterConfig) *HostLimiter {
+// NewHostLimiter returns a local limiter with the given configuration.
+func NewHostLimiter(cfg HostLimiterConfig) *LocalHostLimiter {
 	cfg = cfg.defaults()
-	return &HostLimiter{
+	return &LocalHostLimiter{
 		sems: make(map[string]*semaphore.Weighted),
 		cfg:  cfg,
 	}
 }
 
-func (h *HostLimiter) semFor(host string) *semaphore.Weighted {
+func (h *LocalHostLimiter) semFor(host string) *semaphore.Weighted {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.sems[host] == nil {
@@ -59,7 +69,7 @@ func (h *HostLimiter) semFor(host string) *semaphore.Weighted {
 // Acquire blocks until a slot for host is available or the configured timeout
 // expires. On success it returns a release function that must be called exactly
 // once. On timeout or ctx cancellation it returns an error without consuming a slot.
-func (h *HostLimiter) Acquire(ctx context.Context, host string) (release func(), err error) {
+func (h *LocalHostLimiter) Acquire(ctx context.Context, host string) (release func(), err error) {
 	sem := h.semFor(host)
 	acquireStarted := time.Now()
 
@@ -67,7 +77,6 @@ func (h *HostLimiter) Acquire(ctx context.Context, host string) (release func(),
 	defer cancel()
 
 	if err := sem.Acquire(acquireCtx, 1); err != nil {
-		// record wait even on timeout — useful SRE signal
 		observe.ObserveSemaphoreWait(host, time.Since(acquireStarted).Seconds())
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("host limiter acquire %s: %w", host, ctx.Err())
@@ -89,7 +98,7 @@ func (h *HostLimiter) Acquire(ctx context.Context, host string) (release func(),
 // TryAcquire attempts to acquire a slot for host without blocking. On success
 // it returns a release function. On capacity exhaustion it returns an error
 // immediately without consuming a slot.
-func (h *HostLimiter) TryAcquire(host string) (release func(), err error) {
+func (h *LocalHostLimiter) TryAcquire(host string) (release func(), err error) {
 	sem := h.semFor(host)
 	acquireStarted := time.Now()
 	if !sem.TryAcquire(1) {
@@ -110,6 +119,6 @@ func (h *HostLimiter) TryAcquire(host string) (release func(), err error) {
 
 // RequeueDelay returns the configured delay for requeuing a Delivery that could
 // not acquire a host slot.
-func (h *HostLimiter) RequeueDelay() time.Duration {
+func (h *LocalHostLimiter) RequeueDelay() time.Duration {
 	return h.cfg.RequeueDelay
 }

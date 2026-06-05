@@ -31,6 +31,7 @@ func parseCLIConfig(fs *flag.FlagSet, args []string) (cliConfig, error) {
 	claimBatchHint := fs.Int("claim-batch-hint", 64, "maximum per-pick claim batch size; lower favours fairness, higher favours throughput. 0 = unbounded")
 	multiPick := fs.Int("multi-pick", 1, "customers to batch per claim query (1 = single-customer ClaimNextN, >1 = ClaimNextBatch)")
 	hostCap := fs.Int("host-cap", 20, "maximum concurrent in-flight requests per Integration Partner hostname")
+	hostLimiterMode := fs.String("host-limiter", "local", "host limiter mode: local (in-process semaphore) or distributed (Postgres lease store)")
 	requestTimeout := fs.Duration("request-timeout", 30*time.Second, "per-Attempt HTTP request timeout; a stalled partner holds a delivery slot for this long")
 	deliveryConcurrency := fs.Int("delivery-concurrency", 16, "maximum concurrent in-flight delivery attempts per worker")
 	discoveryInterval := fs.Duration("discovery-interval", time.Second, "claimable customer discovery interval")
@@ -51,6 +52,7 @@ func parseCLIConfig(fs *flag.FlagSet, args []string) (cliConfig, error) {
 	runtimeCfg.Worker.MaxBatchHint = *claimBatchHint
 	runtimeCfg.Worker.MultiPickCount = *multiPick
 	runtimeCfg.HostConcurrencyCap = *hostCap
+	runtimeCfg.HostLimiterMode = *hostLimiterMode
 	runtimeCfg.Worker.EmptyClaimBackoff = *emptyClaimBackoff
 	runtimeCfg.Worker.RequestTimeout = *requestTimeout
 	runtimeCfg.Worker.DeliveryConcurrency = *deliveryConcurrency

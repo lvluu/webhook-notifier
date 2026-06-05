@@ -26,6 +26,7 @@ All flags for `cmd/notifier`:
 | `--claim-batch-hint` | `64` | Upper bound for per-pick claim batch size. Must be `0` (unbounded) or greater than/equal to `--min-batch`. The worker clamps each scheduler `batchHint` (fairness weight) between `--min-batch` and this value. Lower favours fairness (worker yields to rotation sooner); higher favours throughput (more DB amortization per pick). Applied to both roundrobin and weighted scheduler. |
 | `--multi-pick` | `1` | Customers to batch per claim query (1 = single, >1 = `ClaimNextBatch`) |
 | `--host-cap` | `20` | Max concurrent in-flight requests per Integration Partner hostname |
+| `--host-limiter` | `local` | Host limiter mode: `local` (in-process semaphore) or `distributed` (Postgres lease store, fleet-wide) |
 | `--delivery-concurrency` | `16` | Max concurrent in-flight delivery attempts per worker goroutine. Must be at least `1` |
 
 ### Timing
@@ -87,12 +88,30 @@ Configured in `internal/outbox/outbox.go`. Per-Webhook state persisted in
 
 ## Host Concurrency Cap
 
-Per-process in-memory semaphore (`internal/worker/host_limiter.go`).
-Production deployments need fleet-wide coordination (see DESIGN.md).
+The HostLimiter enforces a per-host cap on concurrent in-flight HTTP Attempts to
+Integration Partner hostnames. Two implementations are available:
+
+### Local (`--host-limiter=local`, default)
+
+Per-process in-memory semaphore (`internal/worker/host_limiter.go`). Each replica
+independently enforces `--host-cap`. With N replicas the actual concurrent
+in-flight for a single hostname is N × `--host-cap`. Suitable for single-replica
+deployments and development.
+
+### Distributed (`--host-limiter=distributed`)
+
+Fleet-wide lease store backed by the `host_concurrency_leases` Postgres table
+(`internal/worker/host_limiter_distributed.go`). All replicas coordinate through
+the same Postgres database to enforce exactly `--host-cap` concurrent in-flight
+Attempts per hostname regardless of replica count. Acquire inserts a lease row
+with a TTL; release deletes it. Expired leases (from replica crashes) are
+excluded from the active count so slots self-recover. Use for multi-replica
+production deployments where the partner-protection invariant must be fleet-wide.
 
 | Flag | Default | Purpose |
 |---|---|---|
 | `--host-cap` | `20` | Max concurrent in-flight Attempts per partner hostname |
+| `--host-limiter` | `local` | `local` (in-process semaphore) or `distributed` (Postgres lease store) |
 
 ## Database Pool
 
@@ -146,6 +165,9 @@ Configured through `workerRuntimeConfig.Discovery`:
 | `webhook_host_semaphore_wait_seconds` | Histogram | `host` |
 | `webhook_breaker_state` | Gauge | `webhook_id`, `state` |
 | `webhook_breaker_trips_total` | Counter | `reason` |
+| `host_concurrency_acquired_total` | Counter | `hostname` |
+| `host_concurrency_rejected_total` | Counter | `hostname` |
+| `host_concurrency_in_flight` | Gauge | `hostname` |
 | `webhook_replicas` | Gauge | `replica_id` |
 
 See [docs/observability/dashboard.md](observability/dashboard.md) for Grafana

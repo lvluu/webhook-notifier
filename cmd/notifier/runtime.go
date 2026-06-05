@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/scheduler/dbweights"
@@ -30,7 +31,7 @@ type roundrobinScheduler interface {
 type runtimeDeps struct {
 	newScheduler func(*sql.DB, workerRuntimeConfig) roundrobinScheduler
 	newStore     func(*sql.DB, workerRuntimeConfig) *outbox.Store
-	newLimiter   func(int) *worker.HostLimiter
+	newLimiter   func(int, *sql.DB) worker.HostLimiter
 	runDiscovery func(context.Context, *outbox.Store, roundrobinScheduler, worker.DiscoveryConfig) error
 }
 
@@ -115,7 +116,7 @@ func defaultRuntimeDeps() runtimeDeps {
 		newStore: func(db *sql.DB, cfg workerRuntimeConfig) *outbox.Store {
 			return outbox.New(db)
 		},
-		newLimiter: func(maxPerHost int) *worker.HostLimiter {
+		newLimiter: func(maxPerHost int, db *sql.DB) worker.HostLimiter {
 			return worker.NewHostLimiter(worker.HostLimiterConfig{MaxPerHost: maxPerHost})
 		},
 		runDiscovery: func(ctx context.Context, store *outbox.Store, sched roundrobinScheduler, cfg worker.DiscoveryConfig) error {
@@ -160,7 +161,14 @@ func startDeliveryRuntimeWithDeps(
 		scheduler: sched,
 	}
 	outboxStore := deps.newStore(db, cfg)
-	limiter := deps.newLimiter(cfg.HostConcurrencyCap)
+	limiter := deps.newLimiter(cfg.HostConcurrencyCap, db)
+	if cfg.HostLimiterMode == "distributed" {
+		limiter = worker.NewDistributedHostLimiter(db, worker.DistributedHostLimiterConfig{
+			MaxPerHost:  cfg.HostConcurrencyCap,
+			LeaseTTL:    30 * time.Second,
+			RequeueDelay: 100 * time.Millisecond,
+		})
+	}
 	httpClient := worker.NewHTTPClient(worker.DefaultHTTPConfig())
 
 	var broadcastDB *sql.DB

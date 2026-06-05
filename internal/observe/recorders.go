@@ -205,3 +205,27 @@ func IncPgNotifyBroadcast(result string) {
 	}
 	WebhookPgNotifyBroadcastTotal.WithLabelValues(result).Add(1)
 }
+
+// IncHostConcurrencyAcquired safely increments HostConcurrencyAcquiredTotal, skipping if nil.
+func IncHostConcurrencyAcquired(hostname string) {
+	if !metricsRegistered() {
+		return
+	}
+	HostConcurrencyAcquiredTotal.WithLabelValues(hostname).Add(1)
+}
+
+// IncHostConcurrencyRejected safely increments HostConcurrencyRejectedTotal, skipping if nil.
+func IncHostConcurrencyRejected(hostname string) {
+	if !metricsRegistered() {
+		return
+	}
+	HostConcurrencyRejectedTotal.WithLabelValues(hostname).Add(1)
+}
+
+// SetHostConcurrencyInFlight safely sets HostConcurrencyInFlight gauge, skipping if nil.
+func SetHostConcurrencyInFlight(hostname string, n float64) {
+	if !metricsRegistered() {
+		return
+	}
+	HostConcurrencyInFlight.WithLabelValues(hostname).Set(n)
+}
