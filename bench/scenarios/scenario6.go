@@ -14,9 +14,7 @@ import (
 	"time"
 
 	"github.com/lvluu/webhook-notifier/bench/receiver"
-	"github.com/lvluu/webhook-notifier/internal/ingest"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
-	"github.com/lvluu/webhook-notifier/internal/registry"
 	"github.com/lvluu/webhook-notifier/internal/retry"
 	"github.com/lvluu/webhook-notifier/internal/scheduler/roundrobin"
 	"github.com/lvluu/webhook-notifier/internal/worker"
@@ -169,7 +167,6 @@ func runScenario6Once(ctx context.Context, db *sql.DB, profile scenario6Profile,
 	}
 
 	sched := roundrobin.New()
-	ingestStore := ingest.New(db, registry.New(db), sched)
 	outboxStore := newScenario6InstrumentedStore(outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
 		FailureThreshold: profile.BreakerFailureThreshold,
 	})))
@@ -201,7 +198,7 @@ func runScenario6Once(ctx context.Context, db *sql.DB, profile scenario6Profile,
 	}
 
 	start := time.Now()
-	if err := submitScenario6Events(workerCtx, ingestStore, profile); err != nil {
+	if err := bulkSeedScenario6Deliveries(ctx, db, profile); err != nil {
 		return scenario6RunResult{}, err
 	}
 	if err := waitScenario6Drain(ctx, db, outboxStore, sched); err != nil {
@@ -326,50 +323,63 @@ func (s *scenario6InstrumentedStore) ClaimStats() scenario6ClaimStats {
 	}
 }
 
-func submitScenario6Events(ctx context.Context, store *ingest.Store, profile scenario6Profile) error {
-	var wg sync.WaitGroup
-	errCh := make(chan error, 2)
-	reportErr := func(err error) {
-		select {
-		case errCh <- err:
-		default:
-		}
-	}
-	submit := func(customerID string, count int) {
-		defer wg.Done()
-		for i := 0; i < count; i++ {
-			if _, err := store.Submit(ctx, ingest.Event{
-				CustomerID: customerID,
-				Type:       eventType,
-				Payload:    []byte(`{"event_name":"subscriber.created"}`),
-			}); err != nil {
-				reportErr(fmt.Errorf("submit event for %s: %w", customerID, err))
-				return
-			}
-			if profile.SubmitInterval > 0 {
-				select {
-				case <-ctx.Done():
-					reportErr(ctx.Err())
-					return
-				case <-time.After(profile.SubmitInterval):
-				}
-			}
-		}
+// bulkSeedScenario6Deliveries creates the whale and small-customer delivery
+// backlog directly with set-based SQL instead of driving one ingest Submit
+// goroutine per customer. The per-customer Submit fan-out (10k+ concurrent
+// goroutines, each a unique registry key so the cache never warms) stampedes
+// the shared DB pool on a single box and makes the run measure connection
+// contention rather than delivery throughput — confirmed by db.Stats() showing
+// ~17k connection waits with the failure point insensitive to pool size.
+//
+// Each seeded Event fans out to one Delivery per active matching Webhook (3 per
+// Customer), exactly as ingest would, so total delivery counts and the
+// created_at-based fairness metric are unchanged. The scheduler is fed by the
+// discovery poller in waitScenario6Drain rather than ingest-side Notify.
+func bulkSeedScenario6Deliveries(ctx context.Context, db *sql.DB, profile scenario6Profile) error {
+	if err := seedScenario6DeliveryBatch(ctx, db, []string{scenario6WhaleCustomerID}, profile.WhaleDeliveries); err != nil {
+		return fmt.Errorf("seed whale backlog: %w", err)
 	}
 
-	wg.Add(1)
-	go submit(scenario6WhaleCustomerID, profile.WhaleDeliveries)
+	smallIDs := make([]string, 0, profile.SmallCount)
 	for i := 0; i < profile.SmallCount; i++ {
-		wg.Add(1)
-		go submit(scenario6SmallCustomerID(i), profile.SmallDeliveries)
+		smallIDs = append(smallIDs, scenario6SmallCustomerID(i))
 	}
-	wg.Wait()
-	select {
-	case err := <-errCh:
-		return err
-	default:
+	for start := 0; start < len(smallIDs); start += scenario6SeedBatchRows {
+		end := min(start+scenario6SeedBatchRows, len(smallIDs))
+		if err := seedScenario6DeliveryBatch(ctx, db, smallIDs[start:end], profile.SmallDeliveries); err != nil {
+			return fmt.Errorf("seed small backlog: %w", err)
+		}
+	}
+	return nil
+}
+
+// seedScenario6DeliveryBatch inserts eventsPerCustomer Events for each given
+// Customer and one pending Delivery per active matching Webhook, mirroring the
+// fan-out ingest.Submit would produce.
+func seedScenario6DeliveryBatch(ctx context.Context, db *sql.DB, customerIDs []string, eventsPerCustomer int) error {
+	if len(customerIDs) == 0 || eventsPerCustomer < 1 {
 		return nil
 	}
+	_, err := db.ExecContext(ctx, `
+		WITH ev AS (
+			INSERT INTO events (customer_id, type, payload)
+			SELECT c.cid, $2, '{"event_name":"subscriber.created"}'::jsonb
+			FROM unnest($1::text[]) AS c(cid)
+			CROSS JOIN generate_series(1, $3::int)
+			RETURNING id, customer_id
+		)
+		INSERT INTO deliveries (event_id, webhook_id, customer_id, status, attempt_count, next_attempt_at)
+		SELECT ev.id, w.id, ev.customer_id, 'pending', 0, now()
+		FROM ev
+		JOIN webhooks w
+		  ON w.customer_id = ev.customer_id
+		 AND w.active = true
+		 AND $2 = ANY(w.event_types)
+	`, customerIDs, eventType, eventsPerCustomer)
+	if err != nil {
+		return fmt.Errorf("seed scenario6 deliveries: %w", err)
+	}
+	return nil
 }
 
 type scenario6Notifier interface {
@@ -517,7 +527,8 @@ func writeScenario6Report(path string, profile scenario6Profile, results []scena
 
 ## Description
 
-Profile **%s** executes real Event ingestion (`+"`POST /events`"+`) for one Whale Customer and %d Small Customers.
+Profile **%s** seeds a Delivery backlog with set-based SQL (each Event fans out to one Delivery per matching Webhook, exactly as ingest would) for one Whale Customer and %d Small Customers, then measures the delivery pipeline draining it.
+Seeding directly avoids a per-Customer ingest `+"`Submit`"+` stampede that would otherwise measure DB connection contention instead of delivery throughput; ingest-path performance is covered separately.
 Each Customer has 3 Webhooks (`+"`/hooks/fast`"+`, `+"`/hooks/slow`"+`, `+"`/hooks/flaky`"+`) with mixed latency/failure behavior to approximate production HTTP variability.
 
 Assignment mapping:
@@ -528,7 +539,7 @@ Assignment mapping:
 Fairness metric note:
 - Uses first-attempt queue latency (`+"`delivery_attempts.sent_at(attempt=1) - deliveries.created_at`"+`) at P95.
 - Excludes retry/backoff tail so fairness reflects scheduler/queue behavior rather than partner instability.
-- Throughput in this scenario is end-to-end: total deliveries divided by wall time from ingest submission start to full drain.
+- Throughput in this scenario is total deliveries divided by wall time from backlog seed start to full drain.
 
 ## Results
 
