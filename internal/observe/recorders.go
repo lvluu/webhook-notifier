@@ -198,6 +198,18 @@ func IncBreakerTrip(reason string) {
 	WebhookBreakerTripsTotal.WithLabelValues(reason).Add(1)
 }
 
+// IncWorkerTransientDBError safely increments
+// WebhookWorkerTransientDBErrorsTotal for the given loop phase ("claim" or
+// "mark"), skipping if metrics are not registered. A sustained rise here means
+// the database is shedding load (statement timeouts, deadlocks, connection
+// churn) and workers are backing off rather than failing fatally.
+func IncWorkerTransientDBError(phase string) {
+	if !metricsRegistered() {
+		return
+	}
+	WebhookWorkerTransientDBErrorsTotal.WithLabelValues(phase).Add(1)
+}
+
 // IncPgNotifyBroadcast safely increments the remote wake broadcaster outcome.
 func IncPgNotifyBroadcast(result string) {
 	if !metricsRegistered() {

@@ -1,5 +1,13 @@
 # Persisted Webhook circuit breaker
 
+## Amended by
+
+[ADR-0014](./0014-worker-resilience-and-counter-based-breaker.md) makes the
+"successes reset the failure counter" behaviour literal: `breaker_failure_count`
+is now maintained incrementally on the mark path instead of being recomputed by
+scanning `delivery_attempts`, which had become a `statement_timeout` hotspot
+during partner outages.
+
 ## Context
 
 RetryPolicy limits the number and spacing of Attempts for one Delivery, and the process-local HostLimiter partially enforces the Host Concurrency Cap for one notifier instance. Neither mechanism stops a chronically failing Webhook from repeatedly entering the worker pool across many Deliveries. That wastes worker capacity and keeps a broken Integration Partner in the hot path until every Delivery exhausts its retry budget.

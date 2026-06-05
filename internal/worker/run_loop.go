@@ -15,6 +15,12 @@ import (
 const (
 	idleBackoff              = 50 * time.Millisecond
 	defaultEmptyClaimBackoff = 20 * time.Millisecond
+	// transientErrorBackoff is the pause after a recoverable database error
+	// (statement timeout, deadlock, connection churn). Long enough to let an
+	// overloaded database shed load, short enough to resume promptly. Kept
+	// modest so a single replica does not stall its whole worker pool on a
+	// transient blip.
+	transientErrorBackoff = 250 * time.Millisecond
 )
 
 func (w *Worker) emptyClaimDelay() time.Duration {
@@ -43,6 +49,12 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			if isTransientDBError(err) {
+				if waitErr := w.backoffTransient(ctx, "claim", err); waitErr != nil {
+					return waitErr
+				}
+				continue
+			}
 			return err
 		}
 
@@ -56,8 +68,40 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 		}
 
 		if err := w.processDeliveries(ctx, store, deliveries); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if isTransientDBError(err) {
+				if waitErr := w.backoffTransient(ctx, "mark", err); waitErr != nil {
+					return waitErr
+				}
+				continue
+			}
 			return err
 		}
+	}
+}
+
+// backoffTransient logs a recoverable database error, records it for
+// monitoring, and pauses before the next loop iteration. It returns a non-nil
+// error only if the run context is canceled during the pause, in which case the
+// caller should stop. A transient error must never tear down the replica: every
+// worker shares one database, so a fatal return here cascades into a fleet-wide
+// shutdown (see isTransientDBError).
+func (w *Worker) backoffTransient(ctx context.Context, phase string, cause error) error {
+	if w.Logger != nil {
+		w.Logger.Warn("transient database error; backing off and retrying",
+			"phase", phase,
+			"backoff", transientErrorBackoff,
+			"error", cause,
+		)
+	}
+	observe.IncWorkerTransientDBError(phase)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(transientErrorBackoff):
+		return nil
 	}
 }
 

@@ -31,6 +31,7 @@ var (
 	WebhookBreakerState                 *prometheus.GaugeVec
 	WebhookBreakerTripsTotal            *prometheus.CounterVec
 	WebhookPgNotifyBroadcastTotal       *prometheus.CounterVec
+	WebhookWorkerTransientDBErrorsTotal *prometheus.CounterVec
 	metricsRegistrationWarned           atomic.Bool
 )
 
@@ -59,6 +60,7 @@ func ResetMetricsForTest() {
 	WebhookBreakerState = nil
 	WebhookBreakerTripsTotal = nil
 	WebhookPgNotifyBroadcastTotal = nil
+	WebhookWorkerTransientDBErrorsTotal = nil
 	metricsRegistrationWarned.Store(false)
 }
 
@@ -196,6 +198,11 @@ func initMetrics(reg prometheus.Registerer) {
 		Help: "Total number of remote Customer wake hints handled by the pg_notify broadcaster.",
 	}, []string{"result"})
 
+	WebhookWorkerTransientDBErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "webhook_worker_transient_db_errors_total",
+		Help: "Total number of transient database errors a worker absorbed (backed off and retried) instead of treating as fatal, by loop phase.",
+	}, []string{"phase"})
+
 	reg.MustRegister(
 		WebhookDeliveriesTotal,
 		WebhookDeliveryLatencySeconds,
@@ -218,5 +225,6 @@ func initMetrics(reg prometheus.Registerer) {
 		WebhookBreakerState,
 		WebhookBreakerTripsTotal,
 		WebhookPgNotifyBroadcastTotal,
+		WebhookWorkerTransientDBErrorsTotal,
 	)
 }

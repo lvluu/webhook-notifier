@@ -2,7 +2,7 @@
 
 This document describes the design of the Webhook Notifier component: a service that consumes business Events from a multi-tenant platform and reliably delivers them to Integration Partners over HTTP POST, with horizontal scalability and fair scheduling across Customers of vastly different sizes.
 
-Vocabulary used here is defined in [CONTEXT.md](../CONTEXT.md). Architectural commitments are anchored in [ADR-0001](adr/0001-round-robin-fairness-with-pluggable-scheduler.md), [ADR-0002](adr/0002-postgres-as-queue-no-broker-for-poc.md), [ADR-0003](adr/0003-retry-policy-and-delivery-lifecycle.md), [ADR-0004](adr/0004-requeue-without-attempt.md), [ADR-0005](adr/0005-subscription-registry-lru-ttl-cache.md), [ADR-0006](adr/0006-db-backed-claimable-customer-discovery.md), [ADR-0007](adr/0007-http-transport-and-response-body-drain.md), [ADR-0008](adr/0008-persisted-webhook-circuit-breaker.md), [ADR-0009](adr/0009-retry-max-age-expiration.md), [ADR-0010](adr/0010-terminal-delivery-retention-archive.md), [ADR-0011](adr/0011-delivery-claims-authoritative-claim-store.md), [ADR-0012](adr/0012-pgbouncer-prepared-statements-and-pgxpool-deferral.md), and [ADR-0013](adr/0013-claim-agnostic-claimable-customer-discovery.md).
+Vocabulary used here is defined in [CONTEXT.md](../CONTEXT.md). Architectural commitments are anchored in [ADR-0001](adr/0001-round-robin-fairness-with-pluggable-scheduler.md), [ADR-0002](adr/0002-postgres-as-queue-no-broker-for-poc.md), [ADR-0003](adr/0003-retry-policy-and-delivery-lifecycle.md), [ADR-0004](adr/0004-requeue-without-attempt.md), [ADR-0005](adr/0005-subscription-registry-lru-ttl-cache.md), [ADR-0006](adr/0006-db-backed-claimable-customer-discovery.md), [ADR-0007](adr/0007-http-transport-and-response-body-drain.md), [ADR-0008](adr/0008-persisted-webhook-circuit-breaker.md), [ADR-0009](adr/0009-retry-max-age-expiration.md), [ADR-0010](adr/0010-terminal-delivery-retention-archive.md), [ADR-0011](adr/0011-delivery-claims-authoritative-claim-store.md), [ADR-0012](adr/0012-pgbouncer-prepared-statements-and-pgxpool-deferral.md), [ADR-0013](adr/0013-claim-agnostic-claimable-customer-discovery.md), and [ADR-0014](adr/0014-worker-resilience-and-counter-based-breaker.md).
 For a step-by-step execution path and tuning checklist, see [WORKFLOW.md](WORKFLOW.md).
 
 The implementation is Go plus Postgres. Go keeps the service small,
@@ -256,8 +256,8 @@ Indexes:
 - `deliveries (customer_id, next_attempt_at, created_at, id) WHERE status IN ('pending', 'failed_retry')` — ready-candidate claim scan (partial, index-friendly).
 - `delivery_claims (claimed_at, delivery_id)` — stale-claim scan.
 - `delivery_attempts (delivery_id, attempt_number)` — audit lookup.
-- `delivery_attempts (delivery_id, sent_at)` — webhook circuit-breaker consecutive-failure scan: backs both the `max(sent_at)` last-success probe and the since-last-success failure range scan in `consecutiveWebhookFailures` / `batchConsecutiveWebhookFailures`, keeping the scan off the full delivery_attempts history during a partner outage.
-- `deliveries (webhook_id)` — webhook circuit-breaker consecutive-failure join (`delivery_attempts ⋈ deliveries` on `webhook_id`).
+- `delivery_attempts (delivery_id, sent_at)` — audit/history lookup of a Delivery's attempts in time order. (Previously also backed the breaker consecutive-failure scan; ADR-0014 replaced that scan with an in-row `breaker_failure_count`, so the mark path no longer reads `delivery_attempts`.)
+- `deliveries (webhook_id)` — webhook lookups by Integration Partner (e.g. archive grouping). (No longer needed for a breaker failure-count join; see ADR-0014.)
 - `deliveries (customer_id, next_attempt_at) WHERE status IN ('pending', 'failed_retry')` — claimable-customer discovery scan.
 - `dead_letters (final_at desc)` — ops inspection.
 - `delivery_history (customer_id, final_at desc)` — historical lookup.
