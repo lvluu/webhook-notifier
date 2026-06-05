@@ -26,6 +26,20 @@ func (s sqlClaimSelection) Ready() string {
           AND %s.delivery_id IS NULL`, s.deliveryAlias, s.deliveryAlias, s.claimAlias)
 }
 
+// ReadyWithoutClaim matches deliveries whose status and schedule make them
+// ready to attempt, ignoring whether an active claim already exists. Discovery
+// uses this claim-agnostic predicate so its loose index-scan can stop at the
+// first ready row per customer instead of walking claimed-but-still-'pending'
+// rows that the dc.delivery_id IS NULL anti-join would otherwise filter out
+// (issue #124: claimed rows stay in idx_deliveries_ready, so the anti-join
+// collapses the LIMIT-1 scan into a full hash anti-join once unclaimed rows go
+// sparse). DiscoverClaimableCustomers is only a rotation hint; ClaimNextN with
+// FOR UPDATE SKIP LOCKED remains the exact claim-eligibility authority.
+func (s sqlClaimSelection) ReadyWithoutClaim() string {
+	return fmt.Sprintf(`%s.status IN ('pending', 'failed_retry')
+          AND %s.next_attempt_at <= now()`, s.deliveryAlias, s.deliveryAlias)
+}
+
 func (s sqlClaimSelection) Stale(claimLeaseMS int64) string {
 	return fmt.Sprintf(`%s.claimed_at < now() - (%d * interval '1 millisecond')`, s.claimAlias, claimLeaseMS)
 }

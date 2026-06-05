@@ -16,9 +16,13 @@ state, plus the tuning knobs used by the service and benchmark harness.
    Customer.
 7. When enabled, the notifier also sends a coalesced Postgres `NOTIFY` wake
    hint so other replicas can notify their local Schedulers.
-8. DB-backed claimable-Customer discovery periodically scans Postgres for ready
-   work, delayed retries that are due, and stale claims, then notifies the local
-   Scheduler.
+8. DB-backed claimable-Customer discovery periodically scans Postgres for
+   Customers with ready, breaker-eligible work (`pending`/`failed_retry` with
+   `next_attempt_at <= now()`) and notifies the local Scheduler. Discovery is a
+   claim-agnostic hint (ADR-0013): it does not join `delivery_claims`, so it
+   also surfaces Customers whose ready Deliveries are already claimed; the claim
+   query (step 11) is the authority and recovers stale claims. Due retries and
+   stale-claimed-still-`pending` rows are already covered by the ready predicate.
 9. A Worker calls `Scheduler.Pick()` for the next Customer. With
    `MultiPickCount > 1`, it collects several Customers before one claim query.
 10. Single-Customer mode calls `ClaimNextN` with the scheduler hint clamped by
