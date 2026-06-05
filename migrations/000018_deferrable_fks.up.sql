@@ -1,0 +1,5 @@
+ALTER TABLE deliveries
+    ALTER CONSTRAINT deliveries_event_id_fkey DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE deliveries
+    ALTER CONSTRAINT deliveries_webhook_id_fkey DEFERRABLE INITIALLY DEFERRED;
