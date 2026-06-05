@@ -1801,6 +1801,55 @@ func TestProcess_RequeueImmediatelyWhenHostSaturated(t *testing.T) {
 	}
 }
 
+// TestProcess_HostLimiterUsesURLHostField proves the limiter keys on the
+// pre-projected Delivery.URLHost (webhooks.url_host generated column, issue
+// #115) rather than re-parsing Delivery.URL. The delivery's URLHost is set to a
+// host whose slot is already occupied, while URL points elsewhere; the request
+// must requeue, which is only possible if the limiter consulted URLHost.
+func TestProcess_HostLimiterUsesURLHostField(t *testing.T) {
+	t.Parallel()
+
+	hl := worker.NewHostLimiter(worker.HostLimiterConfig{
+		MaxPerHost:     1,
+		AcquireTimeout: 500 * time.Millisecond,
+		RequeueDelay:   10 * time.Millisecond,
+	})
+
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	const projectedHost = "projected.example.com"
+	release, err := hl.TryAcquire(projectedHost)
+	if err != nil {
+		t.Fatalf("pre-occupy slot: %v", err)
+	}
+	defer release()
+
+	w := newTestWorker(worker.WithHostLimiter(hl))
+	store := &recordingDeliveryStore{}
+
+	result := w.Process(context.Background(), store, outbox.Delivery{
+		ID:            "dlv_projected_host",
+		URL:           srv.URL, // a free host if it were parsed
+		URLHost:       projectedHost,
+		AttemptNumber: 1,
+	})
+
+	if result.Err != nil {
+		t.Fatalf("Process error: %v", result.Err)
+	}
+	if result.Status != worker.StatusRequeued {
+		t.Errorf("expected StatusRequeued (limiter keyed on URLHost), got %v", result.Status)
+	}
+	if called {
+		t.Error("HTTP Send was called despite the projected host slot being saturated")
+	}
+}
+
 func urlHost(raw string) (string, error) {
 	u, err := neturl.Parse(raw)
 	if err != nil {

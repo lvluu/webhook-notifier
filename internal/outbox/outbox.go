@@ -89,6 +89,7 @@ type Delivery struct {
 	EventType     string
 	Payload       []byte
 	URL           string
+	URLHost       string
 	Secret        string
 	Status        DeliveryStatus
 	AttemptNumber int

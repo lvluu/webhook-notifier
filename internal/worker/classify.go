@@ -34,12 +34,20 @@ func (w *Worker) classifyDelivery(ctx context.Context, d outbox.Delivery) delive
 
 	customerClass := observe.CustomerClassFromValue(d.CustomerClass)
 	if w.HostLimiter != nil {
-		u, parseErr := url.Parse(d.URL)
-		if parseErr != nil {
-			return deliveryOutcome{err: fmt.Errorf("parse delivery URL: %w", parseErr)}
+		// d.URLHost is projected from webhooks.url_host (a generated column,
+		// issue #115) so the limiter avoids re-parsing the URL on every Attempt.
+		// Fall back to url.Parse for rows where the host could not be extracted
+		// (malformed scheme, IPv6 literal) so behaviour never regresses.
+		host := d.URLHost
+		if host == "" {
+			u, parseErr := url.Parse(d.URL)
+			if parseErr != nil {
+				return deliveryOutcome{err: fmt.Errorf("parse delivery URL: %w", parseErr)}
+			}
+			host = u.Hostname()
 		}
 
-		release, acquireErr := w.HostLimiter.TryAcquire(u.Hostname())
+		release, acquireErr := w.HostLimiter.TryAcquire(host)
 		if acquireErr != nil {
 			if ctx.Err() != nil {
 				return deliveryOutcome{err: ctx.Err()}
