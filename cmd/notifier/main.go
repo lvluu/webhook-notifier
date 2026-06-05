@@ -31,6 +31,8 @@ func main() {
 	claimBatchHint := flag.Int("claim-batch-hint", 64, "maximum per-pick claim batch size; lower favours fairness, higher favours throughput. 0 = unbounded")
 	multiPick := flag.Int("multi-pick", 1, "customers to batch per claim query (1 = single-customer ClaimNextN, >1 = ClaimNextBatch)")
 	hostCap := flag.Int("host-cap", 20, "maximum concurrent in-flight requests per Integration Partner hostname")
+	requestTimeout := flag.Duration("request-timeout", 30*time.Second, "per-Attempt HTTP request timeout; a stalled partner holds a delivery slot for this long")
+	deliveryConcurrency := flag.Int("delivery-concurrency", 16, "maximum concurrent in-flight delivery attempts per worker")
 	discoveryInterval := flag.Duration("discovery-interval", time.Second, "claimable customer discovery interval")
 	emptyClaimBackoff := flag.Duration("empty-claim-backoff", 20*time.Millisecond, "pause after an empty claim cycle")
 	backlogSampleInterval := flag.Duration("pending-sample-interval", 5*time.Second, "sample interval for pending-delivery backlog gauge (0 disables)")
@@ -109,6 +111,8 @@ func main() {
 	runtimeCfg.Worker.MultiPickCount = *multiPick
 	runtimeCfg.HostConcurrencyCap = *hostCap
 	runtimeCfg.Worker.EmptyClaimBackoff = *emptyClaimBackoff
+	runtimeCfg.Worker.RequestTimeout = *requestTimeout
+	runtimeCfg.Worker.DeliveryConcurrency = *deliveryConcurrency
 	runtimeCfg.BacklogSampleInterval = *backlogSampleInterval
 	runtimeCfg.EnablePgNotifyWakeups = *enablePgNotifyWakeups
 	runtimeCfg.PgNotifyDSN = *pgNotifyDSN
