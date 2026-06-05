@@ -39,6 +39,13 @@ func openBenchDatabase(ctx context.Context) (*sql.DB, func(), error) {
 		postgres.WithDatabase("notifier"),
 		postgres.WithUsername("notifier"),
 		postgres.WithPassword("notifier"),
+		// Preload pg_stat_statements so each bench run can dump its query
+		// hotspots (the EXPLAIN-adjacent signal agents use to find dominant
+		// queries). The extension is created and reset in openBenchDatabaseAtDSN.
+		// The postgres entrypoint prepends "postgres" when the first arg is a flag.
+		testcontainers.CustomizeRequestOption(func(req *testcontainers.GenericContainerRequest) {
+			req.Cmd = append(req.Cmd, "-c", "shared_preload_libraries=pg_stat_statements")
+		}),
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
@@ -101,7 +108,13 @@ func openBenchDatabaseAtDSN(ctx context.Context, dsn string, migrate bool) (*sql
 			return nil, nil, err
 		}
 	}
+	// Reset query stats after migrations so the end-of-run hotspot dump reflects
+	// the bench workload (and seeding), not schema DDL.
+	hasQueryStats := setupQueryStats(ctx, db)
 	return db, func() {
+		if hasQueryStats {
+			dumpQueryHotspots(ctx, db)
+		}
 		if err := db.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "close bench postgres db: %v\n", err)
 		}
