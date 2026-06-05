@@ -245,16 +245,29 @@ func deferBlockedDeliveries(ctx context.Context, tx *sql.Tx, webhookIDs []string
 	if len(webhookIDs) == 0 {
 		return nil
 	}
+	// Lock the target deliveries in id order (targets CTE) before updating them,
+	// matching the id-ordered FOR UPDATE the mark batch uses for its own rows.
+	// Concurrent transactions deferring overlapping webhooks' backlogs therefore
+	// acquire delivery locks in one consistent order and cannot deadlock on the
+	// deliveries table.
 	if _, err := tx.ExecContext(ctx, `
+		WITH targets AS (
+			SELECT d.id
+			FROM deliveries d
+			JOIN webhooks w ON w.id = d.webhook_id
+			WHERE w.id = ANY($1::uuid[])
+			  AND d.status IN ('pending', 'failed_retry')
+			  AND w.breaker_next_probe_at IS NOT NULL
+			  AND d.next_attempt_at < w.breaker_next_probe_at
+			ORDER BY d.id
+			FOR UPDATE OF d
+		)
 		UPDATE deliveries d
 		SET next_attempt_at = GREATEST(d.next_attempt_at, w.breaker_next_probe_at),
 		    updated_at = now()
 		FROM webhooks w
-		WHERE w.id = ANY($1::uuid[])
+		WHERE d.id IN (SELECT id FROM targets)
 		  AND d.webhook_id = w.id
-		  AND d.status IN ('pending', 'failed_retry')
-		  AND w.breaker_next_probe_at IS NOT NULL
-		  AND d.next_attempt_at < w.breaker_next_probe_at
 	`, webhookIDs); err != nil {
 		return fmt.Errorf("defer blocked deliveries: %w", err)
 	}
@@ -423,6 +436,31 @@ func nullIfEmpty(value string) sql.NullString {
 	return sql.NullString{String: value, Valid: value != ""}
 }
 
+// lockWebhooksOrdered acquires row locks on the given webhooks in a single
+// deterministic (id-sorted) order before any breaker write touches them. Every
+// batch mark transaction (success and failure paths alike) grabs its webhook
+// locks through this one ordered statement, so two concurrent marks that share
+// webhooks can never acquire the rows in opposite order — eliminating the
+// webhook-vs-webhook deadlock cycle (40P01) that otherwise arises when many
+// workers mark deliveries for the same hot webhook during a partner outage. The
+// subsequent breaker UPDATEs then re-lock rows this transaction already holds,
+// which is a no-op regardless of the order the planner visits them in.
+func lockWebhooksOrdered(ctx context.Context, tx *sql.Tx, webhookIDs []string) error {
+	if len(webhookIDs) == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		SELECT id
+		FROM webhooks
+		WHERE id = ANY($1::uuid[])
+		ORDER BY id
+		FOR UPDATE
+	`, webhookIDs); err != nil {
+		return fmt.Errorf("lock webhooks in order: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) batchRecordBreakerSuccess(ctx context.Context, tx *sql.Tx, deliveryIDs []string) ([]string, error) {
 	webhookIDs, err := batchDeliveryWebhookIDs(ctx, tx, deliveryIDs)
 	if err != nil {
@@ -436,6 +474,10 @@ func (s *Store) batchRecordBreakerSuccess(ctx context.Context, tx *sql.Tx, deliv
 			seen[wid] = true
 			uniqueWIDs = append(uniqueWIDs, wid)
 		}
+	}
+
+	if err := lockWebhooksOrdered(ctx, tx, uniqueWIDs); err != nil {
+		return nil, err
 	}
 
 	rows, err := tx.QueryContext(ctx, `
@@ -505,6 +547,10 @@ func (s *Store) batchRecordBreakerFailure(ctx context.Context, tx *sql.Tx, deliv
 	uniqueIDs := make([]string, 0, len(deduped))
 	for wid := range deduped {
 		uniqueIDs = append(uniqueIDs, wid)
+	}
+
+	if err := lockWebhooksOrdered(ctx, tx, uniqueIDs); err != nil {
+		return nil, err
 	}
 
 	states, err := batchLoadBreakerStates(ctx, tx, uniqueIDs)
