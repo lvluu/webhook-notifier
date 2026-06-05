@@ -217,7 +217,47 @@ func (s *Store) openBreaker(ctx context.Context, tx *sql.Tx, webhookID string, f
 		return false, fmt.Errorf("open breaker: %w", err)
 	}
 	rows, _ := result.RowsAffected()
-	return rows > 0, nil
+	if rows == 0 {
+		return false, nil
+	}
+	if err := deferBlockedDeliveries(ctx, tx, []string{webhookID}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// deferBlockedDeliveries pushes the ready deliveries of newly-opened breakers
+// out to their breaker_next_probe_at. While a breaker is open its deliveries
+// are unclaimable, but they otherwise keep next_attempt_at <= now() and pile up
+// as unfilterable ballast in idx_deliveries_ready: the claim ready-scan must
+// then read and discard the whole backlog via the breaker-eligibility join on
+// every cycle, because the breaker predicate sits past the LIMIT (finding B-3).
+//
+// Aligning their next_attempt_at with the probe schedule removes them from the
+// ready set until the breaker is eligible to probe again; at probe time they
+// become ready again and one is claimed as the half-open probe. GREATEST
+// preserves any delivery already scheduled past the probe time. Bounded by the
+// webhook's ready backlog and runs only at the (rare) open transition, so it
+// trades an occasional bulk write for read savings on every claim during an
+// outage.
+func deferBlockedDeliveries(ctx context.Context, tx *sql.Tx, webhookIDs []string) error {
+	if len(webhookIDs) == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE deliveries d
+		SET next_attempt_at = GREATEST(d.next_attempt_at, w.breaker_next_probe_at),
+		    updated_at = now()
+		FROM webhooks w
+		WHERE w.id = ANY($1::uuid[])
+		  AND d.webhook_id = w.id
+		  AND d.status IN ('pending', 'failed_retry')
+		  AND w.breaker_next_probe_at IS NOT NULL
+		  AND d.next_attempt_at < w.breaker_next_probe_at
+	`, webhookIDs); err != nil {
+		return fmt.Errorf("defer blocked deliveries: %w", err)
+	}
+	return nil
 }
 
 type breakerStateRow struct {
@@ -347,6 +387,9 @@ func batchOpenHalfOpenBreakers(ctx context.Context, tx *sql.Tx, webhookIDs []str
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate opened webhooks: %w", err)
 	}
+	if err := deferBlockedDeliveries(ctx, tx, opened); err != nil {
+		return nil, err
+	}
 	return opened, nil
 }
 
@@ -389,6 +432,9 @@ func batchOpenClosedBreakers(ctx context.Context, tx *sql.Tx, failureCounts map[
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate opened webhooks: %w", err)
+	}
+	if err := deferBlockedDeliveries(ctx, tx, opened); err != nil {
+		return nil, err
 	}
 	return opened, nil
 }
