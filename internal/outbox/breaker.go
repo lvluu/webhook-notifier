@@ -260,7 +260,7 @@ func deferBlockedDeliveries(ctx context.Context, tx *sql.Tx, webhookIDs []string
 			  AND w.breaker_next_probe_at IS NOT NULL
 			  AND d.next_attempt_at < w.breaker_next_probe_at
 			ORDER BY d.id
-			FOR NO KEY UPDATE OF d
+			FOR UPDATE OF d
 		)
 		UPDATE deliveries d
 		SET next_attempt_at = GREATEST(d.next_attempt_at, w.breaker_next_probe_at),
@@ -445,14 +445,6 @@ func nullIfEmpty(value string) sql.NullString {
 // workers mark deliveries for the same hot webhook during a partner outage. The
 // subsequent breaker UPDATEs then re-lock rows this transaction already holds,
 // which is a no-op regardless of the order the planner visits them in.
-//
-// It uses FOR NO KEY UPDATE, not FOR UPDATE, deliberately. The breaker writes
-// only ever touch non-key columns, so FOR NO KEY UPDATE is the strongest lock
-// they need — and crucially it does NOT conflict with the FOR KEY SHARE lock
-// that every `INSERT INTO deliveries` takes on its parent webhook row via the
-// foreign key. A plain FOR UPDATE here would serialize the breaker mark path
-// against the entire high-rate ingest path on the hot webhook row, turning a
-// rare breaker-vs-breaker cycle into a storm of breaker-vs-ingest deadlocks.
 func lockWebhooksOrdered(ctx context.Context, tx *sql.Tx, webhookIDs []string) error {
 	if len(webhookIDs) == 0 {
 		return nil
@@ -462,7 +454,7 @@ func lockWebhooksOrdered(ctx context.Context, tx *sql.Tx, webhookIDs []string) e
 		FROM webhooks
 		WHERE id = ANY($1::uuid[])
 		ORDER BY id
-		FOR NO KEY UPDATE
+		FOR UPDATE
 	`, webhookIDs); err != nil {
 		return fmt.Errorf("lock webhooks in order: %w", err)
 	}
