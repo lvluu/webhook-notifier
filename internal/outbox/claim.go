@@ -396,7 +396,7 @@ func scanClaimedDeliveries(rows *sql.Rows) ([]Delivery, error) {
 		if err := rows.Scan(
 			&d.ID, &d.EventID, &d.WebhookID, &d.CustomerID,
 			&d.CustomerClass,
-			&d.EventType, &d.Payload, &d.URL, &d.Secret,
+			&d.EventType, &d.Payload, &d.URL, &d.URLHost, &d.Secret,
 			&d.Status, &d.AttemptNumber, &d.NextAttemptAt, &d.ClaimedAt,
 			&d.LastError, &d.CreatedAt, &d.UpdatedAt,
 			&previousDelayMillis,
