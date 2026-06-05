@@ -26,6 +26,7 @@ All flags for `cmd/notifier`:
 | `--claim-batch-hint` | `64` | Upper bound for per-pick claim batch size. Must be `0` (unbounded) or greater than/equal to `--min-batch`. The worker clamps each scheduler `batchHint` (fairness weight) between `--min-batch` and this value. Lower favours fairness (worker yields to rotation sooner); higher favours throughput (more DB amortization per pick). Applied to both roundrobin and weighted scheduler. |
 | `--multi-pick` | `1` | Customers to batch per claim query (1 = single, >1 = `ClaimNextBatch`) |
 | `--host-cap` | `20` | Max concurrent in-flight requests per Integration Partner hostname |
+| `--delivery-concurrency` | `16` | Max concurrent in-flight delivery attempts per worker goroutine. Must be at least `1` |
 
 ### Timing
 
@@ -34,6 +35,7 @@ All flags for `cmd/notifier`:
 | `--discovery-interval` | `1s` | Claimable Customer discovery poll interval |
 | `--empty-claim-backoff` | `20ms` | Pause after an empty claim cycle (no work found) |
 | `--pending-sample-interval` | `5s` | Sample interval for the pending-delivery backlog gauge (0 disables) |
+| `--request-timeout` | `30s` | Per-Attempt HTTP request timeout. Bounds how long a stalled partner can hold a delivery slot (the host cap gates entry, not duration). Must be greater than `0` |
 
 ### Addressing
 
