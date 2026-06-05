@@ -58,6 +58,50 @@ func TestLockWebhooksOrderedPreventsLockCycle(t *testing.T) {
 	}
 }
 
+// TestLockWebhooksOrderedDoesNotBlockForeignKeyInserts guards against the
+// regression that a naive FOR UPDATE introduced: the breaker lock collided with
+// the FOR KEY SHARE lock that every `INSERT INTO deliveries` takes on its parent
+// webhook row (foreign key), serializing the whole breaker mark path against the
+// high-rate ingest path on hot webhooks and producing a storm of deadlocks.
+//
+// lockWebhooksOrdered must use FOR NO KEY UPDATE, which is compatible with
+// FOR KEY SHARE. This test holds the breaker lock in one transaction and asserts
+// a concurrent FOR KEY SHARE acquisition on the same row — exactly what a child
+// insert does — is NOT blocked. With FOR UPDATE the key-share waits and the
+// bounded context times out, failing the test.
+func TestLockWebhooksOrderedDoesNotBlockForeignKeyInserts(t *testing.T) {
+	ctx := context.Background()
+	db := newLockOrderTestDB(t, ctx)
+
+	wid := insertLockTestWebhook(t, ctx, db, "https://partner.example/fk")
+
+	holder, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin holder tx: %v", err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	if err := lockWebhooksOrdered(ctx, holder, []string{wid}); err != nil {
+		t.Fatalf("lockWebhooksOrdered: %v", err)
+	}
+
+	// Concurrent FK-style lock: what `INSERT INTO deliveries (... webhook_id ...)`
+	// takes on the parent webhook. Bounded so a blocking FOR UPDATE fails fast.
+	child, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin child tx: %v", err)
+	}
+	defer func() { _ = child.Rollback() }()
+
+	fkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if _, err := child.ExecContext(fkCtx, `
+		SELECT id FROM webhooks WHERE id = $1::uuid FOR KEY SHARE
+	`, wid); err != nil {
+		t.Fatalf("FK key-share lock was blocked by lockWebhooksOrdered (%v); "+
+			"breaker lock must be FOR NO KEY UPDATE so delivery inserts are not serialized", err)
+	}
+}
+
 // runOppositeOrderLockCycle runs two transactions that lock webhooks lo and hi
 // in opposite order. With preLock, each first acquires both via
 // lockWebhooksOrdered. Returns true if either transaction was aborted with a
