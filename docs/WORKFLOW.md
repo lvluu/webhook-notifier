@@ -48,8 +48,19 @@ state, plus the tuning knobs used by the service and benchmark harness.
 17. The Worker groups outcomes and writes set-based batch marks:
     `MarkSucceededBatch`, `MarkRetryBatch`, or `MarkDeadBatch`.
 18. Batch marks delete the `delivery_claims` row, insert Attempt records when
-    an HTTP Attempt happened, update `deliveries`, write `dead_letters` for
-    terminal failures, and update breaker state.
+    an HTTP Attempt happened, update `deliveries`, and write `dead_letters` for
+    terminal failures. They do **not** touch the Webhook breaker row — breaker
+    bookkeeping is deferred off the mark transaction (ADR-0015) so the
+    high-concurrency mark path does not contend on hot Webhook rows.
+18a. After a batch mark commits, the Worker enqueues breaker outcomes to a single
+    per-process `BreakerCoalescer`, which batches them and updates breaker state
+    (counter increment / reset, open / close) out of band.
+18b. A mark transaction is atomic: if it aborts on a transient DB error
+    (statement timeout 57014, deadlock 40P01) nothing is persisted. The Worker
+    classifies the error as transient (ADR-0014), backs off, and continues
+    instead of failing fatally. The Delivery stays claimed, its lease expires,
+    and it is re-claimed and re-marked. This is at-least-once, so a
+    deadlock-forced re-process may re-send the HTTP POST.
 19. Retryable Deliveries become claimable again when `next_attempt_at <= now()`.
 20. Terminal Deliveries remain in the live queue for the retention window, then
     the retention command archives them to `delivery_history`.

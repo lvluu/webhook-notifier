@@ -631,6 +631,68 @@
               }
             }
           }
+        },
+        {
+          "title": "Worker Transient DB Errors (rate by phase)",
+          "description": "Rate of transient DB errors (statement timeout 57014, deadlock 40P01, serialization, connection loss) the workers absorbed and retried instead of failing fatally. Non-zero is tolerated; a sustained rise means the database is shedding load (ADR-0014).",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 29
+          },
+          "targets": [
+            {
+              "expr": "sum by (phase) (rate(webhook_worker_transient_db_errors_total[$__rate_interval]))",
+              "legendFormat": "{{phase}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "rps"
+            }
+          }
+        },
+        {
+          "title": "Dropped Breaker Outcomes (bad above 0)",
+          "description": "Rate of breaker outcomes dropped because the per-process coalescer buffer was full. Should be 0 in normal operation; a sustained rise means the coalescer is not keeping up (stuck flush or saturation) (ADR-0015).",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 29
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(webhook_breaker_coalescer_dropped_total[$__rate_interval]))",
+              "legendFormat": "dropped"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "rps",
+              "custom": {
+                "thresholdsStyle": {
+                  "mode": "line"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.001
+                  }
+                ]
+              }
+            }
+          }
         }
       ]
     }

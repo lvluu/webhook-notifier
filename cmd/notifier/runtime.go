@@ -113,7 +113,7 @@ func defaultRuntimeDeps() runtimeDeps {
 			return roundrobin.New()
 		},
 		newStore: func(db *sql.DB, cfg workerRuntimeConfig) *outbox.Store {
-			return outbox.New(db)
+			return outbox.New(db, outbox.WithDeferredBreaker())
 		},
 		newLimiter: func(maxPerHost int) *worker.HostLimiter {
 			return worker.NewHostLimiter(worker.HostLimiterConfig{MaxPerHost: maxPerHost})
@@ -163,6 +163,11 @@ func startDeliveryRuntimeWithDeps(
 	limiter := deps.newLimiter(cfg.HostConcurrencyCap)
 	httpClient := worker.NewHTTPClient(worker.DefaultHTTPConfig())
 
+	// Single per-process consumer of breaker outcomes. The store is built with
+	// WithDeferredBreaker, so workers enqueue outcomes here instead of updating
+	// the hot webhook breaker rows inside their mark transactions (ADR-0015).
+	breakerCoalescer := outbox.NewBreakerCoalescer(outboxStore, logger.With("component", "breaker-coalescer"))
+
 	var broadcastDB *sql.DB
 	pgNotifyDSN := cfg.PgNotifyDSN
 	if pgNotifyDSN == "" {
@@ -201,6 +206,7 @@ func startDeliveryRuntimeWithDeps(
 				worker.WithHTTPClient(httpClient),
 				worker.WithHostLimiter(limiter),
 				worker.WithLogger(logger.With("component", "worker", "worker_id", workerID)),
+				worker.WithBreakerSink(breakerCoalescer),
 			)
 			if err != nil {
 				return fmt.Errorf("config: %w", err)
@@ -208,6 +214,8 @@ func startDeliveryRuntimeWithDeps(
 			return w.Run(ctx, outboxStore)
 		})
 	}
+
+	group.Go("breaker coalescer", breakerCoalescer.Run)
 
 	group.Go("discovery", func(ctx context.Context) error {
 		return deps.runDiscovery(ctx, outboxStore, sched, cfg.Discovery)

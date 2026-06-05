@@ -76,6 +76,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: unless-stopped
     command:
       - notifier
       - -db

@@ -106,6 +106,7 @@ type Store struct {
 	db            *sql.DB
 	claimLease    time.Duration
 	breakerConfig BreakerConfig
+	deferBreaker  bool
 }
 
 // Option configures a Store.
@@ -125,6 +126,19 @@ func WithClaimLease(claimLease time.Duration) Option {
 func WithBreakerConfig(config BreakerConfig) Option {
 	return func(s *Store) {
 		s.breakerConfig = normalizeBreakerConfig(config)
+	}
+}
+
+// WithDeferredBreaker makes the batch mark methods (MarkSucceededBatch,
+// MarkRetryBatch, MarkDeadBatch) skip their inline circuit-breaker writes. The
+// caller is then responsible for applying breaker outcomes out of band via
+// ApplyBreakerOutcomes — typically through a single per-process BreakerCoalescer
+// goroutine. This keeps the high-concurrency mark transactions from all updating
+// the same hot webhook breaker rows, which under a partner outage produced a
+// storm of deadlocks (ADR-0015). The single-delivery mark path is unaffected.
+func WithDeferredBreaker() Option {
+	return func(s *Store) {
+		s.deferBreaker = true
 	}
 }
 

@@ -15,6 +15,12 @@ import (
 const (
 	idleBackoff              = 50 * time.Millisecond
 	defaultEmptyClaimBackoff = 20 * time.Millisecond
+	// transientErrorBackoff is the pause after a recoverable database error
+	// (statement timeout, deadlock, connection churn). Long enough to let an
+	// overloaded database shed load, short enough to resume promptly. Kept
+	// modest so a single replica does not stall its whole worker pool on a
+	// transient blip.
+	transientErrorBackoff = 250 * time.Millisecond
 )
 
 func (w *Worker) emptyClaimDelay() time.Duration {
@@ -43,6 +49,12 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			if isTransientDBError(err) {
+				if waitErr := w.backoffTransient(ctx, "claim", err); waitErr != nil {
+					return waitErr
+				}
+				continue
+			}
 			return err
 		}
 
@@ -56,8 +68,40 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 		}
 
 		if err := w.processDeliveries(ctx, store, deliveries); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if isTransientDBError(err) {
+				if waitErr := w.backoffTransient(ctx, "mark", err); waitErr != nil {
+					return waitErr
+				}
+				continue
+			}
 			return err
 		}
+	}
+}
+
+// backoffTransient logs a recoverable database error, records it for
+// monitoring, and pauses before the next loop iteration. It returns a non-nil
+// error only if the run context is canceled during the pause, in which case the
+// caller should stop. A transient error must never tear down the replica: every
+// worker shares one database, so a fatal return here cascades into a fleet-wide
+// shutdown (see isTransientDBError).
+func (w *Worker) backoffTransient(ctx context.Context, phase string, cause error) error {
+	if w.Logger != nil {
+		w.Logger.Warn("transient database error; backing off and retrying",
+			"phase", phase,
+			"backoff", transientErrorBackoff,
+			"error", cause,
+		)
+	}
+	observe.IncWorkerTransientDBError(phase)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(transientErrorBackoff):
+		return nil
 	}
 }
 
@@ -193,6 +237,12 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 
 	var succeeded, retries, dead []outbox.BatchMarkItem
 	var requeued []string
+	// Breaker outcomes are collected here and enqueued to the per-process
+	// coalescer only after all marks commit, so the hot webhook breaker rows are
+	// not updated inside these high-concurrency mark transactions (ADR-0015).
+	// Nil sink (e.g. tests, breaker disabled) means the store applies breaker
+	// state inline as before.
+	var breakerOutcomes []outbox.BreakerOutcome
 
 	for _, r := range results {
 		delivery, outcome := r.delivery, r.outcome
@@ -221,6 +271,13 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 				Lifetime:      outcome.lifetime,
 				AttemptNumber: delivery.AttemptNumber,
 			})
+			if w.BreakerSink != nil {
+				breakerOutcomes = append(breakerOutcomes, outbox.BreakerOutcome{
+					WebhookID:  delivery.WebhookID,
+					DeliveryID: delivery.ID,
+					Success:    true,
+				})
+			}
 			log.Debug("delivery succeeded",
 				"status_code", outcome.statusCode,
 				"duration_ms", outcome.duration.Milliseconds(),
@@ -235,6 +292,13 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 				Lifetime:      outcome.lifetime,
 				AttemptNumber: delivery.AttemptNumber,
 			})
+			if w.BreakerSink != nil {
+				breakerOutcomes = append(breakerOutcomes, outbox.BreakerOutcome{
+					WebhookID:  delivery.WebhookID,
+					DeliveryID: delivery.ID,
+					Reason:     outcome.reason,
+				})
+			}
 			log.Warn("delivery dead",
 				"reason", outcome.reason,
 				"status_code", outcome.statusCode,
@@ -249,6 +313,13 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 				Delay:         outcome.delay,
 				AttemptNumber: delivery.AttemptNumber,
 			})
+			if w.BreakerSink != nil {
+				breakerOutcomes = append(breakerOutcomes, outbox.BreakerOutcome{
+					WebhookID:  delivery.WebhookID,
+					DeliveryID: delivery.ID,
+					Reason:     outcome.errorClass,
+				})
+			}
 			log.Warn("delivery scheduled for retry",
 				"reason", outcome.errorClass,
 				"retry_delay_ms", outcome.delay.Milliseconds(),
@@ -297,6 +368,13 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 			customerClass := observe.CustomerClassFromValue(classByID[item.DeliveryID])
 			recordDeadMetrics(customerClass, item.Lifetime.Seconds(), item.AttemptNumber, item.Reason)
 		}
+	}
+
+	// All marks committed: hand breaker outcomes to the coalescer for out-of-band
+	// application. Done last so a failed mark (early return above) never records
+	// a breaker outcome for work that was not persisted.
+	if w.BreakerSink != nil && len(breakerOutcomes) > 0 {
+		w.BreakerSink.Enqueue(breakerOutcomes)
 	}
 
 	return nil
