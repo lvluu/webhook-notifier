@@ -113,10 +113,16 @@ func (s *Store) recordBreakerFailure(ctx context.Context, tx *sql.Tx, webhookID 
 	var state string
 	var failureCount int
 	var cooldownMillis int64
+	// FOR NO KEY UPDATE locks the webhook row for this transaction so the
+	// read-then-guarded-UPDATE sequence below is race-free: a concurrent
+	// failure/transition cannot slip between the SELECT and the UPDATE and drop
+	// this increment. NO KEY UPDATE (not FOR UPDATE) stays compatible with the
+	// FK FOR KEY SHARE that delivery inserts take on the parent webhook.
 	err := tx.QueryRowContext(ctx, `
 		SELECT breaker_state, breaker_failure_count, breaker_cooldown_ms
 		FROM webhooks
 		WHERE id = $1::uuid
+		FOR NO KEY UPDATE
 	`, webhookID).Scan(&state, &failureCount, &cooldownMillis)
 	if err != nil {
 		return false, fmt.Errorf("load webhook breaker: %w", err)

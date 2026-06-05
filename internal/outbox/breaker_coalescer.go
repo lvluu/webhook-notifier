@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/lvluu/webhook-notifier/internal/observe"
 )
 
 // BreakerOutcome is one delivery attempt result relevant to the circuit
@@ -156,6 +158,7 @@ func (c *BreakerCoalescer) Enqueue(outcomes []BreakerOutcome) {
 		select {
 		case c.ch <- o:
 		default:
+			observe.IncBreakerCoalescerDropped()
 			if c.logger != nil {
 				c.logger.Warn("breaker outcome buffer full; dropping breaker sample",
 					"webhook_id", o.WebhookID, "delivery_id", o.DeliveryID)

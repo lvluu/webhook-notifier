@@ -32,6 +32,7 @@ var (
 	WebhookBreakerTripsTotal            *prometheus.CounterVec
 	WebhookPgNotifyBroadcastTotal       *prometheus.CounterVec
 	WebhookWorkerTransientDBErrorsTotal *prometheus.CounterVec
+	WebhookBreakerCoalescerDroppedTotal prometheus.Counter
 	metricsRegistrationWarned           atomic.Bool
 )
 
@@ -61,6 +62,7 @@ func ResetMetricsForTest() {
 	WebhookBreakerTripsTotal = nil
 	WebhookPgNotifyBroadcastTotal = nil
 	WebhookWorkerTransientDBErrorsTotal = nil
+	WebhookBreakerCoalescerDroppedTotal = nil
 	metricsRegistrationWarned.Store(false)
 }
 
@@ -203,6 +205,11 @@ func initMetrics(reg prometheus.Registerer) {
 		Help: "Total number of transient database errors a worker absorbed (backed off and retried) instead of treating as fatal, by loop phase.",
 	}, []string{"phase"})
 
+	WebhookBreakerCoalescerDroppedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "webhook_breaker_coalescer_dropped_total",
+		Help: "Total number of breaker outcomes dropped because the per-process coalescer buffer was full. A sustained rise indicates the coalescer is not keeping up (stuck flush or saturation), distinct from normal operation.",
+	})
+
 	reg.MustRegister(
 		WebhookDeliveriesTotal,
 		WebhookDeliveryLatencySeconds,
@@ -226,5 +233,6 @@ func initMetrics(reg prometheus.Registerer) {
 		WebhookBreakerTripsTotal,
 		WebhookPgNotifyBroadcastTotal,
 		WebhookWorkerTransientDBErrorsTotal,
+		WebhookBreakerCoalescerDroppedTotal,
 	)
 }

@@ -210,6 +210,15 @@ func IncWorkerTransientDBError(phase string) {
 	WebhookWorkerTransientDBErrorsTotal.WithLabelValues(phase).Add(1)
 }
 
+// IncBreakerCoalescerDropped safely counts a breaker outcome dropped because the
+// per-process coalescer buffer was full, skipping if metrics are not registered.
+func IncBreakerCoalescerDropped() {
+	if !metricsRegistered() {
+		return
+	}
+	WebhookBreakerCoalescerDroppedTotal.Add(1)
+}
+
 // IncPgNotifyBroadcast safely increments the remote wake broadcaster outcome.
 func IncPgNotifyBroadcast(result string) {
 	if !metricsRegistered() {
