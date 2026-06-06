@@ -105,9 +105,10 @@ No single scenario proves every requirement. The suite is meant to be read toget
 The raised stress profile intentionally exposes where local throughput starts
 to flatten:
 
-- `production_workload`: claimable-Customer discovery dominates DB time with
-  20k sparse Small Customers. The 32-worker run is the main throughput jump;
-  64 workers adds only a smaller gain while empty claims increase.
+- `production_workload`: breaker-aware claimable-Customer discovery was reduced
+  from the dominant DB hotspot to a secondary cost under 20k sparse Small
+  Customers. The remaining ceiling is multi-Customer claim SQL plus batch mark
+  SQL; 64 workers still improves throughput but adds more empty-claim churn.
 - `horizontal_scale`: after tuning the benchmark child notifiers to avoid
   artificial host-cap requeue churn, dense throughput scales from 1 to 2
   replicas and then knees at 4 replicas. The remaining hotspots are

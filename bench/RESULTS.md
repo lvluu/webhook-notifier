@@ -15,9 +15,10 @@ reference.
 ## Current Bottleneck Findings
 
 - `production_workload` stress now drains 135k Deliveries per worker-count
-  run. The main DB hotspot is claimable-Customer discovery under 20k sparse
-  Small Customers; throughput jumps from 16 to 32 workers, then mostly flattens
-  at 64 workers as discovery/coordination cost rises.
+  run through the breaker-aware discovery path. Issue #131 reduced
+  claimable-Customer discovery from the dominant DB hotspot (~134-153s total
+  DB time in stress runs) to a secondary cost (~9.2s); multi-Customer claim SQL
+  and batch mark SQL are now the top two query costs.
 - `horizontal_scale` stress now runs 60k sparse Deliveries plus 100k dense
   Deliveries per replica-count phase. After removing benchmark-only host-cap
   requeue churn, dense throughput scales strongly from 1 to 2 replicas and then

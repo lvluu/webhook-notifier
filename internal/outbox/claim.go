@@ -432,6 +432,38 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 		return nil, fmt.Errorf("limit must be >= 1")
 	}
 
+	if s.breakerConfig.FailureThreshold > 0 && limit >= largeDiscoveryPageLimit {
+		return s.discoverClaimableCustomersDistinctWithBreaker(ctx, afterCustomerID, limit)
+	}
+	return s.discoverClaimableCustomersRecursive(ctx, afterCustomerID, limit)
+}
+
+const largeDiscoveryPageLimit = 1000
+
+func (s *Store) discoverClaimableCustomersDistinctWithBreaker(ctx context.Context, afterCustomerID string, limit int) ([]string, error) {
+	claimSelection := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
+	ready := claimSelection.ReadyWithoutClaim()
+	breakerEligible := claimSelection.BreakerEligible()
+
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT DISTINCT ON (d.customer_id) d.customer_id
+		FROM deliveries d
+		JOIN webhooks w ON w.id = d.webhook_id
+		WHERE d.customer_id > $1
+		  AND %s
+		  AND %s
+		ORDER BY d.customer_id
+		LIMIT $2
+	`, ready, breakerEligible), afterCustomerID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("discover claimable customers: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	return scanClaimableCustomers(rows)
+}
+
+func (s *Store) discoverClaimableCustomersRecursive(ctx context.Context, afterCustomerID string, limit int) ([]string, error) {
 	claimSelection := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
 	ready := claimSelection.ReadyWithoutClaim()
 	breakerEligible := claimSelection.BreakerEligible()
@@ -488,6 +520,10 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 	}
 	defer func() { _ = rows.Close() }()
 
+	return scanClaimableCustomers(rows)
+}
+
+func scanClaimableCustomers(rows *sql.Rows) ([]string, error) {
 	var customerIDs []string
 	for rows.Next() {
 		var customerID string
