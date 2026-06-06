@@ -131,6 +131,9 @@ func (w *Worker) claimSingle(ctx context.Context, store DeliveryStore) ([]outbox
 		return nil, err
 	}
 	if !ok {
+		if err := w.Scheduler.WaitForWork(ctx); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
 
@@ -176,6 +179,9 @@ func (w *Worker) claimMulti(ctx context.Context, store DeliveryStore) ([]outbox.
 	}
 
 	if len(customerIDs) == 0 {
+		if err := w.Scheduler.WaitForWork(ctx); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
 

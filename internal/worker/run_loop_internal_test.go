@@ -11,8 +11,9 @@ type emptyDelayTestScheduler struct{}
 func (emptyDelayTestScheduler) Pick(context.Context) (string, uint32, bool, error) {
 	return "", 0, false, nil
 }
-func (emptyDelayTestScheduler) Notify(string) {}
-func (emptyDelayTestScheduler) Remove(string) {}
+func (emptyDelayTestScheduler) WaitForWork(context.Context) error { return nil }
+func (emptyDelayTestScheduler) Notify(string)                    {}
+func (emptyDelayTestScheduler) Remove(string)                    {}
 
 func TestEmptyClaimDelayBackoffGrowsToCap(t *testing.T) {
 	w := New(emptyDelayTestScheduler{}, WithEmptyClaimBackoff(20*time.Millisecond))

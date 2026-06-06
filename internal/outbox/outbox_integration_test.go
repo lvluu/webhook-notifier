@@ -38,8 +38,9 @@ type integrationStubScheduler struct{}
 func (integrationStubScheduler) Pick(_ context.Context) (scheduler.CustomerID, uint32, bool, error) {
 	return "", 0, false, nil
 }
-func (integrationStubScheduler) Notify(scheduler.CustomerID) {}
-func (integrationStubScheduler) Remove(scheduler.CustomerID) {}
+func (integrationStubScheduler) WaitForWork(context.Context) error  { return nil }
+func (integrationStubScheduler) Notify(scheduler.CustomerID)        {}
+func (integrationStubScheduler) Remove(scheduler.CustomerID)        {}
 
 func newIntegrationWorker(opts ...worker.Option) *worker.Worker {
 	return worker.New(integrationStubScheduler{}, opts...)

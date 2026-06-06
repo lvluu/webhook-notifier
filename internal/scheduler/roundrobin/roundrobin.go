@@ -31,6 +31,7 @@ type roundRobin struct {
 	list   *list.List
 	index  map[scheduler.CustomerID]*list.Element
 	cursor *list.Element
+	wake   chan struct{}
 }
 
 // New returns a round-robin Scheduler with O(1) Notify and Remove.
@@ -38,6 +39,7 @@ func New() scheduler.Scheduler {
 	r := &roundRobin{
 		list:  list.New(),
 		index: make(map[scheduler.CustomerID]*list.Element),
+		wake:  make(chan struct{}),
 	}
 	return r
 }
@@ -68,6 +70,26 @@ func (r *roundRobin) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bo
 	return customerID, ClaimBatchSize, true, nil
 }
 
+// WaitForWork blocks until at least one Customer is registered or ctx is
+// cancelled. Callers use this to avoid polling the database when the
+// scheduler has no work queued.
+func (r *roundRobin) WaitForWork(ctx context.Context) error {
+	r.mu.Lock()
+	if r.list.Len() > 0 {
+		r.mu.Unlock()
+		return nil
+	}
+	wake := r.wake
+	r.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-wake:
+		return nil
+	}
+}
+
 // Remove removes the Customer from the rotation. O(1). No-op if not present.
 func (r *roundRobin) Remove(customerID scheduler.CustomerID) {
 	if customerID == "" {
@@ -91,7 +113,7 @@ func (r *roundRobin) Remove(customerID scheduler.CustomerID) {
 }
 
 // Notify registers the Customer for round-robin rotation if not already
-// present. Idempotent. O(1).
+// present. Idempotent. O(1). Wakes any workers blocked in WaitForWork.
 func (r *roundRobin) Notify(customerID scheduler.CustomerID) {
 	if customerID == "" {
 		return
@@ -104,5 +126,10 @@ func (r *roundRobin) Notify(customerID scheduler.CustomerID) {
 		return
 	}
 
+	wasEmpty := r.list.Len() == 0
 	r.index[customerID] = r.list.PushBack(customerID)
+	if wasEmpty {
+		close(r.wake)
+		r.wake = make(chan struct{})
+	}
 }

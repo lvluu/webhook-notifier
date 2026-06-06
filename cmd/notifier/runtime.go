@@ -25,6 +25,7 @@ type roundrobinScheduler interface {
 	Notify(string)
 	Remove(string)
 	Pick(context.Context) (string, uint32, bool, error)
+	WaitForWork(context.Context) error
 }
 
 type runtimeDeps struct {

@@ -126,7 +126,7 @@ services:
       - -workers
       - "16"
       - -min-batch
-      - "4"
+      - "32"
       - -multi-pick
       - "8"
       - -host-cap

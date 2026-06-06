@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/lvluu/webhook-notifier/internal/scheduler/roundrobin"
 )
@@ -102,6 +103,65 @@ func TestRoundRobin_PickRespectsContextCancellation(t *testing.T) {
 	cancel()
 
 	_, _, _, err := s.Pick(ctx)
+	if err == nil {
+		t.Fatal("expected error from cancelled context, got nil")
+	}
+}
+
+// TestRoundRobin_WaitForWorkBlocksUntilNotify verifies that WaitForWork
+// blocks on an empty scheduler and returns once a customer is notified.
+func TestRoundRobin_WaitForWorkBlocksUntilNotify(t *testing.T) {
+	t.Parallel()
+
+	s := roundrobin.New()
+	done := make(chan error, 1)
+	go func() {
+		done <- s.WaitForWork(context.Background())
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("WaitForWork returned before Notify")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	s.Notify("cus_A")
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WaitForWork returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WaitForWork did not return after Notify")
+	}
+}
+
+// TestRoundRobin_WaitForWorkReturnsImmediatelyWhenNotEmpty verifies that
+// WaitForWork returns immediately when the scheduler already has customers.
+func TestRoundRobin_WaitForWorkReturnsImmediatelyWhenNotEmpty(t *testing.T) {
+	t.Parallel()
+
+	s := roundrobin.New()
+	s.Notify("cus_A")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := s.WaitForWork(ctx); err != nil {
+		t.Fatalf("WaitForWork returned error: %v", err)
+	}
+}
+
+// TestRoundRobin_WaitForWorkRespectsContextCancellation verifies that
+// WaitForWork returns ctx.Err() when the context is cancelled.
+func TestRoundRobin_WaitForWorkRespectsContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	s := roundrobin.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := s.WaitForWork(ctx)
 	if err == nil {
 		t.Fatal("expected error from cancelled context, got nil")
 	}
