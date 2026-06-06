@@ -55,7 +55,7 @@ type partnerResilienceProfile struct {
 }
 
 func partnerResilienceProfileFromEnv() (partnerResilienceProfile, error) {
-	raw, name, err := loadBenchProfileConfig("partner_resilience")
+	raw, name, err := LoadBenchProfileConfig("partner_resilience")
 	if err != nil {
 		return partnerResilienceProfile{}, err
 	}
@@ -107,7 +107,7 @@ func partnerResilienceDiscoveryConfig(profile partnerResilienceProfile) worker.D
 // RunPartnerResilience executes the folded partner reliability drill-down.
 func RunPartnerResilience(ctx context.Context) error {
 	observe.RegisterMetrics(prometheus.NewRegistry())
-	db, cleanup, err := openBenchDatabase(ctx)
+	db, cleanup, err := OpenBenchDatabase(ctx)
 	if err != nil {
 		return fmt.Errorf("open bench db: %w", err)
 	}
@@ -124,21 +124,21 @@ func RunPartnerResilience(ctx context.Context) error {
 
 	var results partnerResilienceResults
 
-	// Phase A — transient/recovering partners (from Scenario 2)
+	// Phase A — transient/recovering partners (from Transient Recovery)
 	phaseA, err := runPartnerResiliencePhaseA(ctx, db, profile)
 	if err != nil {
 		return fmt.Errorf("phase A (transient/recovering): %w", err)
 	}
 	results.PhaseA = phaseA
 
-	// Phase B — terminal 4xx fast-fail (from Scenario 3)
+	// Phase B — terminal 4xx fast-fail (from Terminal Fast-Fail)
 	phaseB, err := runPartnerResiliencePhaseB(ctx, db, profile)
 	if err != nil {
 		return fmt.Errorf("phase B (terminal 4xx): %w", err)
 	}
 	results.PhaseB = phaseB
 
-	// Phase C — dead partner breaker isolation (from Scenario 5)
+	// Phase C — dead partner breaker isolation (from Breaker Isolation)
 	phaseC, err := runPartnerResiliencePhaseC(ctx, db, profile)
 	if err != nil {
 		return fmt.Errorf("phase C (breaker isolation): %w", err)
@@ -180,7 +180,7 @@ func partnerResiliencePassed(results partnerResilienceResults) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Phase A — Transient + Recovering Partners (Scenario 2)
+// Phase A — Transient + Recovering Partners (Transient Recovery)
 // ---------------------------------------------------------------------------
 
 type partnerResiliencePhaseAResult struct {
@@ -210,7 +210,7 @@ var partnerResiliencePhaseAPartners = []struct {
 }
 
 func runPartnerResiliencePhaseA(ctx context.Context, db *sql.DB, profile partnerResilienceProfile) (partnerResiliencePhaseAResult, error) {
-	if err := resetBenchData(ctx, db); err != nil {
+	if err := ResetBenchData(ctx, db); err != nil {
 		return partnerResiliencePhaseAResult{}, fmt.Errorf("reset: %w", err)
 	}
 
@@ -294,7 +294,7 @@ func runPartnerResiliencePhaseA(ctx context.Context, db *sql.DB, profile partner
 	pollCtx, cancelPoll := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancelPoll()
 	for {
-		pending, err := countPendingDeliveries(pollCtx, db)
+		pending, err := CountPendingDeliveries(pollCtx, db)
 		if err != nil {
 			return partnerResiliencePhaseAResult{}, fmt.Errorf("poll: %w", err)
 		}
@@ -314,8 +314,8 @@ func runPartnerResiliencePhaseA(ctx context.Context, db *sql.DB, profile partner
 	cancelWorkers()
 	workerWg.Wait()
 
-	totalDeliveries, _ := queryTotalDeliveries(ctx, db)
-	terminal, _ := queryTerminalDeliveries(ctx, db)
+	totalDeliveries, _ := QueryTotalDeliveries(ctx, db)
+	terminal, _ := QueryTerminalDeliveries(ctx, db)
 	partnerA, _ := queryPartnerLatencyExact(ctx, db, "pr-partner-a.test")
 	recovery, _ := queryPartnerRecoveryExact(ctx, db, "pr-partner-c.test", outageStart, outageEnd)
 	jitter, _ := queryPartnerRetryBucketsExact(ctx, db, "pr-partner-c.test", outageEnd)
@@ -346,7 +346,7 @@ func runPartnerResiliencePhaseA(ctx context.Context, db *sql.DB, profile partner
 }
 
 // ---------------------------------------------------------------------------
-// Phase B — Terminal 4xx Fast-Fail (Scenario 3)
+// Phase B — Terminal 4xx Fast-Fail (Terminal Fast-Fail)
 // ---------------------------------------------------------------------------
 
 type partnerResiliencePhaseBResult struct {
@@ -365,7 +365,7 @@ type partnerResiliencePhaseBResult struct {
 }
 
 func runPartnerResiliencePhaseB(ctx context.Context, db *sql.DB, profile partnerResilienceProfile) (partnerResiliencePhaseBResult, error) {
-	if err := resetBenchData(ctx, db); err != nil {
+	if err := ResetBenchData(ctx, db); err != nil {
 		return partnerResiliencePhaseBResult{}, fmt.Errorf("reset: %w", err)
 	}
 
@@ -422,7 +422,7 @@ func runPartnerResiliencePhaseB(ctx context.Context, db *sql.DB, profile partner
 	for range eventCount {
 		if _, err := ingestStore.Submit(ctx, ingest.Event{
 			CustomerID: customerID,
-			Type:       eventType,
+			Type:       EventType,
 			Payload:    []byte(`{"event_name":"subscriber.created"}`),
 		}); err != nil {
 			return partnerResiliencePhaseBResult{}, fmt.Errorf("submit: %w", err)
@@ -432,7 +432,7 @@ func runPartnerResiliencePhaseB(ctx context.Context, db *sql.DB, profile partner
 	pollCtx, cancelPoll := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancelPoll()
 	for {
-		pending, err := countPendingDeliveries(pollCtx, db)
+		pending, err := CountPendingDeliveries(pollCtx, db)
 		if err != nil {
 			return partnerResiliencePhaseBResult{}, fmt.Errorf("poll: %w", err)
 		}
@@ -453,8 +453,8 @@ func runPartnerResiliencePhaseB(ctx context.Context, db *sql.DB, profile partner
 	workerWg.Wait()
 
 	expectedDeliveries := eventCount * 2
-	totalDeliveries, _ := queryTotalDeliveries(ctx, db)
-	terminal, _ := queryTerminalDeliveries(ctx, db)
+	totalDeliveries, _ := QueryTotalDeliveries(ctx, db)
+	terminal, _ := QueryTerminalDeliveries(ctx, db)
 
 	good := partnerResilienceQueryWebhookResult(ctx, db, goodURL)
 	bad := partnerResilienceQueryWebhookResult(ctx, db, badURL)
@@ -500,7 +500,7 @@ func partnerResilienceQueryWebhookResult(ctx context.Context, db *sql.DB, webhoo
 }
 
 // ---------------------------------------------------------------------------
-// Phase C — Dead Partner Breaker Isolation (Scenario 5)
+// Phase C — Dead Partner Breaker Isolation (Breaker Isolation)
 // ---------------------------------------------------------------------------
 
 type partnerResiliencePhaseCResult struct {
@@ -578,7 +578,7 @@ type prPhaseCRunResult struct {
 	Duration           time.Duration
 	BaselineGoroutines int
 	FinalGoroutines    int
-	HealthyLatencies   []scenario5CustomerLatency
+	HealthyLatencies   []BreakerIsolationCustomerLatency
 	DeadAttempts       int
 	DeadPending        int
 	BreakerOpen        bool
@@ -587,7 +587,7 @@ type prPhaseCRunResult struct {
 }
 
 func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile partnerResilienceProfile, deadPartner bool) (prPhaseCRunResult, error) {
-	if err := resetBenchData(ctx, db); err != nil {
+	if err := ResetBenchData(ctx, db); err != nil {
 		return prPhaseCRunResult{}, fmt.Errorf("reset: %w", err)
 	}
 
@@ -665,7 +665,7 @@ func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile part
 		}
 		var eventID string
 		if err := tx.QueryRowContext(ctx, `INSERT INTO events (customer_id, type, payload) VALUES ($1, $2, $3) RETURNING id`,
-			customerID, eventType, []byte(`{}`)).Scan(&eventID); err != nil {
+			customerID, EventType, []byte(`{}`)).Scan(&eventID); err != nil {
 			_ = tx.Rollback()
 			return prPhaseCRunResult{}, fmt.Errorf("insert event: %w", err)
 		}
@@ -741,7 +741,7 @@ func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile part
 
 	if deadPartner {
 		deadCustomerID := ids[0]
-		totalTimeout, pollInterval := scenario5BreakerPollingConfig()
+		totalTimeout, pollInterval := BreakerIsolationBreakerPollingConfig()
 		pollCtx, cancel := context.WithTimeout(ctx, totalTimeout)
 		defer cancel()
 	breakerPollLoop:
@@ -825,7 +825,7 @@ func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile part
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
-		var lat scenario5CustomerLatency
+		var lat BreakerIsolationCustomerLatency
 		if err := rows.Scan(&lat.CustomerID, &lat.ControlP95); err != nil {
 			return prPhaseCRunResult{}, fmt.Errorf("scan healthy latency: %w", err)
 		}
@@ -934,7 +934,7 @@ func submitPartnerResiliencePhaseAEvents(ctx context.Context, store *ingest.Stor
 		for range eventsPerCustomer {
 			if _, err := store.Submit(ctx, ingest.Event{
 				CustomerID: customerID,
-				Type:       eventType,
+				Type:       EventType,
 				Payload:    []byte(`{"event_name":"subscriber.created"}`),
 			}); err != nil {
 				return fmt.Errorf("submit: %w", err)
@@ -951,8 +951,8 @@ func submitPartnerResiliencePhaseAEvents(ctx context.Context, store *ingest.Stor
 	return nil
 }
 
-func queryPartnerLatencyExact(ctx context.Context, db *sql.DB, host string) (partnerLatencyStats, error) {
-	var stats partnerLatencyStats
+func queryPartnerLatencyExact(ctx context.Context, db *sql.DB, host string) (PartnerLatencyStats, error) {
+	var stats PartnerLatencyStats
 	err := db.QueryRowContext(ctx, `
 		SELECT COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (d.updated_at - d.created_at)) * 1000), 0)
 		FROM deliveries d
@@ -963,8 +963,8 @@ func queryPartnerLatencyExact(ctx context.Context, db *sql.DB, host string) (par
 	return stats, err
 }
 
-func queryPartnerRecoveryExact(ctx context.Context, db *sql.DB, host string, outageStart, outageEnd time.Time) (partnerRecoveryStats, error) {
-	var stats partnerRecoveryStats
+func queryPartnerRecoveryExact(ctx context.Context, db *sql.DB, host string, outageStart, outageEnd time.Time) (PartnerRecoveryStats, error) {
+	var stats PartnerRecoveryStats
 	err := db.QueryRowContext(ctx, `
 		SELECT COUNT(*), COUNT(*) FILTER (WHERE d.status = 'succeeded' AND d.updated_at >= $3)
 		FROM deliveries d
@@ -975,8 +975,8 @@ func queryPartnerRecoveryExact(ctx context.Context, db *sql.DB, host string, out
 	return stats, err
 }
 
-func queryPartnerRetryBucketsExact(ctx context.Context, db *sql.DB, host string, recoveryAt time.Time) (retryBucketStats, error) {
-	var stats retryBucketStats
+func queryPartnerRetryBucketsExact(ctx context.Context, db *sql.DB, host string, recoveryAt time.Time) (RetryBucketStats, error) {
+	var stats RetryBucketStats
 	err := db.QueryRowContext(ctx, `
 		WITH buckets AS (
 			SELECT date_trunc('second', da.sent_at) AS bucket, COUNT(*) AS attempts
@@ -1075,20 +1075,20 @@ Folded from the legacy Scenarios 2, 3, and 5.
 		results.PhaseA.PartnerAP99Ms,
 		results.PhaseA.RecoverySucceeded, results.PhaseA.RecoveryTotal,
 		results.PhaseA.JitterMaxPerSecond, results.PhaseA.JitterTotal,
-		passFail(results.PhaseA.AllTerminalOK), passFail(results.PhaseA.RecoveryOK),
-		passFail(results.PhaseA.PartnerAOK), passFail(results.PhaseA.JitterOK),
+		PassFail(results.PhaseA.AllTerminalOK), PassFail(results.PhaseA.RecoveryOK),
+		PassFail(results.PhaseA.PartnerAOK), PassFail(results.PhaseA.JitterOK),
 		results.PhaseB.EventCount, results.PhaseB.ExpectedDeliveries,
 		results.PhaseB.TotalDeliveries, results.PhaseB.TerminalDeliveries,
 		results.PhaseB.GoodSucceeded, results.PhaseB.GoodTotal,
 		results.PhaseB.BadDead, results.PhaseB.BadTotal,
 		results.PhaseB.RetryWaste,
-		passFail(results.PhaseB.AllTerminalOK), passFail(results.PhaseB.GoodOK), passFail(results.PhaseB.BadOK),
+		PassFail(results.PhaseB.AllTerminalOK), PassFail(results.PhaseB.GoodOK), PassFail(results.PhaseB.BadOK),
 		results.PhaseC.ControlDuration.Round(time.Millisecond), results.PhaseC.DeadDuration.Round(time.Millisecond),
 		results.PhaseC.BaselineGoroutines, results.PhaseC.FinalGoroutines,
 		results.PhaseC.DeadAttempts, results.PhaseC.DeadAttemptsLimit, results.PhaseC.DeadPending,
-		passFail(results.PhaseC.HealthyWithinLimit), passFail(results.PhaseC.BreakerOpened),
-		passFail(results.PhaseC.BreakerHalfOpen), passFail(results.PhaseC.BreakerReopened),
-		passFail(results.PhaseC.GoroutineOK), passFail(results.PhaseC.DeadAttemptsOK), passFail(results.PhaseC.SkippedOK),
+		PassFail(results.PhaseC.HealthyWithinLimit), PassFail(results.PhaseC.BreakerOpened),
+		PassFail(results.PhaseC.BreakerHalfOpen), PassFail(results.PhaseC.BreakerReopened),
+		PassFail(results.PhaseC.GoroutineOK), PassFail(results.PhaseC.DeadAttemptsOK), PassFail(results.PhaseC.SkippedOK),
 	)
 	return f.Close()
 }
