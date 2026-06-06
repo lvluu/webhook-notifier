@@ -1,4 +1,4 @@
-package scenarios
+package legacy
 
 import (
 	"fmt"
@@ -9,48 +9,50 @@ import (
 	"time"
 
 	"github.com/lvluu/webhook-notifier/internal/retry"
+
+	scenarios "github.com/lvluu/webhook-notifier/bench/scenarios"
 )
 
-func TestScenario2ProfileFromEnvDefaults(t *testing.T) {
+func TestTransientRecoveryProfileFromEnvDefaults(t *testing.T) {
 	t.Setenv("BENCH_PROFILE", "")
 
-	profile, err := scenario2ProfileFromEnv()
+	profile, err := transientRecoveryProfileFromEnv()
 	if err != nil {
 		t.Fatalf("load profile: %v", err)
 	}
 	if profile.Name != "dev" {
 		t.Fatalf("name: got %q, want dev", profile.Name)
 	}
-	want := mustBenchProfileConfig(t, "scenario2", "dev")
+	want := mustBenchProfileConfig(t, "transient_recovery", "dev")
 	if profile.WorkerCount != want.WorkerCount || profile.CustomerCount != want.CustomerCount || profile.EventsPerCustomer != want.EventsPerCustomer || profile.SubmitInterval != want.SubmitInterval.Duration() || profile.OutageDelay != want.OutageDelay.Duration() || profile.OutageDuration != want.OutageDuration.Duration() || profile.BreakerFailureThreshold != want.BreakerFailureThreshold {
 		t.Fatalf("dev profile overrides not applied: %+v want %+v", profile, want)
 	}
 }
 
-func TestScenario2ProfileFromEnvOverrides(t *testing.T) {
+func TestTransientRecoveryProfileFromEnvOverrides(t *testing.T) {
 	t.Setenv("BENCH_PROFILE", "stress")
 
-	profile, err := scenario2ProfileFromEnv()
+	profile, err := transientRecoveryProfileFromEnv()
 	if err != nil {
 		t.Fatalf("load profile: %v", err)
 	}
 	if profile.Name != "stress" {
 		t.Fatalf("name: got %q, want stress", profile.Name)
 	}
-	want := mustBenchProfileConfig(t, "scenario2", "stress")
+	want := mustBenchProfileConfig(t, "transient_recovery", "stress")
 	if profile.WorkerCount != want.WorkerCount || profile.CustomerCount != want.CustomerCount || profile.EventsPerCustomer != want.EventsPerCustomer || profile.SubmitInterval != want.SubmitInterval.Duration() || profile.OutageDelay != want.OutageDelay.Duration() || profile.OutageDuration != want.OutageDuration.Duration() || profile.BreakerFailureThreshold != want.BreakerFailureThreshold {
 		t.Fatalf("stress profile overrides not applied: %+v want %+v", profile, want)
 	}
 }
 
-func TestScenario2RetryPolicySurvivesPartnerCOutage(t *testing.T) {
+func TestTransientRecoveryRetryPolicySurvivesPartnerCOutage(t *testing.T) {
 	t.Parallel()
 
-	profile, err := scenario2ProfileFromEnv()
+	profile, err := transientRecoveryProfileFromEnv()
 	if err != nil {
 		t.Fatalf("load profile: %v", err)
 	}
-	policy := scenario2RetryPolicy()
+	policy := transientRecoveryRetryPolicy()
 	for i := range 100 {
 		key := fmt.Sprintf("delivery-%03d", i)
 		elapsed, attempt, prevDelay := time.Duration(0), 1, time.Duration(0)
@@ -75,10 +77,10 @@ func TestScenario2RetryPolicySurvivesPartnerCOutage(t *testing.T) {
 	}
 }
 
-func TestScenario2RetryPolicyTerminalsWithinBenchTimeout(t *testing.T) {
+func TestTransientRecoveryRetryPolicyTerminalsWithinBenchTimeout(t *testing.T) {
 	t.Parallel()
 
-	policy := scenario2RetryPolicy()
+	policy := transientRecoveryRetryPolicy()
 	for i := range 100 {
 		key := fmt.Sprintf("delivery-%03d", i)
 		elapsed, prevDelay := time.Duration(0), time.Duration(0)
@@ -106,10 +108,10 @@ func response(statusCode int) *http.Response {
 	}
 }
 
-func mustBenchProfileConfig(t *testing.T, scenario, profile string) benchProfileConfig {
+func mustBenchProfileConfig(t *testing.T, scenario, profile string) scenarios.BenchProfileConfig {
 	t.Helper()
 
-	profiles, err := readBenchProfiles()
+	profiles, err := scenarios.ReadBenchProfiles()
 	if err != nil {
 		t.Fatalf("read bench profiles: %v", err)
 	}

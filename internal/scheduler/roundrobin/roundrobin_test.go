@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/lvluu/webhook-notifier/internal/scheduler/roundrobin"
 )
@@ -16,12 +17,13 @@ func TestRoundRobin_TableDriven(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		notify  []string
-		picks   int
-		want    []string
-		wantOK  []bool
-		wantErr bool
+		name     string
+		notify   []string
+		picks    int
+		renotify bool // re-Notify picked customer before next Pick (simulates worker)
+		want     []string
+		wantOK   []bool
+		wantErr  bool
 	}{
 		{
 			name:   "empty schedule returns ok=false",
@@ -31,32 +33,50 @@ func TestRoundRobin_TableDriven(t *testing.T) {
 			wantOK: []bool{false},
 		},
 		{
-			name:   "single Customer stays in rotation",
+			name:   "single Customer removed after pick",
 			notify: []string{"cus_A"},
+			picks:  2,
+			want:   []string{"cus_A", ""},
+			wantOK: []bool{true, false},
+		},
+		{
+			name:     "single Customer cycles with re-Notify",
+			notify:   []string{"cus_A"},
+			picks:    3,
+			renotify: true,
+			want:     []string{"cus_A", "cus_A", "cus_A"},
+			wantOK:   []bool{true, true, true},
+		},
+		{
+			name:     "multi Customer cycles with re-Notify",
+			notify:   []string{"cus_A", "cus_B", "cus_C"},
+			picks:    6,
+			renotify: true,
+			want:     []string{"cus_A", "cus_B", "cus_C", "cus_A", "cus_B", "cus_C"},
+			wantOK:   []bool{true, true, true, true, true, true},
+		},
+		{
+			name:   "all customers drained without re-Notify",
+			notify: []string{"cus_A", "cus_B"},
 			picks:  3,
-			want:   []string{"cus_A", "cus_A", "cus_A"},
-			wantOK: []bool{true, true, true},
+			want:   []string{"cus_A", "cus_B", ""},
+			wantOK: []bool{true, true, false},
 		},
 		{
-			name:   "multi Customer cycles in insertion order",
-			notify: []string{"cus_A", "cus_B", "cus_C"},
-			picks:  6,
-			want:   []string{"cus_A", "cus_B", "cus_C", "cus_A", "cus_B", "cus_C"},
-			wantOK: []bool{true, true, true, true, true, true},
+			name:     "duplicate Notify is idempotent",
+			notify:   []string{"cus_A", "cus_B", "cus_A", "cus_B"},
+			picks:    4,
+			renotify: true,
+			want:     []string{"cus_A", "cus_B", "cus_A", "cus_B"},
+			wantOK:   []bool{true, true, true, true},
 		},
 		{
-			name:   "duplicate Notify is idempotent",
-			notify: []string{"cus_A", "cus_B", "cus_A", "cus_B"},
-			picks:  4,
-			want:   []string{"cus_A", "cus_B", "cus_A", "cus_B"},
-			wantOK: []bool{true, true, true, true},
-		},
-		{
-			name:   "empty CustomerID Notify is ignored",
-			notify: []string{"", "cus_A", ""},
-			picks:  3,
-			want:   []string{"cus_A", "cus_A", "cus_A"},
-			wantOK: []bool{true, true, true},
+			name:     "empty CustomerID Notify is ignored",
+			notify:   []string{"", "cus_A", ""},
+			picks:    3,
+			renotify: true,
+			want:     []string{"cus_A", "cus_A", "cus_A"},
+			wantOK:   []bool{true, true, true},
 		},
 	}
 
@@ -84,6 +104,9 @@ func TestRoundRobin_TableDriven(t *testing.T) {
 				if ok && batchHint != roundrobin.ClaimBatchSize {
 					t.Errorf("Pick[%d] batchHint: got %d, want %d", i, batchHint, roundrobin.ClaimBatchSize)
 				}
+				if ok && tt.renotify {
+					s.Notify(got)
+				}
 			}
 		})
 	}
@@ -102,6 +125,65 @@ func TestRoundRobin_PickRespectsContextCancellation(t *testing.T) {
 	cancel()
 
 	_, _, _, err := s.Pick(ctx)
+	if err == nil {
+		t.Fatal("expected error from cancelled context, got nil")
+	}
+}
+
+// TestRoundRobin_WaitForWorkBlocksUntilNotify verifies that WaitForWork
+// blocks on an empty scheduler and returns once a customer is notified.
+func TestRoundRobin_WaitForWorkBlocksUntilNotify(t *testing.T) {
+	t.Parallel()
+
+	s := roundrobin.New()
+	done := make(chan error, 1)
+	go func() {
+		done <- s.WaitForWork(context.Background())
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("WaitForWork returned before Notify")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	s.Notify("cus_A")
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WaitForWork returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WaitForWork did not return after Notify")
+	}
+}
+
+// TestRoundRobin_WaitForWorkReturnsImmediatelyWhenNotEmpty verifies that
+// WaitForWork returns immediately when the scheduler already has customers.
+func TestRoundRobin_WaitForWorkReturnsImmediatelyWhenNotEmpty(t *testing.T) {
+	t.Parallel()
+
+	s := roundrobin.New()
+	s.Notify("cus_A")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := s.WaitForWork(ctx); err != nil {
+		t.Fatalf("WaitForWork returned error: %v", err)
+	}
+}
+
+// TestRoundRobin_WaitForWorkRespectsContextCancellation verifies that
+// WaitForWork returns ctx.Err() when the context is cancelled.
+func TestRoundRobin_WaitForWorkRespectsContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	s := roundrobin.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := s.WaitForWork(ctx)
 	if err == nil {
 		t.Fatal("expected error from cancelled context, got nil")
 	}
@@ -163,6 +245,7 @@ func TestRoundRobin_FairnessProperty(t *testing.T) {
 					t.Fatalf("Pick[%d]: got ok=false, want ok=true", i)
 				}
 				counts[customer]++
+				s.Notify(customer)
 			}
 
 			activeCount := len(tt.customers)
@@ -216,16 +299,19 @@ func TestRoundRobin_Remove(t *testing.T) {
 		ctx := context.Background()
 		got1, _, ok1, _ := s.Pick(ctx)
 		got2, _, ok2, _ := s.Pick(ctx)
-		got3, _, ok3, _ := s.Pick(ctx)
-		if !ok1 || !ok2 || !ok3 {
-			t.Fatal("expected three successful picks from 3→2 customers after remove")
+		_, _, ok3, _ := s.Pick(ctx)
+		if !ok1 || !ok2 {
+			t.Fatal("expected two successful picks from 3→2 customers after remove")
 		}
-		if got1 != "cus_A" || got2 != "cus_C" || got3 != "cus_A" {
-			t.Fatalf("got %q %q %q, want cus_A cus_C cus_A", got1, got2, got3)
+		if ok3 {
+			t.Fatal("expected ok=false after draining 2 customers")
+		}
+		if got1 != "cus_A" || got2 != "cus_C" {
+			t.Fatalf("got %q %q, want cus_A cus_C", got1, got2)
 		}
 	})
 
-	t.Run("remove from cursor position adjusts cursor", func(t *testing.T) {
+	t.Run("remove non-picked customer", func(t *testing.T) {
 		t.Parallel()
 		s := roundrobin.New()
 		s.Notify("cus_A")
@@ -233,19 +319,20 @@ func TestRoundRobin_Remove(t *testing.T) {
 		s.Notify("cus_C")
 
 		ctx := context.Background()
-		// Advance cursor past A.
-		s.Pick(ctx) // returns A, cursor now at 1 (B)
+		s.Pick(ctx) // picks+removes A
 
-		// Remove A (before cursor) — cursor should shift down.
-		s.Remove("cus_A")
+		s.Remove("cus_C")
 
 		got1, _, ok1, _ := s.Pick(ctx)
-		got2, _, ok2, _ := s.Pick(ctx)
-		if !ok1 || !ok2 {
-			t.Fatal("expected two successful picks")
+		_, _, ok2, _ := s.Pick(ctx)
+		if !ok1 {
+			t.Fatal("expected one successful pick")
 		}
-		if got1 != "cus_B" || got2 != "cus_C" {
-			t.Fatalf("got %q %q, want cus_B cus_C", got1, got2)
+		if ok2 {
+			t.Fatal("expected ok=false after draining")
+		}
+		if got1 != "cus_B" {
+			t.Fatalf("got %q, want cus_B", got1)
 		}
 	})
 
@@ -287,7 +374,10 @@ func TestRoundRobin_ConcurrentNotifyAndPick(t *testing.T) {
 	go func() {
 		defer close(done)
 		for i := 0; i < goroutines*opsPerGoroutine; i++ {
-			_, _, _, _ = s.Pick(ctx)
+			got, _, ok, _ := s.Pick(ctx)
+			if ok {
+				s.Notify(got)
+			}
 		}
 	}()
 

@@ -1,4 +1,4 @@
-package scenarios
+package legacy
 
 import (
 	"context"
@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/lvluu/webhook-notifier/bench/receiver"
+	"github.com/lvluu/webhook-notifier/bench/scenarios"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/retry"
 	"github.com/lvluu/webhook-notifier/internal/scheduler/roundrobin"
@@ -21,13 +22,13 @@ import (
 )
 
 const (
-	scenario4CustomerID     = "scenario-4-customer"
-	scenario4PartnerLatency = 10 * time.Millisecond
-	scenario4ReportPath     = "bench/results/scenario-4.md"
-	scenario4Route          = "/hooks/scenario-4"
+	scaleIdempotencyCustomerID     = "scale-idempotency-customer"
+	scaleIdempotencyPartnerLatency = 10 * time.Millisecond
+	scaleIdempotencyReportPath     = "bench/results/scale-idempotency.md"
+	scaleIdempotencyRoute          = "/hooks/scale-idempotency"
 )
 
-type scenario4Profile struct {
+type scaleIdempotencyProfile struct {
 	Name                    string
 	WorkerCounts            []int
 	ThroughputDeliveries    int
@@ -35,21 +36,21 @@ type scenario4Profile struct {
 	BreakerFailureThreshold int
 }
 
-func scenario4ProfileFromEnv() (scenario4Profile, error) {
-	raw, name, err := loadBenchProfileConfig("scenario4")
+func scaleIdempotencyProfileFromEnv() (scaleIdempotencyProfile, error) {
+	raw, name, err := scenarios.LoadBenchProfileConfig("scale_idempotency")
 	if err != nil {
-		return scenario4Profile{}, err
+		return scaleIdempotencyProfile{}, err
 	}
 	if len(raw.WorkerCounts) == 0 {
-		return scenario4Profile{}, fmt.Errorf("scenario4 profile %q is missing worker counts", name)
+		return scaleIdempotencyProfile{}, fmt.Errorf("scale_idempotency profile %q is missing worker counts", name)
 	}
 	if raw.ThroughputDeliveries < 1 || raw.RetryDeliveries < 1 {
-		return scenario4Profile{}, fmt.Errorf("scenario4 profile %q has invalid positive counts", name)
+		return scaleIdempotencyProfile{}, fmt.Errorf("scale_idempotency profile %q has invalid positive counts", name)
 	}
 	if raw.BreakerFailureThreshold < 0 {
-		return scenario4Profile{}, fmt.Errorf("scenario4 profile %q has invalid breaker threshold", name)
+		return scaleIdempotencyProfile{}, fmt.Errorf("scale_idempotency profile %q has invalid breaker threshold", name)
 	}
-	return scenario4Profile{
+	return scaleIdempotencyProfile{
 		Name:                    name,
 		WorkerCounts:            raw.WorkerCounts,
 		ThroughputDeliveries:    raw.ThroughputDeliveries,
@@ -58,7 +59,7 @@ func scenario4ProfileFromEnv() (scenario4Profile, error) {
 	}, nil
 }
 
-type scenario4ThroughputResult struct {
+type scaleIdempotencyThroughputResult struct {
 	WorkerCount     int
 	Duration        time.Duration
 	Throughput      float64
@@ -66,7 +67,7 @@ type scenario4ThroughputResult struct {
 	DuplicateTuples int
 }
 
-type scenario4RetryProbeResult struct {
+type scaleIdempotencyRetryProbeResult struct {
 	Deliveries                int
 	Received                  int
 	RetriedDeliveries         int
@@ -79,10 +80,10 @@ type scenario4RetryProbeResult struct {
 	AttemptNumbersConsecutive bool
 }
 
-// RunScenario4 executes Scenario 4: horizontal scale, claim atomicity, and
+// RunScaleIdempotency executes Scale Idempotency: horizontal scale, claim atomicity, and
 // idempotency header stability.
-func RunScenario4(ctx context.Context) error {
-	db, cleanup, err := openBenchDatabase(ctx)
+func RunScaleIdempotency(ctx context.Context) error {
+	db, cleanup, err := scenarios.OpenBenchDatabase(ctx)
 	if err != nil {
 		return fmt.Errorf("open bench db: %w", err)
 	}
@@ -92,55 +93,55 @@ func RunScenario4(ctx context.Context) error {
 		return fmt.Errorf("ping db: %w", err)
 	}
 
-	profile, err := scenario4ProfileFromEnv()
+	profile, err := scaleIdempotencyProfileFromEnv()
 	if err != nil {
 		return fmt.Errorf("load profile: %w", err)
 	}
 
-	throughput := make([]scenario4ThroughputResult, 0, len(profile.WorkerCounts))
+	throughput := make([]scaleIdempotencyThroughputResult, 0, len(profile.WorkerCounts))
 	for _, count := range profile.WorkerCounts {
-		slog.Info("running scenario 4 throughput workload", "worker_count", count)
-		res, err := runScenario4Throughput(ctx, db, count, profile)
+		slog.Info("running scale idempotency throughput workload", "worker_count", count)
+		res, err := runScaleIdempotencyThroughput(ctx, db, count, profile)
 		if err != nil {
 			return fmt.Errorf("run throughput with %d workers: %w", count, err)
 		}
 		throughput = append(throughput, res)
 	}
 
-	slog.Info("running scenario 4 retry probe")
-	retryProbe, err := runScenario4RetryProbe(ctx, db, profile)
+	slog.Info("running scale idempotency retry probe")
+	retryProbe, err := runScaleIdempotencyRetryProbe(ctx, db, profile)
 	if err != nil {
 		return fmt.Errorf("run retry probe: %w", err)
 	}
 
-	if err := writeScenario4Report(scenario4ReportPath, profile.Name, profile.ThroughputDeliveries, profile.RetryDeliveries, throughput, retryProbe); err != nil {
+	if err := writeScaleIdempotencyReport(scaleIdempotencyReportPath, profile.Name, profile.ThroughputDeliveries, profile.RetryDeliveries, throughput, retryProbe); err != nil {
 		return fmt.Errorf("write report: %w", err)
 	}
 
-	slog.Info("scenario 4 complete", "profile", profile.Name, "report", scenario4ReportPath)
+	slog.Info("scale idempotency complete", "profile", profile.Name, "report", scaleIdempotencyReportPath)
 	return nil
 }
 
-func runScenario4Throughput(ctx context.Context, db *sql.DB, numWorkers int, profile scenario4Profile) (scenario4ThroughputResult, error) {
+func runScaleIdempotencyThroughput(ctx context.Context, db *sql.DB, numWorkers int, profile scaleIdempotencyProfile) (scaleIdempotencyThroughputResult, error) {
 	rs := receiver.NewServer(
-		receiver.WithStableDecisions(fmt.Sprintf("scenario-4-%d", numWorkers)),
-		receiver.WithRouteLatency(scenario4Route, 1.0, scenario4PartnerLatency),
+		receiver.WithStableDecisions(fmt.Sprintf("scale-idempotency-%d", numWorkers)),
+		receiver.WithRouteLatency(scaleIdempotencyRoute, 1.0, scaleIdempotencyPartnerLatency),
 	)
 	defer rs.Close()
 
-	if err := prepareScenario4Workload(ctx, db, rs.URL(), profile.ThroughputDeliveries); err != nil {
-		return scenario4ThroughputResult{}, err
+	if err := prepareScaleIdempotencyWorkload(ctx, db, rs.URL(), profile.ThroughputDeliveries); err != nil {
+		return scaleIdempotencyThroughputResult{}, err
 	}
 
-	duration, err := drainScenario4(ctx, db, numWorkers, profile, retry.New(retry.Config{}))
+	duration, err := drainScaleIdempotency(ctx, db, numWorkers, profile, retry.New(retry.Config{}))
 	if err != nil {
-		return scenario4ThroughputResult{}, err
+		return scaleIdempotencyThroughputResult{}, err
 	}
 
 	recordings := rs.Recorded()
-	duplicates := countDuplicateAttemptTuples(recordings)
+	duplicates := scenarios.CountDuplicateAttemptTuples(recordings)
 
-	return scenario4ThroughputResult{
+	return scaleIdempotencyThroughputResult{
 		WorkerCount:     numWorkers,
 		Duration:        duration,
 		Throughput:      float64(profile.ThroughputDeliveries) / duration.Seconds(),
@@ -149,10 +150,10 @@ func runScenario4Throughput(ctx context.Context, db *sql.DB, numWorkers int, pro
 	}, nil
 }
 
-func runScenario4RetryProbe(ctx context.Context, db *sql.DB, profile scenario4Profile) (scenario4RetryProbeResult, error) {
+func runScaleIdempotencyRetryProbe(ctx context.Context, db *sql.DB, profile scaleIdempotencyProfile) (scaleIdempotencyRetryProbeResult, error) {
 	rs := receiver.NewServer(
-		receiver.WithStableDecisions("scenario-4-retry-probe"),
-		receiver.WithRouteStatusFunc(scenario4Route, func(r *http.Request, _ time.Time) int {
+		receiver.WithStableDecisions("scale-idempotency-retry-probe"),
+		receiver.WithRouteStatusFunc(scaleIdempotencyRoute, func(r *http.Request, _ time.Time) int {
 			if r.Header.Get("X-Attempt-Number") == "1" {
 				return http.StatusServiceUnavailable
 			}
@@ -161,8 +162,8 @@ func runScenario4RetryProbe(ctx context.Context, db *sql.DB, profile scenario4Pr
 	)
 	defer rs.Close()
 
-	if err := prepareScenario4Workload(ctx, db, rs.URL(), profile.RetryDeliveries); err != nil {
-		return scenario4RetryProbeResult{}, err
+	if err := prepareScaleIdempotencyWorkload(ctx, db, rs.URL(), profile.RetryDeliveries); err != nil {
+		return scaleIdempotencyRetryProbeResult{}, err
 	}
 
 	policy := retry.New(retry.Config{
@@ -170,31 +171,31 @@ func runScenario4RetryProbe(ctx context.Context, db *sql.DB, profile scenario4Pr
 		BaseDelay:   10 * time.Millisecond,
 		CapDelay:    10 * time.Millisecond,
 	})
-	if _, err := drainScenario4(ctx, db, profile.WorkerCounts[len(profile.WorkerCounts)-1], profile, policy); err != nil {
-		return scenario4RetryProbeResult{}, err
+	if _, err := drainScaleIdempotency(ctx, db, profile.WorkerCounts[len(profile.WorkerCounts)-1], profile, policy); err != nil {
+		return scaleIdempotencyRetryProbeResult{}, err
 	}
 
-	return analyzeScenario4RetryProbe(rs.Recorded()), nil
+	return analyzeScaleIdempotencyRetryProbe(rs.Recorded()), nil
 }
 
-func prepareScenario4Workload(ctx context.Context, db *sql.DB, receiverBaseURL string, deliveries int) error {
-	if err := resetBenchData(ctx, db); err != nil {
+func prepareScaleIdempotencyWorkload(ctx context.Context, db *sql.DB, receiverBaseURL string, deliveries int) error {
+	if err := scenarios.ResetBenchData(ctx, db); err != nil {
 		return fmt.Errorf("reset bench data: %w", err)
 	}
-	if err := seedScenario4Customer(ctx, db); err != nil {
+	if err := seedScaleIdempotencyCustomer(ctx, db); err != nil {
 		return fmt.Errorf("seed customer: %w", err)
 	}
-	webhookID, err := seedScenario4Webhook(ctx, db, receiverBaseURL)
+	webhookID, err := seedScaleIdempotencyWebhook(ctx, db, receiverBaseURL)
 	if err != nil {
 		return fmt.Errorf("seed webhook: %w", err)
 	}
-	if err := seedScenario4Deliveries(ctx, db, webhookID, deliveries); err != nil {
+	if err := seedScaleIdempotencyDeliveries(ctx, db, webhookID, deliveries); err != nil {
 		return fmt.Errorf("seed deliveries: %w", err)
 	}
 	return nil
 }
 
-func drainScenario4(ctx context.Context, db *sql.DB, numWorkers int, profile scenario4Profile, policy retry.RetryPolicy) (time.Duration, error) {
+func drainScaleIdempotency(ctx context.Context, db *sql.DB, numWorkers int, profile scaleIdempotencyProfile, policy retry.RetryPolicy) (time.Duration, error) {
 	plainSched := roundrobin.New()
 	outboxStore := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
 		FailureThreshold: profile.BreakerFailureThreshold,
@@ -221,24 +222,24 @@ func drainScenario4(ctx context.Context, db *sql.DB, numWorkers int, profile sce
 	}
 
 	started := time.Now()
-	plainSched.Notify(scenario4CustomerID)
+	plainSched.Notify(scaleIdempotencyCustomerID)
 
 	pollCtx, cancelPoll := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancelPoll()
 	for {
-		pending, err := countPendingDeliveries(pollCtx, db)
+		pending, err := scenarios.CountPendingDeliveries(pollCtx, db)
 		if err != nil {
 			return 0, fmt.Errorf("poll pending deliveries: %w", err)
 		}
 		if pending == 0 {
 			break
 		}
-		hasPending, err := outboxStore.HasClaimableWork(pollCtx, scenario4CustomerID)
+		hasPending, err := outboxStore.HasClaimableWork(pollCtx, scaleIdempotencyCustomerID)
 		if err != nil {
 			return 0, fmt.Errorf("check pending customer work: %w", err)
 		}
 		if hasPending {
-			plainSched.Notify(scenario4CustomerID)
+			plainSched.Notify(scaleIdempotencyCustomerID)
 		}
 		select {
 		case <-pollCtx.Done():
@@ -254,32 +255,32 @@ func drainScenario4(ctx context.Context, db *sql.DB, numWorkers int, profile sce
 	return duration, nil
 }
 
-func seedScenario4Customer(ctx context.Context, db *sql.DB) error {
+func seedScaleIdempotencyCustomer(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO customers (id, class)
 		VALUES ($1, 1)
 		ON CONFLICT (id) DO NOTHING
-	`, scenario4CustomerID)
+	`, scaleIdempotencyCustomerID)
 	if err != nil {
 		return fmt.Errorf("insert customer: %w", err)
 	}
 	return nil
 }
 
-func seedScenario4Webhook(ctx context.Context, db *sql.DB, receiverBaseURL string) (string, error) {
+func seedScaleIdempotencyWebhook(ctx context.Context, db *sql.DB, receiverBaseURL string) (string, error) {
 	var webhookID string
 	err := db.QueryRowContext(ctx, `
 		INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active)
 		VALUES ($1, $2, '', $3, true)
 		RETURNING id
-	`, scenario4CustomerID, receiverBaseURL+scenario4Route, "{"+eventType+"}").Scan(&webhookID)
+	`, scaleIdempotencyCustomerID, receiverBaseURL+scaleIdempotencyRoute, "{"+scenarios.EventType+"}").Scan(&webhookID)
 	if err != nil {
 		return "", fmt.Errorf("insert webhook: %w", err)
 	}
 	return webhookID, nil
 }
 
-func seedScenario4Deliveries(ctx context.Context, db *sql.DB, webhookID string, deliveries int) error {
+func seedScaleIdempotencyDeliveries(ctx context.Context, db *sql.DB, webhookID string, deliveries int) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -291,7 +292,7 @@ func seedScenario4Deliveries(ctx context.Context, db *sql.DB, webhookID string, 
 		INSERT INTO events (customer_id, type, payload)
 		VALUES ($1, $2, $3)
 		RETURNING id
-	`, scenario4CustomerID, eventType, []byte(`{"event_name":"bench.scenario4"}`)).Scan(&eventID)
+	`, scaleIdempotencyCustomerID, scenarios.EventType, []byte(`{"event_name":"bench.scale_idempotency"}`)).Scan(&eventID)
 	if err != nil {
 		return fmt.Errorf("insert event: %w", err)
 	}
@@ -300,7 +301,7 @@ func seedScenario4Deliveries(ctx context.Context, db *sql.DB, webhookID string, 
 		INSERT INTO deliveries (event_id, webhook_id, customer_id, status, attempt_count, next_attempt_at)
 		SELECT $1, $2, $3, 'pending', 0, now()
 		FROM generate_series(1, $4)
-	`, eventID, webhookID, scenario4CustomerID, deliveries)
+	`, eventID, webhookID, scaleIdempotencyCustomerID, deliveries)
 	if err != nil {
 		return fmt.Errorf("insert deliveries: %w", err)
 	}
@@ -311,38 +312,17 @@ func seedScenario4Deliveries(ctx context.Context, db *sql.DB, webhookID string, 
 	return nil
 }
 
-type attemptTuple struct {
-	DeliveryID    string
-	AttemptNumber string
-}
-
-func countDuplicateAttemptTuples(recordings []receiver.Recording) int {
-	seen := make(map[attemptTuple]bool, len(recordings))
-	duplicates := 0
-	for _, r := range recordings {
-		t := attemptTuple{
-			DeliveryID:    r.Headers.Get("X-Delivery-Id"),
-			AttemptNumber: r.Headers.Get("X-Attempt-Number"),
-		}
-		if seen[t] {
-			duplicates++
-		}
-		seen[t] = true
-	}
-	return duplicates
-}
-
-func analyzeScenario4RetryProbe(recordings []receiver.Recording) scenario4RetryProbeResult {
+func analyzeScaleIdempotencyRetryProbe(recordings []receiver.Recording) scaleIdempotencyRetryProbeResult {
 	byDelivery := make(map[string][]receiver.Recording)
 	for _, r := range recordings {
 		deliveryID := r.Headers.Get("X-Delivery-Id")
 		byDelivery[deliveryID] = append(byDelivery[deliveryID], r)
 	}
 
-	result := scenario4RetryProbeResult{
+	result := scaleIdempotencyRetryProbeResult{
 		Deliveries:                len(byDelivery),
 		Received:                  len(recordings),
-		DuplicateTuples:           countDuplicateAttemptTuples(recordings),
+		DuplicateTuples:           scenarios.CountDuplicateAttemptTuples(recordings),
 		DeliveryIDStable:          true,
 		DeliveryIDMatchesTuple:    true,
 		EventIDStable:             true,
@@ -399,7 +379,7 @@ func analyzeScenario4RetryProbe(recordings []receiver.Recording) scenario4RetryP
 	return result
 }
 
-func writeScenario4Report(path, profileName string, throughputDeliveries, retryDeliveries int, throughput []scenario4ThroughputResult, retryProbe scenario4RetryProbeResult) error {
+func writeScaleIdempotencyReport(path, profileName string, throughputDeliveries, retryDeliveries int, throughput []scaleIdempotencyThroughputResult, retryProbe scaleIdempotencyRetryProbeResult) error {
 	f, err := os.Create(path) // #nosec G304 -- benchmark report path is a fixed scenario-owned file.
 	if err != nil {
 		return fmt.Errorf("create report: %w", err)
@@ -429,7 +409,7 @@ func writeScenario4Report(path, profileName string, throughputDeliveries, retryD
 		retryProbe.AttemptNumbersUnique &&
 		retryProbe.AttemptNumbersConsecutive
 
-	_, _ = fmt.Fprintf(f, `# Scenario 4: Horizontal Scale + Claim Atomicity + Idempotency
+	_, _ = fmt.Fprintf(f, `# Scale Idempotency: Horizontal Scale + Claim Atomicity + Idempotency
 
 ## Description
 
@@ -442,7 +422,7 @@ This repo uses just bench-4 as the canonical task command for the issue #15 benc
 | Profile | %s |
 | Workers | Deliveries | Received Attempts | Duration | Throughput (Deliveries/sec) | Duplicate (delivery_id, attempt_number) tuples |
 |---:|---:|---:|---:|---:|---:|
-`, profileName, throughputDeliveries, scenario4WorkerCounts(throughput), retryDeliveries, profileName)
+`, profileName, throughputDeliveries, scaleIdempotencyWorkerCounts(throughput), retryDeliveries, profileName)
 	for _, r := range throughput {
 		_, _ = fmt.Fprintf(f, "| %d | %d | %d | %s | %.2f | %d |\n",
 			r.WorkerCount,
@@ -483,27 +463,27 @@ This repo uses just bench-4 as the canonical task command for the issue #15 benc
 		retryProbe.Received,
 		retryProbe.RetriedDeliveries,
 		retryProbe.DuplicateTuples,
-		passFail(retryProbe.DeliveryIDStable),
-		passFail(retryProbe.DeliveryIDMatchesTuple),
-		passFail(retryProbe.EventIDStable),
-		passFail(retryProbe.EventIDPresent),
-		passFail(retryProbe.AttemptNumbersUnique),
-		passFail(retryProbe.AttemptNumbersConsecutive),
+		scenarios.PassFail(retryProbe.DeliveryIDStable),
+		scenarios.PassFail(retryProbe.DeliveryIDMatchesTuple),
+		scenarios.PassFail(retryProbe.EventIDStable),
+		scenarios.PassFail(retryProbe.EventIDPresent),
+		scenarios.PassFail(retryProbe.AttemptNumbersUnique),
+		scenarios.PassFail(retryProbe.AttemptNumbersConsecutive),
 		wN, w1,
 		t8/t1,
-		passFail(scalingOK),
-		totalScenario4DuplicateTuples(throughput),
-		passFail(allZeroDuplicates),
+		scenarios.PassFail(scalingOK),
+		totalScaleIdempotencyDuplicateTuples(throughput),
+		scenarios.PassFail(allZeroDuplicates),
 		retryProbe.DuplicateTuples,
-		passFail(retryProbe.DuplicateTuples == 0),
+		scenarios.PassFail(retryProbe.DuplicateTuples == 0),
 		fmt.Sprint(retryProbeOK),
-		passFail(retryProbeOK),
+		scenarios.PassFail(retryProbeOK),
 	)
 
 	return f.Close()
 }
 
-func totalScenario4DuplicateTuples(results []scenario4ThroughputResult) int {
+func totalScaleIdempotencyDuplicateTuples(results []scaleIdempotencyThroughputResult) int {
 	total := 0
 	for _, r := range results {
 		total += r.DuplicateTuples
@@ -511,7 +491,7 @@ func totalScenario4DuplicateTuples(results []scenario4ThroughputResult) int {
 	return total
 }
 
-func scenario4WorkerCounts(results []scenario4ThroughputResult) []int {
+func scaleIdempotencyWorkerCounts(results []scaleIdempotencyThroughputResult) []int {
 	counts := make([]int, 0, len(results))
 	for _, r := range results {
 		counts = append(counts, r.WorkerCount)

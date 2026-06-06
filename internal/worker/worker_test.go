@@ -35,6 +35,7 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 type stubScheduler struct{}
 
 func (stubScheduler) Pick(_ context.Context) (string, uint32, bool, error) { return "", 0, false, nil }
+func (stubScheduler) WaitForWork(context.Context) error                    { return nil }
 func (stubScheduler) Notify(string)                                        {}
 func (stubScheduler) Remove(string)                                        {}
 
@@ -47,7 +48,8 @@ func (r *recordingScheduler) Pick(_ context.Context) (string, uint32, bool, erro
 	return "", 0, false, nil
 }
 
-func (r *recordingScheduler) Remove(string) {}
+func (r *recordingScheduler) WaitForWork(context.Context) error { return nil }
+func (r *recordingScheduler) Remove(string)                     {}
 
 func (r *recordingScheduler) Notify(customerID string) {
 	r.mu.Lock()
@@ -85,8 +87,9 @@ func (s *hintScheduler) Pick(ctx context.Context) (string, uint32, bool, error) 
 	return pick.customerID, pick.batchHint, true, nil
 }
 
-func (s *hintScheduler) Notify(string) {}
-func (s *hintScheduler) Remove(string) {}
+func (s *hintScheduler) WaitForWork(context.Context) error { return nil }
+func (s *hintScheduler) Notify(string)                     {}
+func (s *hintScheduler) Remove(string)                     {}
 
 type oneShotScheduler struct {
 	mu       sync.Mutex
@@ -113,6 +116,10 @@ func (s *oneShotScheduler) Notify(customerID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.notified = append(s.notified, customerID)
+}
+
+func (s *oneShotScheduler) WaitForWork(ctx context.Context) error {
+	return ctx.Err()
 }
 
 func (s *oneShotScheduler) Remove(customerID string) {
@@ -871,6 +878,10 @@ func (s *multiPickScheduler) Notify(customerID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.notified = append(s.notified, customerID)
+}
+
+func (s *multiPickScheduler) WaitForWork(ctx context.Context) error {
+	return ctx.Err()
 }
 
 func (s *multiPickScheduler) Remove(customerID string) {

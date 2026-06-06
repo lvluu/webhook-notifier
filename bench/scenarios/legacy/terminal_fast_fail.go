@@ -1,4 +1,4 @@
-package scenarios
+package legacy
 
 import (
 	"context"
@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/lvluu/webhook-notifier/bench/receiver"
+	"github.com/lvluu/webhook-notifier/bench/scenarios"
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/registry"
@@ -22,12 +23,12 @@ import (
 )
 
 const (
-	scenario3CustomerID   = "scenario-3-customer"
-	scenario3WebhookCount = 2
-	scenario3ReportPath   = "bench/results/scenario-3.md"
+	terminalFastFailCustomerID   = "terminal-fast-fail-customer"
+	terminalFastFailWebhookCount = 2
+	terminalFastFailReportPath   = "bench/results/terminal-fast-fail.md"
 )
 
-var scenario3Webhooks = []struct {
+var terminalFastFailWebhooks = []struct {
 	Label string
 	Path  string
 }{
@@ -35,25 +36,25 @@ var scenario3Webhooks = []struct {
 	{Label: "misconfigured-404", Path: "/hooks/misconfigured-404"},
 }
 
-type scenario3Profile struct {
+type terminalFastFailProfile struct {
 	Name                    string
 	WorkerCount             int
 	EventCount              int
 	BreakerFailureThreshold int
 }
 
-func scenario3ProfileFromEnv() (scenario3Profile, error) {
-	raw, name, err := loadBenchProfileConfig("scenario3")
+func terminalFastFailProfileFromEnv() (terminalFastFailProfile, error) {
+	raw, name, err := scenarios.LoadBenchProfileConfig("terminal_fast_fail")
 	if err != nil {
-		return scenario3Profile{}, err
+		return terminalFastFailProfile{}, err
 	}
 	if raw.WorkerCount < 1 || raw.EventCount < 1 {
-		return scenario3Profile{}, fmt.Errorf("scenario3 profile %q has invalid positive counts", name)
+		return terminalFastFailProfile{}, fmt.Errorf("terminal_fast_fail profile %q has invalid positive counts", name)
 	}
 	if raw.BreakerFailureThreshold < 0 {
-		return scenario3Profile{}, fmt.Errorf("scenario3 profile %q has invalid breaker threshold", name)
+		return terminalFastFailProfile{}, fmt.Errorf("terminal_fast_fail profile %q has invalid breaker threshold", name)
 	}
-	return scenario3Profile{
+	return terminalFastFailProfile{
 		Name:                    name,
 		WorkerCount:             raw.WorkerCount,
 		EventCount:              raw.EventCount,
@@ -61,10 +62,10 @@ func scenario3ProfileFromEnv() (scenario3Profile, error) {
 	}, nil
 }
 
-// RunScenario3 executes the legacy Scenario 3, folded into
+// RunTerminalFastFail executes the legacy Terminal Fast-Fail, folded into
 // partner_resilience.go and kept for reference until retirement.
-func RunScenario3(ctx context.Context) error {
-	db, cleanup, err := openBenchDatabase(ctx)
+func RunTerminalFastFail(ctx context.Context) error {
+	db, cleanup, err := scenarios.OpenBenchDatabase(ctx)
 	if err != nil {
 		return fmt.Errorf("open bench db: %w", err)
 	}
@@ -73,25 +74,25 @@ func RunScenario3(ctx context.Context) error {
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping db: %w", err)
 	}
-	if err := resetBenchData(ctx, db); err != nil {
+	if err := scenarios.ResetBenchData(ctx, db); err != nil {
 		return fmt.Errorf("reset bench data: %w", err)
 	}
 
-	profile, err := scenario3ProfileFromEnv()
+	profile, err := terminalFastFailProfileFromEnv()
 	if err != nil {
 		return fmt.Errorf("load profile: %w", err)
 	}
 
 	rs := receiver.NewServer(
-		receiver.WithStableDecisions("scenario-3"),
+		receiver.WithStableDecisions("terminal-fast-fail"),
 		receiver.WithRouteStatus("/hooks/misconfigured-404", 1.0, http.StatusNotFound),
 	)
 	defer rs.Close()
 
-	if err := seedScenario3Customer(ctx, db); err != nil {
+	if err := seedTerminalFastFailCustomer(ctx, db); err != nil {
 		return fmt.Errorf("seed customer: %w", err)
 	}
-	webhookURLs, err := seedScenario3Webhooks(ctx, db, rs.URL())
+	webhookURLs, err := seedTerminalFastFailWebhooks(ctx, db, rs.URL())
 	if err != nil {
 		return fmt.Errorf("seed webhooks: %w", err)
 	}
@@ -104,7 +105,7 @@ func RunScenario3(ctx context.Context) error {
 	}))
 
 	startTime := time.Now()
-	if err := submitScenario3Events(ctx, ingestStore, profile.EventCount); err != nil {
+	if err := submitTerminalFastFailEvents(ctx, ingestStore, profile.EventCount); err != nil {
 		return fmt.Errorf("submit events: %w", err)
 	}
 
@@ -129,7 +130,7 @@ func RunScenario3(ctx context.Context) error {
 	pollCtx, cancelPoll := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancelPoll()
 	for {
-		pending, err := countPendingDeliveries(pollCtx, db)
+		pending, err := scenarios.CountPendingDeliveries(pollCtx, db)
 		if err != nil {
 			return fmt.Errorf("poll pending deliveries: %w", err)
 		}
@@ -146,10 +147,10 @@ func RunScenario3(ctx context.Context) error {
 	cancelWorkers()
 	workerWg.Wait()
 
-	if err := writeScenario3Report(ctx, db, scenario3ReportPath, scenario3ReportParams{
+	if err := writeTerminalFastFailReport(ctx, db, terminalFastFailReportPath, terminalFastFailReportParams{
 		profileName:        profile.Name,
 		eventCount:         profile.EventCount,
-		expectedDeliveries: profile.EventCount * scenario3WebhookCount,
+		expectedDeliveries: profile.EventCount * terminalFastFailWebhookCount,
 		totalDuration:      time.Since(startTime),
 		workerCount:        workers,
 		goodWebhookURL:     webhookURLs["good"],
@@ -158,28 +159,28 @@ func RunScenario3(ctx context.Context) error {
 		return fmt.Errorf("write report: %w", err)
 	}
 
-	slog.Info("scenario 3 complete", "report", scenario3ReportPath)
+	slog.Info("terminal fast-fail complete", "report", terminalFastFailReportPath)
 	return nil
 }
 
-func seedScenario3Customer(ctx context.Context, db *sql.DB) error {
+func seedTerminalFastFailCustomer(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO customers (id, class)
 		VALUES ($1, 1)
 		ON CONFLICT (id) DO NOTHING
-	`, scenario3CustomerID)
+	`, terminalFastFailCustomerID)
 	if err != nil {
 		return fmt.Errorf("insert customer: %w", err)
 	}
 	return nil
 }
 
-func seedScenario3Webhooks(ctx context.Context, db *sql.DB, receiverBaseURL string) (map[string]string, error) {
+func seedTerminalFastFailWebhooks(ctx context.Context, db *sql.DB, receiverBaseURL string) (map[string]string, error) {
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active) VALUES ")
-	args := make([]any, 0, len(scenario3Webhooks)*4)
-	urls := make(map[string]string, len(scenario3Webhooks))
-	for i, webhook := range scenario3Webhooks {
+	args := make([]any, 0, len(terminalFastFailWebhooks)*4)
+	urls := make(map[string]string, len(terminalFastFailWebhooks))
+	for i, webhook := range terminalFastFailWebhooks {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
@@ -188,10 +189,10 @@ func seedScenario3Webhooks(ctx context.Context, db *sql.DB, receiverBaseURL stri
 		urls[webhook.Label] = fullURL
 		_, _ = fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, true)", base+1, base+2, base+3, base+4)
 		args = append(args,
-			scenario3CustomerID,
+			terminalFastFailCustomerID,
 			fullURL,
 			"",
-			fmt.Sprintf("{%s}", eventType),
+			fmt.Sprintf("{%s}", scenarios.EventType),
 		)
 	}
 	sb.WriteString(" ON CONFLICT DO NOTHING")
@@ -202,11 +203,11 @@ func seedScenario3Webhooks(ctx context.Context, db *sql.DB, receiverBaseURL stri
 	return urls, nil
 }
 
-func submitScenario3Events(ctx context.Context, store *ingest.Store, eventCount int) error {
+func submitTerminalFastFailEvents(ctx context.Context, store *ingest.Store, eventCount int) error {
 	for range eventCount {
 		if _, err := store.Submit(ctx, ingest.Event{
-			CustomerID: scenario3CustomerID,
-			Type:       eventType,
+			CustomerID: terminalFastFailCustomerID,
+			Type:       scenarios.EventType,
 			Payload:    []byte(`{"event_name":"subscriber.created"}`),
 		}); err != nil {
 			return fmt.Errorf("submit event: %w", err)
@@ -215,7 +216,7 @@ func submitScenario3Events(ctx context.Context, store *ingest.Store, eventCount 
 	return nil
 }
 
-type scenario3ReportParams struct {
+type terminalFastFailReportParams struct {
 	profileName        string
 	eventCount         int
 	expectedDeliveries int
@@ -225,32 +226,32 @@ type scenario3ReportParams struct {
 	badWebhookURL      string
 }
 
-func writeScenario3Report(ctx context.Context, db *sql.DB, path string, p scenario3ReportParams) error {
-	totalDeliveries, err := queryTotalDeliveries(ctx, db)
+func writeTerminalFastFailReport(ctx context.Context, db *sql.DB, path string, p terminalFastFailReportParams) error {
+	totalDeliveries, err := scenarios.QueryTotalDeliveries(ctx, db)
 	if err != nil {
 		return fmt.Errorf("query total deliveries: %w", err)
 	}
-	terminal, err := queryTerminalDeliveries(ctx, db)
+	terminal, err := scenarios.QueryTerminalDeliveries(ctx, db)
 	if err != nil {
 		return fmt.Errorf("query terminal deliveries: %w", err)
 	}
-	good, err := queryScenario3WebhookResult(ctx, db, p.goodWebhookURL)
+	good, err := queryTerminalFastFailWebhookResult(ctx, db, p.goodWebhookURL)
 	if err != nil {
 		return fmt.Errorf("query good webhook result: %w", err)
 	}
-	misconfigured, err := queryScenario3WebhookResult(ctx, db, p.badWebhookURL)
+	misconfigured, err := queryTerminalFastFailWebhookResult(ctx, db, p.badWebhookURL)
 	if err != nil {
 		return fmt.Errorf("query misconfigured webhook result: %w", err)
 	}
-	dlqRows, err := queryScenario3DLQReasons(ctx, db)
+	dlqRows, err := queryTerminalFastFailDLQReasons(ctx, db)
 	if err != nil {
 		return fmt.Errorf("query dlq reasons: %w", err)
 	}
-	attempts, err := queryScenario3AttemptsDistribution(ctx, db, p.goodWebhookURL, p.badWebhookURL)
+	attempts, err := queryTerminalFastFailAttemptsDistribution(ctx, db, p.goodWebhookURL, p.badWebhookURL)
 	if err != nil {
 		return fmt.Errorf("query attempts distribution: %w", err)
 	}
-	outcomes, err := queryDeliveryOutcomes(ctx, db)
+	outcomes, err := scenarios.QueryDeliveryOutcomes(ctx, db)
 	if err != nil {
 		return fmt.Errorf("query outcomes: %w", err)
 	}
@@ -269,7 +270,7 @@ func writeScenario3Report(ctx context.Context, db *sql.DB, path string, p scenar
 	}
 	defer func() { _ = f.Close() }()
 
-	_, _ = fmt.Fprintf(f, `# Scenario 3: Terminal Classification Fast-Fail
+	_, _ = fmt.Fprintf(f, `# Terminal Fast-Fail: Terminal Classification Fast-Fail
 
 ## Description
 
@@ -305,10 +306,10 @@ Profile **%s**: 1 Customer with 2 Webhooks: one healthy URL returning 2xx and on
 		totalDeliveries, p.expectedDeliveries,
 		p.workerCount,
 		terminal, totalDeliveries,
-		terminal, totalDeliveries, p.expectedDeliveries, p.expectedDeliveries, passFail(totalOK),
-		good.Succeeded, good.Total, p.eventCount, p.eventCount, passFail(goodOK),
-		misconfigured.Terminal4xxDLQ, misconfigured.Total, p.eventCount, p.eventCount, passFail(misconfiguredOK),
-		misconfigured.RetryWaste, passFail(misconfigured.RetryWaste == 0),
+		terminal, totalDeliveries, p.expectedDeliveries, p.expectedDeliveries, scenarios.PassFail(totalOK),
+		good.Succeeded, good.Total, p.eventCount, p.eventCount, scenarios.PassFail(goodOK),
+		misconfigured.Terminal4xxDLQ, misconfigured.Total, p.eventCount, p.eventCount, scenarios.PassFail(misconfiguredOK),
+		misconfigured.RetryWaste, scenarios.PassFail(misconfigured.RetryWaste == 0),
 	)
 
 	for _, row := range attempts {
@@ -330,7 +331,7 @@ Profile **%s**: 1 Customer with 2 Webhooks: one healthy URL returning 2xx and on
 	return f.Close()
 }
 
-type scenario3WebhookResult struct {
+type terminalFastFailWebhookResult struct {
 	Total          int
 	Succeeded      int
 	Dead           int
@@ -339,8 +340,8 @@ type scenario3WebhookResult struct {
 	Terminal4xxDLQ int
 }
 
-func queryScenario3WebhookResult(ctx context.Context, db *sql.DB, webhookURL string) (scenario3WebhookResult, error) {
-	var r scenario3WebhookResult
+func queryTerminalFastFailWebhookResult(ctx context.Context, db *sql.DB, webhookURL string) (terminalFastFailWebhookResult, error) {
+	var r terminalFastFailWebhookResult
 	err := db.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*),
@@ -362,18 +363,18 @@ func queryScenario3WebhookResult(ctx context.Context, db *sql.DB, webhookURL str
 		&r.Terminal4xxDLQ,
 	)
 	if err != nil {
-		return scenario3WebhookResult{}, fmt.Errorf("query webhook result: %w", err)
+		return terminalFastFailWebhookResult{}, fmt.Errorf("query webhook result: %w", err)
 	}
 	return r, nil
 }
 
-type scenario3AttemptsRow struct {
+type terminalFastFailAttemptsRow struct {
 	Webhook  string
 	Attempts int
 	Count    int
 }
 
-func queryScenario3AttemptsDistribution(ctx context.Context, db *sql.DB, goodWebhookURL, badWebhookURL string) ([]scenario3AttemptsRow, error) {
+func queryTerminalFastFailAttemptsDistribution(ctx context.Context, db *sql.DB, goodWebhookURL, badWebhookURL string) ([]terminalFastFailAttemptsRow, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT
 			w.url,
@@ -389,14 +390,14 @@ func queryScenario3AttemptsDistribution(ctx context.Context, db *sql.DB, goodWeb
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out []scenario3AttemptsRow
+	var out []terminalFastFailAttemptsRow
 	for rows.Next() {
 		var rawURL string
-		var r scenario3AttemptsRow
+		var r terminalFastFailAttemptsRow
 		if err := rows.Scan(&rawURL, &r.Attempts, &r.Count); err != nil {
 			return nil, fmt.Errorf("scan attempts row: %w", err)
 		}
-		r.Webhook = scenario3WebhookLabel(rawURL, goodWebhookURL, badWebhookURL)
+		r.Webhook = terminalFastFailWebhookLabel(rawURL, goodWebhookURL, badWebhookURL)
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -405,27 +406,27 @@ func queryScenario3AttemptsDistribution(ctx context.Context, db *sql.DB, goodWeb
 	return out, nil
 }
 
-func scenario3WebhookLabel(webhookURL, goodWebhookURL, badWebhookURL string) string {
+func terminalFastFailWebhookLabel(webhookURL, goodWebhookURL, badWebhookURL string) string {
 	switch {
-	case scenario3WebhookURLMatches(webhookURL, goodWebhookURL):
+	case terminalFastFailWebhookURLMatches(webhookURL, goodWebhookURL):
 		return "good"
-	case scenario3WebhookURLMatches(webhookURL, badWebhookURL):
+	case terminalFastFailWebhookURLMatches(webhookURL, badWebhookURL):
 		return "misconfigured-404"
 	default:
 		return webhookURL
 	}
 }
 
-func scenario3WebhookURLMatches(webhookURL, expectedURL string) bool {
+func terminalFastFailWebhookURLMatches(webhookURL, expectedURL string) bool {
 	return strings.TrimSpace(webhookURL) == strings.TrimSpace(expectedURL)
 }
 
-type scenario3DLQReasonRow struct {
+type terminalFastFailDLQReasonRow struct {
 	Reason string
 	Count  int
 }
 
-func queryScenario3DLQReasons(ctx context.Context, db *sql.DB) ([]scenario3DLQReasonRow, error) {
+func queryTerminalFastFailDLQReasons(ctx context.Context, db *sql.DB) ([]terminalFastFailDLQReasonRow, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT reason, COUNT(*)
 		FROM dead_letters
@@ -437,9 +438,9 @@ func queryScenario3DLQReasons(ctx context.Context, db *sql.DB) ([]scenario3DLQRe
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out []scenario3DLQReasonRow
+	var out []terminalFastFailDLQReasonRow
 	for rows.Next() {
-		var r scenario3DLQReasonRow
+		var r terminalFastFailDLQReasonRow
 		if err := rows.Scan(&r.Reason, &r.Count); err != nil {
 			return nil, fmt.Errorf("scan dlq reason row: %w", err)
 		}

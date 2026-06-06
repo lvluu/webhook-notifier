@@ -1,4 +1,4 @@
-package scenarios
+package legacy
 
 import (
 	"context"
@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/lvluu/webhook-notifier/bench/receiver"
+	"github.com/lvluu/webhook-notifier/bench/scenarios"
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/registry"
@@ -26,21 +27,21 @@ import (
 
 const partnerAP99Limit = 2 * time.Second
 
-var scenario2Partners = []struct {
+var transientRecoveryPartners = []struct {
 	name string
 	host string
 	path string
 }{
-	{name: "Partner A", host: "partner-a.test", path: "/hooks/partner-a"},
-	{name: "Partner B", host: "partner-b.test", path: "/hooks/partner-b"},
-	{name: "Partner C", host: "partner-c.test", path: "/hooks/partner-c"},
+	{name: "Partner A", host: "tr-partner-a.test", path: "/hooks/partner-a"},
+	{name: "Partner B", host: "tr-partner-b.test", path: "/hooks/partner-b"},
+	{name: "Partner C", host: "tr-partner-c.test", path: "/hooks/partner-c"},
 }
 
-func scenario2CustomerID(i int) string {
-	return fmt.Sprintf("scenario-2-customer-%02d", i)
+func transientRecoveryCustomerID(i int) string {
+	return fmt.Sprintf("transient-recovery-customer-%02d", i)
 }
 
-type scenario2Profile struct {
+type transientRecoveryProfile struct {
 	Name                    string
 	CustomerCount           int
 	EventsPerCustomer       int
@@ -51,10 +52,10 @@ type scenario2Profile struct {
 	BreakerFailureThreshold int
 }
 
-// RunScenario2 executes the legacy Scenario 2, folded into
+// RunTransientRecovery executes the legacy Transient Recovery, folded into
 // partner_resilience.go and kept for reference until retirement.
-func RunScenario2(ctx context.Context) error {
-	db, cleanup, err := openBenchDatabase(ctx)
+func RunTransientRecovery(ctx context.Context) error {
+	db, cleanup, err := scenarios.OpenBenchDatabase(ctx)
 	if err != nil {
 		return fmt.Errorf("open bench db: %w", err)
 	}
@@ -63,11 +64,11 @@ func RunScenario2(ctx context.Context) error {
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping db: %w", err)
 	}
-	if err := resetBenchData(ctx, db); err != nil {
+	if err := scenarios.ResetBenchData(ctx, db); err != nil {
 		return fmt.Errorf("reset bench data: %w", err)
 	}
 
-	profile, err := scenario2ProfileFromEnv()
+	profile, err := transientRecoveryProfileFromEnv()
 	if err != nil {
 		return fmt.Errorf("load profile: %w", err)
 	}
@@ -77,7 +78,7 @@ func RunScenario2(ctx context.Context) error {
 	outageEnd := outageStart.Add(profile.OutageDuration)
 
 	rs := receiver.NewServer(
-		receiver.WithStableDecisions("scenario-2"),
+		receiver.WithStableDecisions("transient-recovery"),
 		receiver.WithRouteStatus("/hooks/partner-b", 0.30, http.StatusInternalServerError),
 		receiver.WithRouteStatusFunc("/hooks/partner-c", func(_ *http.Request, now time.Time) int {
 			if !now.Before(outageStart) && now.Before(outageEnd) {
@@ -89,12 +90,12 @@ func RunScenario2(ctx context.Context) error {
 	defer rs.Close()
 
 	totalEvents := profile.CustomerCount * profile.EventsPerCustomer
-	expectedDeliveries := totalEvents * len(scenario2Partners)
+	expectedDeliveries := totalEvents * len(transientRecoveryPartners)
 
-	if err := seedScenario2Customers(ctx, db, profile.CustomerCount); err != nil {
+	if err := seedTransientRecoveryCustomers(ctx, db, profile.CustomerCount); err != nil {
 		return fmt.Errorf("seed customers: %w", err)
 	}
-	if err := seedScenario2Webhooks(ctx, db, profile.CustomerCount); err != nil {
+	if err := seedTransientRecoveryWebhooks(ctx, db, profile.CustomerCount); err != nil {
 		return fmt.Errorf("seed webhooks: %w", err)
 	}
 
@@ -108,7 +109,7 @@ func RunScenario2(ctx context.Context) error {
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()
 
-	client, err := scenario2HTTPClient(rs.URL())
+	client, err := transientRecoveryHTTPClient(rs.URL())
 	if err != nil {
 		return fmt.Errorf("create scenario http client: %w", err)
 	}
@@ -129,7 +130,7 @@ func RunScenario2(ctx context.Context) error {
 				plainSched,
 				worker.WithHTTPClient(client),
 				worker.WithHostLimiter(hostLimiter),
-				worker.WithRetryPolicy(scenario2RetryPolicy()),
+				worker.WithRetryPolicy(transientRecoveryRetryPolicy()),
 				worker.WithLogger(workerLog),
 			)
 			if err := w.Run(workerCtx, outboxStore); err != nil && workerCtx.Err() == nil {
@@ -151,15 +152,15 @@ func RunScenario2(ctx context.Context) error {
 	}()
 	slog.Info("started workers", "profile", profile.Name, "count", workers)
 
-	if err := submitScenario2Events(ctx, ingestStore, profile.CustomerCount, profile.EventsPerCustomer, profile.SubmitInterval); err != nil {
+	if err := submitTransientRecoveryEvents(ctx, ingestStore, profile.CustomerCount, profile.EventsPerCustomer, profile.SubmitInterval); err != nil {
 		return fmt.Errorf("submit events: %w", err)
 	}
-	slog.Info("submitted scenario 2 events", "events", totalEvents, "expected_deliveries", expectedDeliveries)
+	slog.Info("submitted transient recovery events", "events", totalEvents, "expected_deliveries", expectedDeliveries)
 
 	pollCtx, cancelPoll := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancelPoll()
 	for {
-		pending, err := countPendingDeliveries(pollCtx, db)
+		pending, err := scenarios.CountPendingDeliveries(pollCtx, db)
 		if err != nil {
 			return fmt.Errorf("poll pending deliveries: %w", err)
 		}
@@ -181,8 +182,8 @@ func RunScenario2(ctx context.Context) error {
 	workerWg.Wait()
 
 	totalDuration := time.Since(scenarioStart)
-	reportPath := "bench/results/scenario-2.md"
-	if err := writeScenario2Report(ctx, db, reportPath, scenario2ReportParams{
+	reportPath := "bench/results/transient-recovery.md"
+	if err := writeTransientRecoveryReport(ctx, db, reportPath, transientRecoveryReportParams{
 		profileName:         profile.Name,
 		totalDuration:       totalDuration,
 		totalEvents:         totalEvents,
@@ -198,26 +199,26 @@ func RunScenario2(ctx context.Context) error {
 		return fmt.Errorf("write report: %w", err)
 	}
 
-	slog.Info("scenario 2 complete", "profile", profile.Name, "report", reportPath)
+	slog.Info("transient recovery complete", "profile", profile.Name, "report", reportPath)
 	return nil
 }
 
-func scenario2ProfileFromEnv() (scenario2Profile, error) {
-	raw, name, err := loadBenchProfileConfig("scenario2")
+func transientRecoveryProfileFromEnv() (transientRecoveryProfile, error) {
+	raw, name, err := scenarios.LoadBenchProfileConfig("transient_recovery")
 	if err != nil {
-		return scenario2Profile{}, err
+		return transientRecoveryProfile{}, err
 	}
 	if raw.CustomerCount < 1 || raw.EventsPerCustomer < 1 || raw.WorkerCount < 1 {
-		return scenario2Profile{}, fmt.Errorf("scenario2 profile %q has invalid positive counts", name)
+		return transientRecoveryProfile{}, fmt.Errorf("transient_recovery profile %q has invalid positive counts", name)
 	}
 	if raw.SubmitInterval.Duration() < 0 || raw.OutageDelay.Duration() < 0 || raw.OutageDuration.Duration() < 0 {
-		return scenario2Profile{}, fmt.Errorf("scenario2 profile %q has invalid durations", name)
+		return transientRecoveryProfile{}, fmt.Errorf("transient_recovery profile %q has invalid durations", name)
 	}
 	if raw.BreakerFailureThreshold < 0 {
-		return scenario2Profile{}, fmt.Errorf("scenario2 profile %q has invalid breaker threshold", name)
+		return transientRecoveryProfile{}, fmt.Errorf("transient_recovery profile %q has invalid breaker threshold", name)
 	}
 
-	return scenario2Profile{
+	return transientRecoveryProfile{
 		Name:                    name,
 		CustomerCount:           raw.CustomerCount,
 		EventsPerCustomer:       raw.EventsPerCustomer,
@@ -229,14 +230,14 @@ func scenario2ProfileFromEnv() (scenario2Profile, error) {
 	}, nil
 }
 
-func scenario2HTTPClient(receiverURL string) (*http.Client, error) {
+func transientRecoveryHTTPClient(receiverURL string) (*http.Client, error) {
 	u, err := url.Parse(receiverURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse receiver url: %w", err)
 	}
 	receiverAddr := u.Host
-	fakeHosts := make(map[string]bool, len(scenario2Partners))
-	for _, p := range scenario2Partners {
+	fakeHosts := make(map[string]bool, len(transientRecoveryPartners))
+	for _, p := range transientRecoveryPartners {
 		fakeHosts[p.host] = true
 	}
 
@@ -253,7 +254,7 @@ func scenario2HTTPClient(receiverURL string) (*http.Client, error) {
 	return &http.Client{Transport: transport, Timeout: 15 * time.Second}, nil
 }
 
-func scenario2RetryPolicy() retry.RetryPolicy {
+func transientRecoveryRetryPolicy() retry.RetryPolicy {
 	return retry.New(retry.Config{
 		MaxAttempts: 20,
 		BaseDelay:   retry.DefaultBaseDelay,
@@ -261,7 +262,7 @@ func scenario2RetryPolicy() retry.RetryPolicy {
 	})
 }
 
-func seedScenario2Customers(ctx context.Context, db *sql.DB, customerCount int) error {
+func seedTransientRecoveryCustomers(ctx context.Context, db *sql.DB, customerCount int) error {
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO customers (id, class) VALUES ")
 	args := make([]any, 0, customerCount*2)
@@ -270,7 +271,7 @@ func seedScenario2Customers(ctx context.Context, db *sql.DB, customerCount int) 
 			sb.WriteString(", ")
 		}
 		fmt.Fprintf(&sb, "($%d, $%d)", i*2+1, i*2+2)
-		args = append(args, scenario2CustomerID(i), 1)
+		args = append(args, transientRecoveryCustomerID(i), 1)
 	}
 	sb.WriteString(" ON CONFLICT (id) DO NOTHING")
 
@@ -280,15 +281,15 @@ func seedScenario2Customers(ctx context.Context, db *sql.DB, customerCount int) 
 	return nil
 }
 
-func seedScenario2Webhooks(ctx context.Context, db *sql.DB, customerCount int) error {
+func seedTransientRecoveryWebhooks(ctx context.Context, db *sql.DB, customerCount int) error {
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active) VALUES ")
 
-	args := make([]any, 0, customerCount*len(scenario2Partners)*4)
+	args := make([]any, 0, customerCount*len(transientRecoveryPartners)*4)
 	row := 0
 	for i := 0; i < customerCount; i++ {
-		customerID := scenario2CustomerID(i)
-		for _, partner := range scenario2Partners {
+		customerID := transientRecoveryCustomerID(i)
+		for _, partner := range transientRecoveryPartners {
 			if row > 0 {
 				sb.WriteString(", ")
 			}
@@ -298,7 +299,7 @@ func seedScenario2Webhooks(ctx context.Context, db *sql.DB, customerCount int) e
 				customerID,
 				fmt.Sprintf("http://%s%s", partner.host, partner.path),
 				"",
-				fmt.Sprintf("{%s}", eventType),
+				fmt.Sprintf("{%s}", scenarios.EventType),
 			)
 			row++
 		}
@@ -311,13 +312,13 @@ func seedScenario2Webhooks(ctx context.Context, db *sql.DB, customerCount int) e
 	return nil
 }
 
-func submitScenario2Events(ctx context.Context, store *ingest.Store, customerCount int, eventsPerCustomer int, interval time.Duration) error {
+func submitTransientRecoveryEvents(ctx context.Context, store *ingest.Store, customerCount int, eventsPerCustomer int, interval time.Duration) error {
 	for i := 0; i < customerCount; i++ {
-		customerID := scenario2CustomerID(i)
+		customerID := transientRecoveryCustomerID(i)
 		for range eventsPerCustomer {
 			if _, err := store.Submit(ctx, ingest.Event{
 				CustomerID: customerID,
-				Type:       eventType,
+				Type:       scenarios.EventType,
 				Payload:    []byte(`{"event_name":"subscriber.created"}`),
 			}); err != nil {
 				return fmt.Errorf("submit event for %s: %w", customerID, err)
@@ -334,7 +335,7 @@ func submitScenario2Events(ctx context.Context, store *ingest.Store, customerCou
 	return nil
 }
 
-type scenario2ReportParams struct {
+type transientRecoveryReportParams struct {
 	profileName         string
 	totalDuration       time.Duration
 	totalEvents         int
@@ -348,24 +349,24 @@ type scenario2ReportParams struct {
 	jitterBucketPercent float64
 }
 
-func writeScenario2Report(ctx context.Context, db *sql.DB, path string, p scenario2ReportParams) error {
-	totalDeliveries, err := queryTotalDeliveries(ctx, db)
+func writeTransientRecoveryReport(ctx context.Context, db *sql.DB, path string, p transientRecoveryReportParams) error {
+	totalDeliveries, err := scenarios.QueryTotalDeliveries(ctx, db)
 	if err != nil {
 		return fmt.Errorf("query total deliveries: %w", err)
 	}
-	terminal, err := queryTerminalDeliveries(ctx, db)
+	terminal, err := scenarios.QueryTerminalDeliveries(ctx, db)
 	if err != nil {
 		return fmt.Errorf("query terminal deliveries: %w", err)
 	}
-	partnerAStats, err := queryPartnerLatency(ctx, db, "partner-a.test")
+	partnerAStats, err := queryPartnerLatency(ctx, db, "tr-partner-a.test")
 	if err != nil {
 		return fmt.Errorf("query partner a latency: %w", err)
 	}
-	recovery, err := queryPartnerRecovery(ctx, db, "partner-c.test", p.outageStart, p.outageEnd)
+	recovery, err := queryPartnerRecovery(ctx, db, "tr-partner-c.test", p.outageStart, p.outageEnd)
 	if err != nil {
 		return fmt.Errorf("query partner c recovery: %w", err)
 	}
-	jitter, err := queryPartnerRetryBuckets(ctx, db, "partner-c.test", p.outageEnd)
+	jitter, err := queryPartnerRetryBuckets(ctx, db, "tr-partner-c.test", p.outageEnd)
 	if err != nil {
 		return fmt.Errorf("query partner c retry buckets: %w", err)
 	}
@@ -385,7 +386,7 @@ func writeScenario2Report(ctx context.Context, db *sql.DB, path string, p scenar
 	}
 	defer func() { _ = f.Close() }()
 
-	_, _ = fmt.Fprintf(f, `# Scenario 2: Transient + Recovering Partners
+	_, _ = fmt.Fprintf(f, `# Transient Recovery: Transient + Recovering Partners
 
 ## Description
 
@@ -425,13 +426,13 @@ Profile **%s**: %d Customers, %d Events per Customer, 3 Webhooks per Customer. E
 		p.outageStart.Format(time.RFC3339), p.outageEnd.Format(time.RFC3339), p.submitInterval,
 		p.totalDuration.Round(time.Second), p.totalEvents, totalDeliveries, p.expectedDeliveries,
 		p.workerCount, terminal, totalDeliveries,
-		terminal, totalDeliveries, totalDeliveries, totalDeliveries, passFail(terminalOK),
-		recovery.Succeeded, recovery.Total, recovery.Total, recovery.Total, passFail(recoveryOK),
-		partnerAStats.P99Ms, float64(partnerAP99Limit/time.Millisecond), passFail(partnerAOK),
-		jitter.MaxPerSecond, jitter.Total, jitterLimit, passFail(jitterOK),
+		terminal, totalDeliveries, totalDeliveries, totalDeliveries, scenarios.PassFail(terminalOK),
+		recovery.Succeeded, recovery.Total, recovery.Total, recovery.Total, scenarios.PassFail(recoveryOK),
+		partnerAStats.P99Ms, float64(partnerAP99Limit/time.Millisecond), scenarios.PassFail(partnerAOK),
+		jitter.MaxPerSecond, jitter.Total, jitterLimit, scenarios.PassFail(jitterOK),
 	)
 
-	for _, partner := range scenario2Partners {
+	for _, partner := range transientRecoveryPartners {
 		stats, err := queryPartnerLatency(ctx, db, partner.host)
 		if err != nil {
 			return fmt.Errorf("query %s latency: %w", partner.name, err)
@@ -441,7 +442,7 @@ Profile **%s**: %d Customers, %d Events per Customer, 3 Webhooks per Customer. E
 	}
 
 	_, _ = fmt.Fprintf(f, "\n## Attempts Per Delivery\n\n")
-	retries, err := queryRetryDistribution(ctx, db)
+	retries, err := scenarios.QueryRetryDistribution(ctx, db)
 	if err != nil {
 		return fmt.Errorf("query retry distribution: %w", err)
 	}
@@ -451,7 +452,7 @@ Profile **%s**: %d Customers, %d Events per Customer, 3 Webhooks per Customer. E
 	}
 
 	_, _ = fmt.Fprintf(f, "\n## Delivery Outcomes\n\n")
-	outcomes, err := queryDeliveryOutcomes(ctx, db)
+	outcomes, err := scenarios.QueryDeliveryOutcomes(ctx, db)
 	if err != nil {
 		return fmt.Errorf("query outcomes: %w", err)
 	}
@@ -463,15 +464,8 @@ Profile **%s**: %d Customers, %d Events per Customer, 3 Webhooks per Customer. E
 	return f.Close()
 }
 
-type partnerLatencyStats struct {
-	P50Ms float64
-	P95Ms float64
-	P99Ms float64
-	MaxMs float64
-}
-
-func queryPartnerLatency(ctx context.Context, db *sql.DB, host string) (partnerLatencyStats, error) {
-	var stats partnerLatencyStats
+func queryPartnerLatency(ctx context.Context, db *sql.DB, host string) (scenarios.PartnerLatencyStats, error) {
+	var stats scenarios.PartnerLatencyStats
 	err := db.QueryRowContext(ctx, `
 		SELECT
 			COALESCE(percentile_cont(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (d.updated_at - d.created_at)) * 1000), 0),
@@ -484,18 +478,13 @@ func queryPartnerLatency(ctx context.Context, db *sql.DB, host string) (partnerL
 		  AND d.status IN ('succeeded', 'dead')
 	`, host).Scan(&stats.P50Ms, &stats.P95Ms, &stats.P99Ms, &stats.MaxMs)
 	if err != nil {
-		return partnerLatencyStats{}, fmt.Errorf("query partner latency: %w", err)
+		return scenarios.PartnerLatencyStats{}, fmt.Errorf("query partner latency: %w", err)
 	}
 	return stats, nil
 }
 
-type partnerRecoveryStats struct {
-	Total     int
-	Succeeded int
-}
-
-func queryPartnerRecovery(ctx context.Context, db *sql.DB, host string, outageStart time.Time, outageEnd time.Time) (partnerRecoveryStats, error) {
-	var stats partnerRecoveryStats
+func queryPartnerRecovery(ctx context.Context, db *sql.DB, host string, outageStart time.Time, outageEnd time.Time) (scenarios.PartnerRecoveryStats, error) {
+	var stats scenarios.PartnerRecoveryStats
 	err := db.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*),
@@ -507,18 +496,13 @@ func queryPartnerRecovery(ctx context.Context, db *sql.DB, host string, outageSt
 		  AND d.created_at < $3
 	`, host, outageStart, outageEnd).Scan(&stats.Total, &stats.Succeeded)
 	if err != nil {
-		return partnerRecoveryStats{}, fmt.Errorf("query partner recovery: %w", err)
+		return scenarios.PartnerRecoveryStats{}, fmt.Errorf("query partner recovery: %w", err)
 	}
 	return stats, nil
 }
 
-type retryBucketStats struct {
-	Total        int
-	MaxPerSecond int
-}
-
-func queryPartnerRetryBuckets(ctx context.Context, db *sql.DB, host string, recoveryAt time.Time) (retryBucketStats, error) {
-	var stats retryBucketStats
+func queryPartnerRetryBuckets(ctx context.Context, db *sql.DB, host string, recoveryAt time.Time) (scenarios.RetryBucketStats, error) {
+	var stats scenarios.RetryBucketStats
 	err := db.QueryRowContext(ctx, `
 		WITH buckets AS (
 			SELECT date_trunc('second', da.sent_at) AS bucket, COUNT(*) AS attempts
@@ -534,13 +518,7 @@ func queryPartnerRetryBuckets(ctx context.Context, db *sql.DB, host string, reco
 		FROM buckets
 	`, host, recoveryAt).Scan(&stats.Total, &stats.MaxPerSecond)
 	if err != nil {
-		return retryBucketStats{}, fmt.Errorf("query partner retry buckets: %w", err)
+		return scenarios.RetryBucketStats{}, fmt.Errorf("query partner retry buckets: %w", err)
 	}
 	return stats, nil
-}
-
-func queryTerminalDeliveries(ctx context.Context, db *sql.DB) (int, error) {
-	var n int
-	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deliveries WHERE status IN ('succeeded', 'dead')`).Scan(&n)
-	return n, err
 }

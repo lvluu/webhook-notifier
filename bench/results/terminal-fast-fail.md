@@ -1,4 +1,4 @@
-# Scenario 3: Terminal Classification Fast-Fail
+# Terminal Fast-Fail: Terminal Classification Fast-Fail
 
 ## Description
 
@@ -17,12 +17,12 @@ Profile **stress**: 1 Customer with 2 Webhooks: one healthy URL returning 2xx an
 
 ## Acceptance Criteria
 
-| Criterion | Observed | Limit | Result |
-|---|---:|---:|---|
-| 100% Deliveries terminal | 2000 / 2000 | 2000 / 2000 | **PASS** |
-| Good Webhook Deliveries succeeded | 1000 / 1000 | 1000 / 1000 | **PASS** |
-| 404 Webhook Deliveries dead with terminal_4xx | 1000 / 1000 | 1000 / 1000 | **PASS** |
-| 404 Webhook retry waste | 0 Deliveries with >1 Attempt | 0 | **PASS** |
+| Pillar | Criterion | Observed | Limit | Result |
+|---|---|---:|---:|---|
+| Reliability | 100% Deliveries terminal | 2000 / 2000 | 2000 / 2000 | **PASS** |
+| Reliability | Good Webhook Deliveries succeeded | 1000 / 1000 | 1000 / 1000 | **PASS** |
+| Reliability | 404 Webhook Deliveries dead with terminal_4xx | 1000 / 1000 | 1000 / 1000 | **PASS** |
+| Reliability | 404 Webhook retry waste | 0 Deliveries with >1 Attempt | 0 | **PASS** |
 
 ## Per-Webhook Attempts Per Delivery
 

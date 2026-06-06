@@ -13,7 +13,9 @@ not part of the notifier scrape target set.
 - DLQ ingress rate by `reason` from `webhook_dlq_total`. Lower is better; anything sustained is a problem.
 - Notifier instance count and configured worker count. This is context for scaling, not a success metric.
 - Per-host semaphore wait p95 for the top hosts from `webhook_host_semaphore_wait_seconds`. Lower is better.
-- Claim duration and batch size from `webhook_claim_duration_seconds` and `webhook_claim_batch_size`. Lower claim latency is better; batch size should stay high enough to keep throughput efficient.
+- Claim duration and batch size from `webhook_claim_duration_seconds` and `webhook_claim_batch_size`. Lower claim latency is better. The batch-size panel shows both effective average, which includes empty claim queries, and non-empty average, which shows how much work a successful claim returns.
+- Oldest pending delivery age from `webhook_pending_oldest_age_seconds`. This measures the oldest row still in `pending` only, not retryable backoff rows.
+- Empty claim rate from `webhook_claim_empty_total / webhook_claim_batch_size_count`. Under sparse or drained load this can be high because multiple replicas may be woken for work that one replica already claimed with `SKIP LOCKED`; treat it as a DB churn signal only when it is paired with rising backlog or claim latency.
 - Postgres pool usage from `webhook_pg_pool_*`. Lower pressure is better.
 - Receiver throughput from `webhook_requests_received_total`. Higher is only useful when notifier throughput keeps up.
 

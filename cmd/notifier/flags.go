@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"time"
 )
 
@@ -39,10 +40,25 @@ func parseCLIConfig(fs *flag.FlagSet, args []string) (cliConfig, error) {
 	enablePgNotifyWakeups := fs.Bool("enable-pg-notify-wakeups", true, "use LISTEN/NOTIFY wakeups in addition to polling")
 	pgNotifyDSN := fs.String("pg-notify-db", "", "optional direct DATABASE_URL for LISTEN/NOTIFY connections")
 	pgNotifyChannel := fs.String("pg-notify-channel", "webhook_customer_ready", "LISTEN/NOTIFY channel for customer wakeups")
+	breakerFailureThreshold := fs.Int("breaker-failure-threshold", 20, "failures before opening a Webhook circuit breaker; 0 disables breaker filtering")
+	breakerInitialCooldown := fs.Duration("breaker-initial-cooldown", 5*time.Minute, "initial circuit breaker open cooldown")
+	breakerMaxCooldown := fs.Duration("breaker-max-cooldown", 15*time.Minute, "maximum circuit breaker open cooldown")
 	maxConns := fs.Int("max-conns", 0, "max DB connections (0 = workerCount + 10)")
 
 	if err := fs.Parse(args); err != nil {
 		return cliConfig{}, err
+	}
+	if *breakerFailureThreshold < 0 {
+		return cliConfig{}, fmt.Errorf("breaker-failure-threshold must be >= 0")
+	}
+	if *breakerInitialCooldown <= 0 {
+		return cliConfig{}, fmt.Errorf("breaker-initial-cooldown must be > 0")
+	}
+	if *breakerMaxCooldown <= 0 {
+		return cliConfig{}, fmt.Errorf("breaker-max-cooldown must be > 0")
+	}
+	if *breakerMaxCooldown < *breakerInitialCooldown {
+		return cliConfig{}, fmt.Errorf("breaker-max-cooldown must be >= breaker-initial-cooldown")
 	}
 
 	runtimeCfg := loadWorkerRuntimeConfig()
@@ -58,6 +74,9 @@ func parseCLIConfig(fs *flag.FlagSet, args []string) (cliConfig, error) {
 	runtimeCfg.EnablePgNotifyWakeups = *enablePgNotifyWakeups
 	runtimeCfg.PgNotifyDSN = *pgNotifyDSN
 	runtimeCfg.PgNotifyChannel = *pgNotifyChannel
+	runtimeCfg.Breaker.FailureThreshold = *breakerFailureThreshold
+	runtimeCfg.Breaker.InitialCooldown = *breakerInitialCooldown
+	runtimeCfg.Breaker.MaxCooldown = *breakerMaxCooldown
 	runtimeCfg.Discovery.Interval = *discoveryInterval
 
 	return cliConfig{

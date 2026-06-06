@@ -5,28 +5,28 @@ import (
 	"testing"
 )
 
-func TestScenario8ComputeScalingVerdict(t *testing.T) {
+func TestHorizontalScaleComputeScalingVerdict(t *testing.T) {
 	tests := []struct {
 		name     string
-		runs     []scenario8DenseRun
+		runs     []horizontalScaleDenseRun
 		wantMode string
 		wantPass bool
 	}{
 		{
 			name:     "throughput improvement",
-			runs:     []scenario8DenseRun{{ReplicaCount: 1, Throughput: 100}, {ReplicaCount: 2, Throughput: 180}},
+			runs:     []horizontalScaleDenseRun{{ReplicaCount: 1, Throughput: 100}, {ReplicaCount: 2, Throughput: 180}},
 			wantMode: "improvement",
 			wantPass: true,
 		},
 		{
 			name:     "no improvement",
-			runs:     []scenario8DenseRun{{ReplicaCount: 1, Throughput: 150}, {ReplicaCount: 2, Throughput: 150}},
+			runs:     []horizontalScaleDenseRun{{ReplicaCount: 1, Throughput: 150}, {ReplicaCount: 2, Throughput: 150}},
 			wantMode: "no-improvement",
 			wantPass: true,
 		},
 		{
 			name:     "regression",
-			runs:     []scenario8DenseRun{{ReplicaCount: 1, Throughput: 180}, {ReplicaCount: 2, Throughput: 120}},
+			runs:     []horizontalScaleDenseRun{{ReplicaCount: 1, Throughput: 180}, {ReplicaCount: 2, Throughput: 120}},
 			wantMode: "regression",
 			wantPass: true,
 		},
@@ -34,7 +34,7 @@ func TestScenario8ComputeScalingVerdict(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := scenario8ComputeScalingVerdict(tc.runs)
+			got := horizontalScaleComputeScalingVerdict(tc.runs)
 			if got.Mode != tc.wantMode {
 				t.Fatalf("mode=%q want=%q", got.Mode, tc.wantMode)
 			}
@@ -45,7 +45,7 @@ func TestScenario8ComputeScalingVerdict(t *testing.T) {
 	}
 }
 
-func TestScenario8PerReplicaDistributionVerdict(t *testing.T) {
+func TestHorizontalScalePerReplicaDistributionVerdict(t *testing.T) {
 	tests := []struct {
 		name         string
 		counts       map[string]int
@@ -70,7 +70,7 @@ func TestScenario8PerReplicaDistributionVerdict(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := scenario8PerReplicaDistributionVerdict(tc.counts, tc.expectedIDs)
+			got := horizontalScalePerReplicaDistributionVerdict(tc.counts, tc.expectedIDs)
 			if got.HardFail != tc.wantHardFail {
 				t.Fatalf("hardFail=%v want=%v", got.HardFail, tc.wantHardFail)
 			}

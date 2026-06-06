@@ -209,7 +209,7 @@
         },
         {
           "title": "Oldest Pending Delivery",
-          "description": "Age of the oldest pending or retryable delivery. Rising age indicates delayed work or starvation even when queue depth is stable.",
+          "description": "Age of the oldest pending delivery. Retryable rows are excluded, so this tracks unclaimed work only. Rising age indicates delayed work or starvation even when queue depth is stable.",
           "type": "timeseries",
           "gridPos": {
             "h": 8,
@@ -459,7 +459,7 @@
         },
         {
           "title": "Claim Batch Size",
-          "description": "Average number of deliveries claimed per DB round trip. Higher is generally better up to the configured ceiling; very low values reduce throughput efficiency at high traffic.",
+          "description": "Average number of deliveries claimed per DB round trip. Effective avg includes empty claim queries; non-empty avg shows batch size only when a claim actually returned deliveries.",
           "type": "timeseries",
           "gridPos": {
             "h": 8,
@@ -470,7 +470,11 @@
           "targets": [
             {
               "expr": "sum(rate(webhook_claim_batch_size_sum[1m])) / sum(rate(webhook_claim_batch_size_count[1m]))",
-              "legendFormat": "avg"
+              "legendFormat": "effective avg"
+            },
+            {
+              "expr": "sum(rate(webhook_claim_batch_size_sum[1m])) / clamp_min(sum(rate(webhook_claim_batch_size_count[1m])) - sum(rate(webhook_claim_empty_total[1m])), 1)",
+              "legendFormat": "non-empty avg"
             }
           ],
           "fieldConfig": {

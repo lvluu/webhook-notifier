@@ -18,6 +18,10 @@ type CustomerID = string
 // or ok=false when no Customer has pending work registered with this Scheduler.
 // batchHint == 0 means no work. Pick must respect ctx cancellation.
 //
+// WaitForWork blocks until at least one Customer is registered or ctx is
+// cancelled. Workers call this instead of polling with time-based backoff
+// when Pick returns ok=false.
+//
 // Notify informs the Scheduler that the given Customer has new pending work.
 // Implementations must be safe for concurrent use.
 //
@@ -26,6 +30,7 @@ type CustomerID = string
 // not currently registered.
 type Scheduler interface {
 	Pick(ctx context.Context) (customerID CustomerID, batchHint uint32, ok bool, err error)
+	WaitForWork(ctx context.Context) error
 	Notify(customerID CustomerID)
 	Remove(customerID CustomerID)
 }

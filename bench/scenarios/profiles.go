@@ -12,15 +12,18 @@ import (
 )
 
 const (
-	benchProfileDev    = "dev"
-	benchProfileStress = "stress"
+	// BenchProfileDev is the small, fast local benchmark profile.
+	BenchProfileDev = "dev"
+	// BenchProfileStress is the report-quality benchmark profile.
+	BenchProfileStress = "stress"
 )
 
 type benchProfilesFile struct {
-	Scenarios map[string]map[string]benchProfileConfig `yaml:"scenarios"`
+	Scenarios map[string]map[string]BenchProfileConfig `yaml:"scenarios"`
 }
 
-type benchProfileConfig struct {
+// BenchProfileConfig is the YAML-backed configuration shared by benchmark scenarios.
+type BenchProfileConfig struct {
 	WorkerCount                int           `yaml:"worker_count"`
 	WorkerCounts               []int         `yaml:"worker_counts"`
 	ReplicaCounts              []int         `yaml:"replica_counts"`
@@ -95,44 +98,47 @@ var (
 	benchProfilesErr  error
 )
 
-func loadBenchProfileConfig(scenario string) (benchProfileConfig, string, error) {
-	profiles, err := readBenchProfiles()
+// LoadBenchProfileConfig returns the selected profile config for a scenario.
+func LoadBenchProfileConfig(scenario string) (BenchProfileConfig, string, error) {
+	profiles, err := ReadBenchProfiles()
 	if err != nil {
-		return benchProfileConfig{}, "", err
+		return BenchProfileConfig{}, "", err
 	}
 
 	profilesForScenario, ok := profiles.Scenarios[scenario]
 	if !ok {
-		return benchProfileConfig{}, "", fmt.Errorf("unknown bench scenario %q in profiles", scenario)
+		return BenchProfileConfig{}, "", fmt.Errorf("unknown bench scenario %q in profiles", scenario)
 	}
 
-	name, err := benchProfileNameFromEnv()
+	name, err := BenchProfileNameFromEnv()
 	if err != nil {
-		return benchProfileConfig{}, "", err
+		return BenchProfileConfig{}, "", err
 	}
 
 	profile, ok := profilesForScenario[name]
 	if !ok {
-		return benchProfileConfig{}, "", fmt.Errorf("missing %q profile for %s", name, scenario)
+		return BenchProfileConfig{}, "", fmt.Errorf("missing %q profile for %s", name, scenario)
 	}
 
 	return profile, name, nil
 }
 
-func benchProfileNameFromEnv() (string, error) {
+// BenchProfileNameFromEnv returns the selected BENCH_PROFILE name.
+func BenchProfileNameFromEnv() (string, error) {
 	name := os.Getenv("BENCH_PROFILE")
 	if name == "" {
-		return benchProfileDev, nil
+		return BenchProfileDev, nil
 	}
 	switch name {
-	case benchProfileDev, benchProfileStress:
+	case BenchProfileDev, BenchProfileStress:
 		return name, nil
 	default:
-		return "", fmt.Errorf("unsupported BENCH_PROFILE %q: want %q or %q", name, benchProfileDev, benchProfileStress)
+		return "", fmt.Errorf("unsupported BENCH_PROFILE %q: want %q or %q", name, BenchProfileDev, BenchProfileStress)
 	}
 }
 
-func readBenchProfiles() (benchProfilesFile, error) {
+// ReadBenchProfiles parses bench/profiles.yaml once and caches the result.
+func ReadBenchProfiles() (benchProfilesFile, error) {
 	benchProfilesOnce.Do(func() {
 		path, err := benchProfilesPath()
 		if err != nil {

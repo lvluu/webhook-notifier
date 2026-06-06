@@ -1,4 +1,4 @@
-package scenarios
+package legacy
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 )
 
 // instrumentedScheduler wraps a Scheduler and counts Pick invocations.
-// Used by Scenario 1 to measure the round-robin cycle bound for the
+// Used by Late Arrival Fairness to measure the round-robin cycle bound for the
 // late-arrival acceptance criterion.
 //
 // It also supports per-customer pick tracking: call BeginTracking(customerID)
@@ -35,6 +35,11 @@ func (is *instrumentedScheduler) Notify(customerID string) {
 // Remove delegates to the inner Scheduler.
 func (is *instrumentedScheduler) Remove(customerID string) {
 	is.inner.Remove(customerID)
+}
+
+// WaitForWork delegates to the inner Scheduler.
+func (is *instrumentedScheduler) WaitForWork(ctx context.Context) error {
+	return is.inner.WaitForWork(ctx)
 }
 
 // Pick delegates to the inner Scheduler and increments the Pick counter on

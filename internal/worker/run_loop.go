@@ -15,6 +15,7 @@ import (
 const (
 	idleBackoff              = 50 * time.Millisecond
 	defaultEmptyClaimBackoff = 20 * time.Millisecond
+	maxEmptyClaimBackoff     = 250 * time.Millisecond
 	// transientErrorBackoff is the pause after a recoverable database error
 	// (statement timeout, deadlock, connection churn). Long enough to let an
 	// overloaded database shed load, short enough to resume promptly. Kept
@@ -30,6 +31,14 @@ func (w *Worker) emptyClaimDelay() time.Duration {
 	return defaultEmptyClaimBackoff
 }
 
+func (w *Worker) maxEmptyClaimDelay() time.Duration {
+	base := w.emptyClaimDelay()
+	if base > maxEmptyClaimBackoff {
+		return base
+	}
+	return maxEmptyClaimBackoff
+}
+
 // Run continuously claims scheduled Deliveries and processes them.
 func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 	if store == nil {
@@ -39,6 +48,8 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 		return fmt.Errorf("scheduler is required")
 	}
 
+	emptyDelay := w.emptyClaimDelay()
+	maxEmptyDelay := w.maxEmptyClaimDelay()
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -62,11 +73,13 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(w.emptyClaimDelay()):
+			case <-time.After(emptyDelay):
 			}
+			emptyDelay = growBackoff(emptyDelay, maxEmptyDelay)
 			continue
 		}
 
+		emptyDelay = w.emptyClaimDelay()
 		if err := w.processDeliveries(ctx, store, deliveries); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -113,103 +126,114 @@ func (w *Worker) claimOrCollect(ctx context.Context, store DeliveryStore) ([]out
 }
 
 func (w *Worker) claimSingle(ctx context.Context, store DeliveryStore) ([]outbox.Delivery, error) {
-	customerID, batchHint, ok, err := w.Scheduler.Pick(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-
-	limit := w.Config.ClaimLimit(batchHint)
-	deliveries, err := store.ClaimNextN(ctx, customerID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("claim delivery for %s: %w", customerID, err)
-	}
-	if len(deliveries) == 0 {
-		hasWork, checkErr := store.HasClaimableWork(ctx, customerID)
-		switch {
-		case checkErr != nil:
-			w.Logger.Warn(
-				"claimability check failed; keeping customer in rotation",
-				"customer_id", customerID,
-				"error", checkErr,
-			)
-			w.Scheduler.Notify(customerID)
-		case hasWork:
-			w.Scheduler.Notify(customerID)
-		default:
-			w.Scheduler.Remove(customerID)
-		}
-		return nil, nil
-	}
-
-	return deliveries, nil
-}
-
-func (w *Worker) claimMulti(ctx context.Context, store DeliveryStore) ([]outbox.Delivery, error) {
-	customerIDs := make([]string, 0, w.Config.MultiPickCount)
-	totalLimit := 0
-	for range w.Config.MultiPickCount {
-		id, batchHint, ok, err := w.Scheduler.Pick(ctx)
+	for {
+		customerID, batchHint, ok, err := w.Scheduler.Pick(ctx)
 		if err != nil {
 			return nil, err
 		}
 		if !ok {
-			break
-		}
-		customerIDs = append(customerIDs, id)
-		totalLimit += w.Config.ClaimLimit(batchHint)
-	}
-
-	if len(customerIDs) == 0 {
-		return nil, nil
-	}
-
-	deliveries, err := store.ClaimNextBatch(ctx, customerIDs, totalLimit)
-	if err != nil {
-		return nil, fmt.Errorf("claim batch: %w", err)
-	}
-
-	// Track which customers actually produced deliveries.
-	claimedSet := make(map[string]struct{}, len(deliveries))
-	for _, d := range deliveries {
-		claimedSet[d.CustomerID] = struct{}{}
-	}
-
-	// Find customers that had zero deliveries claimed.
-	var empties []string
-	for _, cid := range customerIDs {
-		if _, ok := claimedSet[cid]; ok {
-			w.Scheduler.Notify(cid)
-		} else {
-			empties = append(empties, cid)
-		}
-	}
-
-	if len(empties) > 0 {
-		hasWork, checkErr := store.HasClaimableWorkBatch(ctx, empties)
-		if checkErr != nil {
-			w.Logger.Warn(
-				"claimability batch check failed; keeping customers in rotation",
-				"empty_count", len(empties),
-				"error", checkErr,
-			)
-			for _, cid := range empties {
-				w.Scheduler.Notify(cid)
+			if err := w.Scheduler.WaitForWork(ctx); err != nil {
+				return nil, err
 			}
-		} else {
-			for _, cid := range empties {
-				if hasWork[cid] {
+			continue
+		}
+
+		limit := w.Config.ClaimLimit(batchHint)
+		deliveries, err := store.ClaimNextN(ctx, customerID, limit)
+		if err != nil {
+			return nil, fmt.Errorf("claim delivery for %s: %w", customerID, err)
+		}
+		if len(deliveries) == 0 {
+			hasWork, checkErr := store.HasClaimableWork(ctx, customerID)
+			switch {
+			case checkErr != nil:
+				w.Logger.Warn(
+					"claimability check failed; keeping customer in rotation",
+					"customer_id", customerID,
+					"error", checkErr,
+				)
+				w.Scheduler.Notify(customerID)
+			case hasWork:
+				w.Scheduler.Notify(customerID)
+			default:
+				w.Scheduler.Remove(customerID)
+			}
+			return nil, nil
+		}
+
+		w.Scheduler.Notify(customerID)
+		return deliveries, nil
+	}
+}
+
+func (w *Worker) claimMulti(ctx context.Context, store DeliveryStore) ([]outbox.Delivery, error) {
+	for {
+		customerIDs := make([]string, 0, w.Config.MultiPickCount)
+		totalLimit := 0
+		for range w.Config.MultiPickCount {
+			id, batchHint, ok, err := w.Scheduler.Pick(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				break
+			}
+			customerIDs = append(customerIDs, id)
+			totalLimit += w.Config.ClaimLimit(batchHint)
+		}
+
+		if len(customerIDs) == 0 {
+			if err := w.Scheduler.WaitForWork(ctx); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		deliveries, err := store.ClaimNextBatch(ctx, customerIDs, totalLimit)
+		if err != nil {
+			return nil, fmt.Errorf("claim batch: %w", err)
+		}
+
+		// Track which customers actually produced deliveries.
+		claimedSet := make(map[string]struct{}, len(deliveries))
+		for _, d := range deliveries {
+			claimedSet[d.CustomerID] = struct{}{}
+		}
+
+		// Find customers that had zero deliveries claimed.
+		var empties []string
+		for _, cid := range customerIDs {
+			if _, ok := claimedSet[cid]; ok {
+				w.Scheduler.Notify(cid)
+			} else {
+				empties = append(empties, cid)
+			}
+		}
+
+		if len(empties) > 0 {
+			hasWork, checkErr := store.HasClaimableWorkBatch(ctx, empties)
+			if checkErr != nil {
+				w.Logger.Warn(
+					"claimability batch check failed; keeping customers in rotation",
+					"empty_count", len(empties),
+					"error", checkErr,
+				)
+				for _, cid := range empties {
 					w.Scheduler.Notify(cid)
-				} else {
-					w.Scheduler.Remove(cid)
+				}
+			} else {
+				for _, cid := range empties {
+					if hasWork[cid] {
+						w.Scheduler.Notify(cid)
+					} else {
+						w.Scheduler.Remove(cid)
+					}
 				}
 			}
 		}
-	}
 
-	return deliveries, nil
+		return deliveries, nil
+	}
 }
 
 type classified struct {

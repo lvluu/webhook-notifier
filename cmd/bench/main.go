@@ -26,29 +26,20 @@ func main() {
 
 	var err error
 	switch scenario {
-	case "scenario1":
-		// Legacy: fairness proof folded into Scenario 6 reporting.
-		err = scenarios.RunScenario1(ctx)
-	case "scenario2":
-		// Legacy: transient/recovering partner proof folded into Partner Resilience Phase A.
-		err = scenarios.RunScenario2(ctx)
-	case "scenario3":
-		// Legacy: terminal 4xx fast-fail proof folded into Partner Resilience Phase B.
-		err = scenarios.RunScenario3(ctx)
-	case "scenario4":
-		// Legacy: horizontal scale/idempotency proof folded into Scenario 8 dense phase.
-		err = scenarios.RunScenario4(ctx)
-	case "scenario5":
-		// Legacy: dead-partner breaker proof folded into Partner Resilience Phase C.
-		err = scenarios.RunScenario5(ctx)
-	case "scenario6":
-		err = scenarios.RunScenario6(ctx)
-	case "scenario7":
-		err = scenarios.RunScenario7(ctx)
-	case "scenario8":
-		err = scenarios.RunScenario8(ctx)
+	case "production_workload", "production-workload":
+		err = scenarios.RunProductionWorkload(ctx)
+	case "horizontal_scale", "horizontal-scale":
+		err = scenarios.RunHorizontalScale(ctx)
 	case "partner_resilience", "partner-resilience":
 		err = scenarios.RunPartnerResilience(ctx)
+	case "late_arrival_fairness", "late-arrival-fairness",
+		"transient_recovery", "transient-recovery",
+		"terminal_fast_fail", "terminal-fast-fail",
+		"scale_idempotency", "scale-idempotency",
+		"breaker_isolation", "breaker-isolation",
+		"breaker_storm", "breaker-storm",
+		"scenario1", "scenario2", "scenario3", "scenario4", "scenario5", "scenario7":
+		err = fmt.Errorf("scenario %q moved to cmd/bench-legacy: %s", scenario, legacyHint(scenario))
 	default:
 		err = fmt.Errorf("unknown scenario: %s", scenario)
 	}
@@ -61,4 +52,32 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+// legacyHint returns the surviving scenario(s) a legacy scenario was folded into.
+func legacyHint(scenario string) string {
+	hints := map[string]string{
+		"scenario1":             "fairness proof -> production-workload",
+		"late_arrival_fairness": "fairness proof -> production-workload",
+		"late-arrival-fairness": "fairness proof -> production-workload",
+		"scenario2":             "transient/recovering partner -> partner-resilience Phase A",
+		"transient_recovery":    "transient/recovering partner -> partner-resilience Phase A",
+		"transient-recovery":    "transient/recovering partner -> partner-resilience Phase A",
+		"scenario3":             "terminal 4xx fast-fail -> partner-resilience Phase B",
+		"terminal_fast_fail":    "terminal 4xx fast-fail -> partner-resilience Phase B",
+		"terminal-fast-fail":    "terminal 4xx fast-fail -> partner-resilience Phase B",
+		"scenario4":             "horizontal scale/idempotency -> horizontal-scale dense phase",
+		"scale_idempotency":     "horizontal scale/idempotency -> horizontal-scale dense phase",
+		"scale-idempotency":     "horizontal scale/idempotency -> horizontal-scale dense phase",
+		"scenario5":             "dead-partner breaker -> partner-resilience Phase C",
+		"breaker_isolation":     "dead-partner breaker -> partner-resilience Phase C",
+		"breaker-isolation":     "dead-partner breaker -> partner-resilience Phase C",
+		"scenario7":             "mass breaker tripping (internal hardening, not a requirements proof)",
+		"breaker_storm":         "mass breaker tripping (internal hardening, not a requirements proof)",
+		"breaker-storm":         "mass breaker tripping (internal hardening, not a requirements proof)",
+	}
+	if hint, ok := hints[scenario]; ok {
+		return "Legacy: folded into " + hint + ". Run via: go run ./cmd/bench-legacy " + scenario
+	}
+	return "Run via: go run ./cmd/bench-legacy " + scenario
 }

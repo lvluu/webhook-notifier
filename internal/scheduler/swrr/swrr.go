@@ -31,6 +31,7 @@ type swrr struct {
 
 	activeList []scheduler.CustomerID
 	nextOrder  uint64
+	wake       chan struct{}
 }
 
 type entry struct {
@@ -56,6 +57,7 @@ func New(weights scheduler.WeightSource) scheduler.Scheduler {
 		entries:    make(map[scheduler.CustomerID]*entry),
 		activeSet:  make(map[scheduler.CustomerID]struct{}),
 		activeList: make([]scheduler.CustomerID, 0),
+		wake:       make(chan struct{}),
 	}
 }
 
@@ -149,8 +151,28 @@ func (s *swrr) Remove(customerID scheduler.CustomerID) {
 	s.activeList = newList
 }
 
+// WaitForWork blocks until at least one Customer is registered or ctx is
+// cancelled.
+func (s *swrr) WaitForWork(ctx context.Context) error {
+	s.mu.Lock()
+	if len(s.activeSet) > 0 {
+		s.mu.Unlock()
+		return nil
+	}
+	wake := s.wake
+	s.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-wake:
+		return nil
+	}
+}
+
 // Notify registers the Customer for weighted rotation if not already present
-// and if its weight is > 0. Idempotent.
+// and if its weight is > 0. Idempotent. Wakes any workers blocked in
+// WaitForWork.
 func (s *swrr) Notify(customerID scheduler.CustomerID) {
 	if customerID == "" {
 		return
@@ -167,10 +189,15 @@ func (s *swrr) Notify(customerID scheduler.CustomerID) {
 		return
 	}
 
+	wasEmpty := len(s.activeSet) == 0
 	s.entryFor(customerID)
 
 	s.activeSet[customerID] = struct{}{}
 	s.activeList = append(s.activeList, customerID)
+	if wasEmpty {
+		close(s.wake)
+		s.wake = make(chan struct{})
+	}
 }
 
 func (s *swrr) entryFor(customerID scheduler.CustomerID) *entry {

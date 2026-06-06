@@ -1,4 +1,4 @@
-package scenarios
+package legacy
 
 import (
 	"context"
@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/lvluu/webhook-notifier/bench/receiver"
+	"github.com/lvluu/webhook-notifier/bench/scenarios"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/retry"
 	"github.com/lvluu/webhook-notifier/internal/scheduler/roundrobin"
@@ -20,13 +21,13 @@ import (
 )
 
 const (
-	scenario7ReportPath          = "bench/results/scenario-7.md"
-	scenario7WebhookPathPrefix   = "/hooks/scenario-7-customer-"
-	scenario7BreakerPollInterval = 10 * time.Millisecond
-	scenario7BreakerPollTimeout  = 5 * time.Minute
+	breakerStormReportPath          = "bench/results/breaker-storm.md"
+	breakerStormWebhookPathPrefix   = "/hooks/breaker-storm-customer-"
+	breakerStormBreakerPollInterval = 10 * time.Millisecond
+	breakerStormBreakerPollTimeout  = 5 * time.Minute
 )
 
-type scenario7Profile struct {
+type breakerStormProfile struct {
 	Name                    string
 	WorkerCount             int
 	CustomerCount           int
@@ -46,28 +47,28 @@ type scenario7Profile struct {
 	RetryCapDelay           time.Duration
 }
 
-func scenario7ProfileFromEnv() (scenario7Profile, error) {
-	raw, name, err := loadBenchProfileConfig("scenario7")
+func breakerStormProfileFromEnv() (breakerStormProfile, error) {
+	raw, name, err := scenarios.LoadBenchProfileConfig("breaker_storm")
 	if err != nil {
-		return scenario7Profile{}, err
+		return breakerStormProfile{}, err
 	}
 	if raw.WorkerCount < 1 || raw.CustomerCount < 1 || raw.DeliveriesPerCustomer < 1 {
-		return scenario7Profile{}, fmt.Errorf("scenario7 profile %q has invalid positive counts", name)
+		return breakerStormProfile{}, fmt.Errorf("breaker_storm profile %q has invalid positive counts", name)
 	}
 	if raw.RequestTimeout.Duration() <= 0 || raw.DiscoveryInterval.Duration() <= 0 ||
 		raw.DiscoveryMaxBackoff.Duration() <= 0 {
-		return scenario7Profile{}, fmt.Errorf("scenario7 profile %q has invalid durations", name)
+		return breakerStormProfile{}, fmt.Errorf("breaker_storm profile %q has invalid durations", name)
 	}
 	if raw.DiscoveryLimit < 1 || raw.BreakerFailureThreshold < 1 || raw.MinBatchHint < 1 {
-		return scenario7Profile{}, fmt.Errorf("scenario7 profile %q has invalid limits", name)
+		return breakerStormProfile{}, fmt.Errorf("breaker_storm profile %q has invalid limits", name)
 	}
 	if raw.BreakerInitialCooldown.Duration() <= 0 || raw.BreakerMaxCooldown.Duration() <= 0 {
-		return scenario7Profile{}, fmt.Errorf("scenario7 profile %q has invalid breaker cooldowns", name)
+		return breakerStormProfile{}, fmt.Errorf("breaker_storm profile %q has invalid breaker cooldowns", name)
 	}
 	if raw.RetryMaxAttempts < 1 || raw.RetryBaseDelay.Duration() <= 0 || raw.RetryCapDelay.Duration() <= 0 {
-		return scenario7Profile{}, fmt.Errorf("scenario7 profile %q has invalid retry config", name)
+		return breakerStormProfile{}, fmt.Errorf("breaker_storm profile %q has invalid retry config", name)
 	}
-	return scenario7Profile{
+	return breakerStormProfile{
 		Name:                    name,
 		WorkerCount:             raw.WorkerCount,
 		CustomerCount:           raw.CustomerCount,
@@ -88,19 +89,19 @@ func scenario7ProfileFromEnv() (scenario7Profile, error) {
 	}, nil
 }
 
-func scenario7CustomerID(i int) string {
-	return fmt.Sprintf("scenario-7-customer-%02d", i+1)
+func breakerStormCustomerID(i int) string {
+	return fmt.Sprintf("breaker-storm-customer-%02d", i+1)
 }
 
-func scenario7CustomerIDs(count int) []string {
+func breakerStormCustomerIDs(count int) []string {
 	ids := make([]string, count)
 	for i := range ids {
-		ids[i] = scenario7CustomerID(i)
+		ids[i] = breakerStormCustomerID(i)
 	}
 	return ids
 }
 
-type scenario7Result struct {
+type breakerStormResult struct {
 	Duration           time.Duration
 	BaselineGoroutines int
 	FinalGoroutines    int
@@ -110,17 +111,17 @@ type scenario7Result struct {
 	TotalPending       int
 	TotalSucceeded     int
 	TotalDead          int
-	BreakerSnapshots   []scenario5BreakerSnapshot
+	BreakerSnapshots   []breakerIsolationBreakerSnapshot
 }
 
-// RunScenario7 executes the internal hardening Scenario 7, which is not part
+// RunBreakerStorm executes the internal hardening Breaker Storm, which is not part
 // of the assignment-facing proof map. All webhooks return 5xx, workers claim
 // batches of deliveries per Customer, and the batch breaker bookkeeping path
 // (MarkRetryBatch → batchRecordBreakerFailure) handles every failure in O(1)
 // set-based SQL instead of N+1 per-item queries. The scenario verifies that
 // all breakers open correctly under mass downstream outage.
-func RunScenario7(ctx context.Context) error {
-	db, cleanup, err := openBenchDatabase(ctx)
+func RunBreakerStorm(ctx context.Context) error {
+	db, cleanup, err := scenarios.OpenBenchDatabase(ctx)
 	if err != nil {
 		return fmt.Errorf("open bench db: %w", err)
 	}
@@ -130,51 +131,51 @@ func RunScenario7(ctx context.Context) error {
 		return fmt.Errorf("ping db: %w", err)
 	}
 
-	profile, err := scenario7ProfileFromEnv()
+	profile, err := breakerStormProfileFromEnv()
 	if err != nil {
 		return fmt.Errorf("load profile: %w", err)
 	}
 
-	result, err := runScenario7Phase(ctx, db, profile)
+	result, err := runBreakerStormPhase(ctx, db, profile)
 	if err != nil {
-		return fmt.Errorf("run scenario 7: %w", err)
+		return fmt.Errorf("run breaker storm: %w", err)
 	}
 
-	if err := writeScenario7Report(scenario7ReportPath, profile, result); err != nil {
+	if err := writeBreakerStormReport(breakerStormReportPath, profile, result); err != nil {
 		return fmt.Errorf("write report: %w", err)
 	}
 
-	slog.Info("scenario 7 complete", "profile", profile.Name, "report", scenario7ReportPath)
+	slog.Info("breaker storm complete", "profile", profile.Name, "report", breakerStormReportPath)
 	return nil
 }
 
-func runScenario7Phase(ctx context.Context, db *sql.DB, profile scenario7Profile) (scenario7Result, error) {
-	if err := resetBenchData(ctx, db); err != nil {
-		return scenario7Result{}, fmt.Errorf("reset bench data: %w", err)
+func runBreakerStormPhase(ctx context.Context, db *sql.DB, profile breakerStormProfile) (breakerStormResult, error) {
+	if err := scenarios.ResetBenchData(ctx, db); err != nil {
+		return breakerStormResult{}, fmt.Errorf("reset bench data: %w", err)
 	}
 
-	slog.Info("running scenario 7", "customers", profile.CustomerCount,
+	slog.Info("running breaker storm", "customers", profile.CustomerCount,
 		"deliveries_per_customer", profile.DeliveriesPerCustomer,
 		"workers", profile.WorkerCount, "min_batch_hint", profile.MinBatchHint)
 
 	baselineGoroutines := runtime.NumGoroutine()
 
-	rs, err := newScenario7Receiver(profile.CustomerCount)
+	rs, err := newBreakerStormReceiver(profile.CustomerCount)
 	if err != nil {
-		return scenario7Result{}, err
+		return breakerStormResult{}, err
 	}
 	defer rs.Close()
 
-	allCustomerIDs := scenario7CustomerIDs(profile.CustomerCount)
+	allCustomerIDs := breakerStormCustomerIDs(profile.CustomerCount)
 
-	if err := seedScenario7Customers(ctx, db, profile.CustomerCount); err != nil {
-		return scenario7Result{}, fmt.Errorf("seed customers: %w", err)
+	if err := seedBreakerStormCustomers(ctx, db, profile.CustomerCount); err != nil {
+		return breakerStormResult{}, fmt.Errorf("seed customers: %w", err)
 	}
-	if err := seedScenario7Webhooks(ctx, db, rs.URL(), profile.CustomerCount); err != nil {
-		return scenario7Result{}, fmt.Errorf("seed webhooks: %w", err)
+	if err := seedBreakerStormWebhooks(ctx, db, rs.URL(), profile.CustomerCount); err != nil {
+		return breakerStormResult{}, fmt.Errorf("seed webhooks: %w", err)
 	}
-	if err := seedScenario7Deliveries(ctx, db, profile.CustomerCount, profile.DeliveriesPerCustomer); err != nil {
-		return scenario7Result{}, fmt.Errorf("seed deliveries: %w", err)
+	if err := seedBreakerStormDeliveries(ctx, db, profile.CustomerCount, profile.DeliveriesPerCustomer); err != nil {
+		return breakerStormResult{}, fmt.Errorf("seed deliveries: %w", err)
 	}
 
 	sched := roundrobin.New()
@@ -228,13 +229,13 @@ func runScenario7Phase(ctx context.Context, db *sql.DB, profile scenario7Profile
 
 	started := time.Now()
 
-	breakersOpened, err := waitForAllScenario7Breakers(ctx, db, allCustomerIDs, profile.BreakerFailureThreshold)
+	breakersOpened, err := waitForAllBreakerStormBreakers(ctx, db, allCustomerIDs, profile.BreakerFailureThreshold)
 	if err != nil {
 		cancelDiscovery()
 		cancelWorkers()
 		workerWg.Wait()
 		<-discoveryDone
-		return scenario7Result{}, err
+		return breakerStormResult{}, err
 	}
 
 	time.Sleep(500 * time.Millisecond)
@@ -247,7 +248,7 @@ func runScenario7Phase(ctx context.Context, db *sql.DB, profile scenario7Profile
 	rs.Close()
 	time.Sleep(250 * time.Millisecond)
 
-	result := scenario7Result{
+	result := breakerStormResult{
 		Duration:           time.Since(started),
 		BaselineGoroutines: baselineGoroutines,
 		FinalGoroutines:    runtime.NumGoroutine(),
@@ -258,46 +259,46 @@ func runScenario7Phase(ctx context.Context, db *sql.DB, profile scenario7Profile
 
 	totalAttempts, err := countAllDeliveryAttempts(ctx, db)
 	if err != nil {
-		return scenario7Result{}, fmt.Errorf("count total attempts: %w", err)
+		return breakerStormResult{}, fmt.Errorf("count total attempts: %w", err)
 	}
 	result.TotalAttempts = totalAttempts
 
 	totalPending, err := countDeliveriesPendingOrRetry(ctx, db)
 	if err != nil {
-		return scenario7Result{}, fmt.Errorf("count pending deliveries: %w", err)
+		return breakerStormResult{}, fmt.Errorf("count pending deliveries: %w", err)
 	}
 	result.TotalPending = totalPending
 
 	totalSucceeded, err := countDeliveriesByStatus(ctx, db, "succeeded")
 	if err != nil {
-		return scenario7Result{}, fmt.Errorf("count succeeded deliveries: %w", err)
+		return breakerStormResult{}, fmt.Errorf("count succeeded deliveries: %w", err)
 	}
 	result.TotalSucceeded = totalSucceeded
 
 	totalDead, err := countDeliveriesByStatus(ctx, db, "dead")
 	if err != nil {
-		return scenario7Result{}, fmt.Errorf("count dead deliveries: %w", err)
+		return breakerStormResult{}, fmt.Errorf("count dead deliveries: %w", err)
 	}
 	result.TotalDead = totalDead
 
 	return result, nil
 }
 
-func newScenario7Receiver(customerCount int) (*receiver.ReceiverServer, error) {
-	opts := []receiver.Option{receiver.WithStableDecisions("scenario-7")}
+func newBreakerStormReceiver(customerCount int) (*receiver.ReceiverServer, error) {
+	opts := []receiver.Option{receiver.WithStableDecisions("breaker-storm")}
 	for i := 0; i < customerCount; i++ {
-		path := scenario7WebhookPath(i)
+		path := breakerStormWebhookPath(i)
 		opts = append(opts, receiver.WithRouteStatus(path, 1.0, 500))
 	}
 	return receiver.NewServer(opts...), nil
 }
 
-func scenario7WebhookPath(i int) string {
-	return fmt.Sprintf("%s%02d", scenario7WebhookPathPrefix, i+1)
+func breakerStormWebhookPath(i int) string {
+	return fmt.Sprintf("%s%02d", breakerStormWebhookPathPrefix, i+1)
 }
 
-func seedScenario7Customers(ctx context.Context, db *sql.DB, customerCount int) error {
-	ids := scenario7CustomerIDs(customerCount)
+func seedBreakerStormCustomers(ctx context.Context, db *sql.DB, customerCount int) error {
+	ids := breakerStormCustomerIDs(customerCount)
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO customers (id, class) VALUES ")
 	args := make([]any, 0, len(ids)*2)
@@ -315,8 +316,8 @@ func seedScenario7Customers(ctx context.Context, db *sql.DB, customerCount int) 
 	return nil
 }
 
-func seedScenario7Webhooks(ctx context.Context, db *sql.DB, receiverBaseURL string, customerCount int) error {
-	ids := scenario7CustomerIDs(customerCount)
+func seedBreakerStormWebhooks(ctx context.Context, db *sql.DB, receiverBaseURL string, customerCount int) error {
+	ids := breakerStormCustomerIDs(customerCount)
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active) VALUES ")
 	args := make([]any, 0, len(ids)*4)
@@ -327,9 +328,9 @@ func seedScenario7Webhooks(ctx context.Context, db *sql.DB, receiverBaseURL stri
 		fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, true)", i*4+1, i*4+2, i*4+3, i*4+4)
 		args = append(args,
 			id,
-			receiverBaseURL+scenario7WebhookPath(i),
+			receiverBaseURL+breakerStormWebhookPath(i),
 			"",
-			fmt.Sprintf("{%s}", eventType),
+			fmt.Sprintf("{%s}", scenarios.EventType),
 		)
 	}
 	sb.WriteString(" ON CONFLICT DO NOTHING")
@@ -339,9 +340,9 @@ func seedScenario7Webhooks(ctx context.Context, db *sql.DB, receiverBaseURL stri
 	return nil
 }
 
-func seedScenario7Deliveries(ctx context.Context, db *sql.DB, customerCount, deliveriesPerCustomer int) error {
-	for _, customerID := range scenario7CustomerIDs(customerCount) {
-		webhookID, err := scenario7WebhookID(ctx, db, customerID)
+func seedBreakerStormDeliveries(ctx context.Context, db *sql.DB, customerCount, deliveriesPerCustomer int) error {
+	for _, customerID := range breakerStormCustomerIDs(customerCount) {
+		webhookID, err := breakerStormWebhookID(ctx, db, customerID)
 		if err != nil {
 			return err
 		}
@@ -356,7 +357,7 @@ func seedScenario7Deliveries(ctx context.Context, db *sql.DB, customerCount, del
 			INSERT INTO events (customer_id, type, payload)
 			VALUES ($1, $2, $3)
 			RETURNING id
-		`, customerID, eventType, []byte(`{"scenario":"7"}`)).Scan(&eventID)
+		`, customerID, scenarios.EventType, []byte(`{"scenario":"7"}`)).Scan(&eventID)
 		if err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("insert event for %s: %w", customerID, err)
@@ -380,7 +381,7 @@ func seedScenario7Deliveries(ctx context.Context, db *sql.DB, customerCount, del
 	return nil
 }
 
-func scenario7WebhookID(ctx context.Context, db *sql.DB, customerID string) (string, error) {
+func breakerStormWebhookID(ctx context.Context, db *sql.DB, customerID string) (string, error) {
 	var id string
 	if err := db.QueryRowContext(ctx, `
 		SELECT id::text
@@ -394,7 +395,7 @@ func scenario7WebhookID(ctx context.Context, db *sql.DB, customerID string) (str
 	return id, nil
 }
 
-func scenario7BreakerSnapshot(ctx context.Context, db *sql.DB, customerID string) (string, string, int, error) {
+func breakerStormBreakerSnapshot(ctx context.Context, db *sql.DB, customerID string) (string, string, int, error) {
 	var webhookID, state string
 	var failureCount int
 	if err := db.QueryRowContext(ctx, `
@@ -409,8 +410,8 @@ func scenario7BreakerSnapshot(ctx context.Context, db *sql.DB, customerID string
 	return webhookID, state, failureCount, nil
 }
 
-func waitForAllScenario7Breakers(ctx context.Context, db *sql.DB, customerIDs []string, threshold int) ([]scenario5BreakerSnapshot, error) {
-	pollCtx, cancel := context.WithTimeout(ctx, scenario7BreakerPollTimeout)
+func waitForAllBreakerStormBreakers(ctx context.Context, db *sql.DB, customerIDs []string, threshold int) ([]breakerIsolationBreakerSnapshot, error) {
+	pollCtx, cancel := context.WithTimeout(ctx, breakerStormBreakerPollTimeout)
 	defer cancel()
 
 	remaining := make(map[string]bool, len(customerIDs))
@@ -418,17 +419,17 @@ func waitForAllScenario7Breakers(ctx context.Context, db *sql.DB, customerIDs []
 		remaining[id] = true
 	}
 
-	snapshots := make(map[string]scenario5BreakerSnapshot, len(customerIDs))
+	snapshots := make(map[string]breakerIsolationBreakerSnapshot, len(customerIDs))
 
 	for {
 		for customerID := range remaining {
-			_, state, failureCount, err := scenario7BreakerSnapshot(pollCtx, db, customerID)
+			_, state, failureCount, err := breakerStormBreakerSnapshot(pollCtx, db, customerID)
 			if err != nil {
 				return nil, err
 			}
 			if state == outbox.BreakerStateOpen && failureCount >= threshold {
 				delete(remaining, customerID)
-				snapshots[customerID] = scenario5BreakerSnapshot{
+				snapshots[customerID] = breakerIsolationBreakerSnapshot{
 					State:        state,
 					FailureCount: failureCount,
 				}
@@ -446,11 +447,11 @@ func waitForAllScenario7Breakers(ctx context.Context, db *sql.DB, customerIDs []
 				missing = append(missing, id)
 			}
 			return nil, fmt.Errorf("timed out waiting for %d/%d breakers to open: %v", len(remaining), len(customerIDs), missing)
-		case <-time.After(scenario7BreakerPollInterval):
+		case <-time.After(breakerStormBreakerPollInterval):
 		}
 	}
 
-	result := make([]scenario5BreakerSnapshot, 0, len(snapshots))
+	result := make([]breakerIsolationBreakerSnapshot, 0, len(snapshots))
 	for _, s := range snapshots {
 		result = append(result, s)
 	}
@@ -487,7 +488,7 @@ func countAllDeliveryAttempts(ctx context.Context, db *sql.DB) (int, error) {
 	return n, nil
 }
 
-func writeScenario7Report(path string, profile scenario7Profile, result scenario7Result) error {
+func writeBreakerStormReport(path string, profile breakerStormProfile, result breakerStormResult) error {
 	goroutineDelta := result.FinalGoroutines - result.BaselineGoroutines
 	goroutineOK := goroutineDelta <= 8
 	totalDeliveries := result.CustomerCount * result.DeliveriesPerCust
@@ -509,7 +510,7 @@ func writeScenario7Report(path string, profile scenario7Profile, result scenario
 	}
 	defer func() { _ = f.Close() }()
 
-	_, _ = fmt.Fprintf(f, `# Scenario 7: Mass Breaker Tripping Under Batch Mark
+	_, _ = fmt.Fprintf(f, `# Breaker Storm: Mass Breaker Tripping Under Batch Mark
 
 ## Description
 
@@ -586,14 +587,14 @@ The breaker opens after **%d** consecutive 5xx responses.
 		len(result.BreakerSnapshots),
 		result.CustomerCount,
 		result.CustomerCount,
-		passFail(allBreakersOpen),
+		scenarios.PassFail(allBreakersOpen),
 		minFailureCount,
 		profile.BreakerFailureThreshold,
-		passFail(minFailureCount >= profile.BreakerFailureThreshold),
+		scenarios.PassFail(minFailureCount >= profile.BreakerFailureThreshold),
 		goroutineDelta,
-		passFail(goroutineOK),
-		passFail(resultOK),
-		passFail(resultOK),
+		scenarios.PassFail(goroutineOK),
+		scenarios.PassFail(resultOK),
+		scenarios.PassFail(resultOK),
 	)
 
 	return f.Close()

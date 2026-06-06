@@ -1,4 +1,4 @@
-package scenarios
+package legacy
 
 import (
 	"context"
@@ -7,11 +7,11 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/lvluu/webhook-notifier/bench/receiver"
+	"github.com/lvluu/webhook-notifier/bench/scenarios"
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/registry"
@@ -19,7 +19,7 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/worker"
 )
 
-type scenario1Profile struct {
+type lateArrivalFairnessProfile struct {
 	Name                    string
 	WorkerCount             int
 	WhaleDeliveries         int
@@ -31,22 +31,22 @@ type scenario1Profile struct {
 	BreakerFailureThreshold int
 }
 
-func scenario1ProfileFromEnv() (scenario1Profile, error) {
-	raw, name, err := loadBenchProfileConfig("scenario1")
+func lateArrivalFairnessProfileFromEnv() (lateArrivalFairnessProfile, error) {
+	raw, name, err := scenarios.LoadBenchProfileConfig("late_arrival_fairness")
 	if err != nil {
-		return scenario1Profile{}, err
+		return lateArrivalFairnessProfile{}, err
 	}
 	if raw.WorkerCount < 1 || raw.WhaleDeliveries < 1 || raw.SmallCount < 1 || raw.SmallDeliveries < 1 || raw.LateDeliveries < 1 {
-		return scenario1Profile{}, fmt.Errorf("scenario1 profile %q has invalid positive counts", name)
+		return lateArrivalFairnessProfile{}, fmt.Errorf("late_arrival_fairness profile %q has invalid positive counts", name)
 	}
 	if raw.SmallDripInterval.Duration() <= 0 || raw.LateNotifyDelay.Duration() <= 0 {
-		return scenario1Profile{}, fmt.Errorf("scenario1 profile %q has invalid positive durations", name)
+		return lateArrivalFairnessProfile{}, fmt.Errorf("late_arrival_fairness profile %q has invalid positive durations", name)
 	}
 	if raw.BreakerFailureThreshold < 0 {
-		return scenario1Profile{}, fmt.Errorf("scenario1 profile %q has invalid breaker threshold", name)
+		return lateArrivalFairnessProfile{}, fmt.Errorf("late_arrival_fairness profile %q has invalid breaker threshold", name)
 	}
 
-	return scenario1Profile{
+	return lateArrivalFairnessProfile{
 		Name:                    name,
 		WorkerCount:             raw.WorkerCount,
 		WhaleDeliveries:         raw.WhaleDeliveries,
@@ -59,10 +59,10 @@ func scenario1ProfileFromEnv() (scenario1Profile, error) {
 	}, nil
 }
 
-// RunScenario1 executes Scenario 1: fairness under load with a late-arriving
+// RunLateArrivalFairness executes Late Arrival Fairness: fairness under load with a late-arriving
 // Small Customer.
-func RunScenario1(ctx context.Context) error {
-	db, cleanup, err := openBenchDatabase(ctx)
+func RunLateArrivalFairness(ctx context.Context) error {
+	db, cleanup, err := scenarios.OpenBenchDatabase(ctx)
 	if err != nil {
 		return fmt.Errorf("open bench db: %w", err)
 	}
@@ -71,12 +71,12 @@ func RunScenario1(ctx context.Context) error {
 		return fmt.Errorf("ping db: %w", err)
 	}
 
-	if err := resetBenchData(ctx, db); err != nil {
+	if err := scenarios.ResetBenchData(ctx, db); err != nil {
 		return fmt.Errorf("reset bench data: %w", err)
 	}
 	slog.Info("reset bench data from previous runs")
 
-	profile, err := scenario1ProfileFromEnv()
+	profile, err := lateArrivalFairnessProfileFromEnv()
 	if err != nil {
 		return fmt.Errorf("load profile: %w", err)
 	}
@@ -85,7 +85,7 @@ func RunScenario1(ctx context.Context) error {
 		// Baseline network latency: 15% of requests experience 200–500ms delay,
 		// simulating real-world partner endpoint response times.
 		receiver.WithLatency(0.15, 300*time.Millisecond),
-		receiver.WithStableDecisions("scenario-1"),
+		receiver.WithStableDecisions("late-arrival-fairness"),
 	)
 	defer rs.Close()
 
@@ -97,17 +97,17 @@ func RunScenario1(ctx context.Context) error {
 		FailureThreshold: profile.BreakerFailureThreshold,
 	}))
 
-	if err := seedCustomers(ctx, db, profile.SmallCount); err != nil {
+	if err := scenarios.SeedCustomers(ctx, db, profile.SmallCount); err != nil {
 		return fmt.Errorf("seed customers: %w", err)
 	}
 	slog.Info("seeded customers")
 
-	if err := seedWebhooks(ctx, db, rs.URL(), profile.SmallCount); err != nil {
+	if err := scenarios.SeedWebhooks(ctx, db, rs.URL(), profile.SmallCount); err != nil {
 		return fmt.Errorf("seed webhooks: %w", err)
 	}
 	slog.Info("seeded webhooks", "receiver_url", rs.URL())
 
-	if _, err := seedWhaleDeliveries(ctx, db, profile.WhaleDeliveries); err != nil {
+	if _, err := scenarios.SeedWhaleDeliveries(ctx, db, profile.WhaleDeliveries); err != nil {
 		return fmt.Errorf("seed whale deliveries: %w", err)
 	}
 	slog.Info("seeded whale deliveries")
@@ -130,7 +130,7 @@ func RunScenario1(ctx context.Context) error {
 	}
 	slog.Info("started workers", "count", workers)
 
-	instrSched.Notify(whaleCustomerID)
+	instrSched.Notify(scenarios.WhaleCustomerID)
 	slog.Info("notified scheduler for whale")
 
 	dripDone := make(chan error, 1)
@@ -144,8 +144,8 @@ func RunScenario1(ctx context.Context) error {
 				return
 			case <-ticker.C:
 			}
-			cid := smallCustomerID(i)
-			if err := ingestSmallDeliveries(workerCtx, ingestStore, cid, profile.SmallDeliveries); err != nil {
+			cid := scenarios.SmallCustomerID(i)
+			if err := scenarios.IngestSmallDeliveries(workerCtx, ingestStore, cid, profile.SmallDeliveries); err != nil {
 				dripDone <- fmt.Errorf("drip small customer %s: %w", cid, err)
 				return
 			}
@@ -167,14 +167,14 @@ func RunScenario1(ctx context.Context) error {
 			return
 		case <-time.After(profile.LateNotifyDelay):
 		}
-		if err := ingestSmallDeliveries(workerCtx, ingestStore, lateSmallID, profile.LateDeliveries); err != nil {
+		if err := scenarios.IngestSmallDeliveries(workerCtx, ingestStore, scenarios.LateSmallID, profile.LateDeliveries); err != nil {
 			lateDone <- fmt.Errorf("late inject: %w", err)
 			return
 		}
 		// Begin tracking BEFORE Notify so the cycle-start baseline captures
 		// all picks before the late customer enters rotation.
-		instrSched.BeginTracking(lateSmallID)
-		instrSched.Notify(lateSmallID)
+		instrSched.BeginTracking(scenarios.LateSmallID)
+		instrSched.Notify(scenarios.LateSmallID)
 		slog.Info("notified scheduler for late small")
 
 		n, err := countActiveCustomers(workerCtx, db)
@@ -218,7 +218,7 @@ func RunScenario1(ctx context.Context) error {
 			}
 		}
 
-		pending, err := countPendingDeliveries(pollCtx, db)
+		pending, err := scenarios.CountPendingDeliveries(pollCtx, db)
 		if err != nil {
 			return fmt.Errorf("poll pending deliveries: %w", err)
 		}
@@ -245,17 +245,17 @@ func RunScenario1(ctx context.Context) error {
 
 	lateCyclePicks := instrSched.CyclePicks()
 	activeAtLateNotify := <-activeAtNotifyCh
-	totalDeliveries, err := queryTotalDeliveries(ctx, db)
+	totalDeliveries, err := scenarios.QueryTotalDeliveries(ctx, db)
 	if err != nil {
 		return fmt.Errorf("query total deliveries: %w", err)
 	}
-	lateFirstLatencyMs, err := queryFirstTerminalLatencyMs(ctx, db, lateSmallID)
+	lateFirstLatencyMs, err := queryFirstTerminalLatencyMs(ctx, db, scenarios.LateSmallID)
 	if err != nil {
 		return fmt.Errorf("query late first latency: %w", err)
 	}
 
-	reportPath := "bench/results/scenario-1.md"
-	if err := writeScenario1Report(ctx, db, reportPath, scenario1ReportParams{
+	reportPath := "bench/results/late-arrival-fairness.md"
+	if err := writeLateArrivalFairnessReport(ctx, db, reportPath, lateArrivalFairnessReportParams{
 		profileName:       profile.Name,
 		whaleDeliveries:   profile.WhaleDeliveries,
 		smallCount:        profile.SmallCount,
@@ -275,7 +275,7 @@ func RunScenario1(ctx context.Context) error {
 		return fmt.Errorf("write report: %w", err)
 	}
 
-	slog.Info("scenario 1 complete", "report", reportPath)
+	slog.Info("late arrival fairness complete", "report", reportPath)
 	return nil
 }
 
@@ -289,7 +289,7 @@ func countActiveCustomers(ctx context.Context, db *sql.DB) (int, error) {
 	return n, err
 }
 
-type scenario1ReportParams struct {
+type lateArrivalFairnessReportParams struct {
 	profileName       string
 	whaleDeliveries   int
 	smallCount        int
@@ -307,30 +307,30 @@ type scenario1ReportParams struct {
 	workerCount       int
 }
 
-func writeScenario1Report(
+func writeLateArrivalFairnessReport(
 	ctx context.Context,
 	db *sql.DB,
 	path string,
-	p scenario1ReportParams,
+	p lateArrivalFairnessReportParams,
 ) error {
 	type latencyRow struct {
 		Label    string
 		Customer string // empty = all
 	}
 	rows := []latencyRow{
-		{Label: "Whale", Customer: whaleCustomerID},
+		{Label: "Whale", Customer: scenarios.WhaleCustomerID},
 		{Label: "All Small", Customer: "small-%"},
-		{Label: "Late Small", Customer: lateSmallID},
+		{Label: "Late Small", Customer: scenarios.LateSmallID},
 	}
-	_, _, allSmallP99, _, err := queryLatencyPercentiles(ctx, db, "small-%")
+	_, _, allSmallP99, _, err := scenarios.QueryLatencyPercentiles(ctx, db, "small-%")
 	if err != nil {
 		return fmt.Errorf("query small lifecycle latencies: %w", err)
 	}
-	_, _, whaleP99, whaleMax, err := queryLatencyPercentiles(ctx, db, whaleCustomerID)
+	_, _, whaleP99, whaleMax, err := scenarios.QueryLatencyPercentiles(ctx, db, scenarios.WhaleCustomerID)
 	if err != nil {
 		return fmt.Errorf("query whale lifecycle latencies: %w", err)
 	}
-	httpP50, httpP95, httpP99, httpMax, err := queryAttemptDurationPercentiles(ctx, db)
+	httpP50, httpP95, httpP99, httpMax, err := scenarios.QueryAttemptDurationPercentiles(ctx, db)
 	if err != nil {
 		return fmt.Errorf("query HTTP attempt durations: %w", err)
 	}
@@ -347,13 +347,13 @@ func writeScenario1Report(
 	}
 	defer func() { _ = f.Close() }()
 
-	_, _ = fmt.Fprintf(f, `# Scenario 1: Fairness Under Load — Late-Arriving Small Customer
+	_, _ = fmt.Fprintf(f, `# Late Arrival Fairness: Fairness Under Load — Late-Arriving Small Customer
 
 ## Description
 
 Profile **%s**: one **Whale** (%d deliveries, burst at T=0) + **%d Small Customers** (%d deliveries each, dripped every %s starting at T=1) + **1 Late Small Customer** (%d deliveries, injected at T=%s).
 
-**Chaos conditions**: 15%% of requests experience 300ms latency (simulating network round-trips). No status-code failures are injected; Scenario 1 isolates fairness under burst load from retry-policy behavior.
+**Chaos conditions**: 15%% of requests experience 300ms latency (simulating network round-trips). No status-code failures are injected; Late Arrival Fairness isolates fairness under burst load from retry-policy behavior.
 
 The acceptance criteria are that Small Customers have lifecycle p99 under 2s, the late-arriving Small Customer is picked within at most one round-robin cycle of its Notify, and the generated workload matches the deterministic setup.
 
@@ -394,12 +394,12 @@ The 1000-whale projection is a single-node capacity estimate from this run, not 
 		p.profileName, p.totalDuration.Round(time.Second), p.totalDeliveries, p.expectedTotal, throughput,
 		p.workerCount, allSmallP99, p.lateFirstMs, whaleP99, whaleMax,
 		whaleThroughput, projectedThousandWhales.Round(time.Second), httpP99,
-		p.totalDeliveries, p.expectedTotal, passFail(totalOK),
-		allSmallP99, passFail(smallP99OK),
-		p.picksUntilFirst, p.activeAtNotify, passFail(cycleOK))
+		p.totalDeliveries, p.expectedTotal, scenarios.PassFail(totalOK),
+		allSmallP99, scenarios.PassFail(smallP99OK),
+		p.picksUntilFirst, p.activeAtNotify, scenarios.PassFail(cycleOK))
 
 	for _, r := range rows {
-		p50, p95, p99, maxLat, err := queryLatencyPercentiles(ctx, db, r.Customer)
+		p50, p95, p99, maxLat, err := scenarios.QueryLatencyPercentiles(ctx, db, r.Customer)
 		if err != nil {
 			slog.Error("latency query failed", "label", r.Label, "error", err)
 			continue
@@ -417,7 +417,7 @@ The 1000-whale projection is a single-node capacity estimate from this run, not 
 `, httpP50, httpP95, httpP99, httpMax)
 
 	_, _ = fmt.Fprintf(f, "\n## Delivery Outcomes\n\n")
-	outcomes, err := queryDeliveryOutcomes(ctx, db)
+	outcomes, err := scenarios.QueryDeliveryOutcomes(ctx, db)
 	if err != nil {
 		slog.Error("outcomes query failed", "error", err)
 	} else {
@@ -428,7 +428,7 @@ The 1000-whale projection is a single-node capacity estimate from this run, not 
 	}
 
 	_, _ = fmt.Fprintf(f, "\n## Retry Distribution\n\n")
-	retries, err := queryRetryDistribution(ctx, db)
+	retries, err := scenarios.QueryRetryDistribution(ctx, db)
 	if err != nil {
 		slog.Error("retry distribution query failed", "error", err)
 	} else {
@@ -447,60 +447,6 @@ The 1000-whale projection is a single-node capacity estimate from this run, not 
 	return f.Close()
 }
 
-func queryLatencyPercentiles(ctx context.Context, db *sql.DB, customerFilter string) (p50, p95, p99, maxMs float64, err error) {
-	var whereClause string
-	var args []any
-	switch {
-	case customerFilter == "":
-		whereClause = "status = 'succeeded'"
-	case strings.Contains(customerFilter, "%"):
-		whereClause = "status = 'succeeded' AND customer_id LIKE $1"
-		args = append(args, customerFilter)
-	default:
-		whereClause = "status = 'succeeded' AND customer_id = $1"
-		args = append(args, customerFilter)
-	}
-
-	query := fmt.Sprintf(`
-		SELECT
-			COALESCE(percentile_cont(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (updated_at - created_at)) * 1000), 0),
-			COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (updated_at - created_at)) * 1000), 0),
-			COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (updated_at - created_at)) * 1000), 0),
-			COALESCE(MAX(EXTRACT(EPOCH FROM (updated_at - created_at)) * 1000), 0)
-		FROM deliveries
-		WHERE %s
-	`, whereClause) // #nosec G201 -- whereClause is selected from fixed branches above.
-
-	var p50f, p95f, p99f, maxf float64
-	err = db.QueryRowContext(ctx, query, args...).Scan(&p50f, &p95f, &p99f, &maxf)
-	if err != nil {
-		return 0, 0, 0, 0, fmt.Errorf("query latency: %w", err)
-	}
-
-	return p50f, p95f, p99f, maxf, nil
-}
-
-func queryAttemptDurationPercentiles(ctx context.Context, db *sql.DB) (p50, p95, p99, maxMs float64, err error) {
-	err = db.QueryRowContext(ctx, `
-		SELECT
-			COALESCE(percentile_cont(0.50) WITHIN GROUP (ORDER BY duration_ms), 0),
-			COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms), 0),
-			COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY duration_ms), 0),
-			COALESCE(MAX(duration_ms), 0)
-		FROM delivery_attempts
-	`).Scan(&p50, &p95, &p99, &maxMs)
-	if err != nil {
-		return 0, 0, 0, 0, fmt.Errorf("query attempt durations: %w", err)
-	}
-	return p50, p95, p99, maxMs, nil
-}
-
-func queryTotalDeliveries(ctx context.Context, db *sql.DB) (int, error) {
-	var n int
-	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deliveries`).Scan(&n)
-	return n, err
-}
-
 func queryFirstTerminalLatencyMs(ctx context.Context, db *sql.DB, customerID string) (float64, error) {
 	var ms float64
 	err := db.QueryRowContext(ctx, `
@@ -517,73 +463,9 @@ func queryFirstTerminalLatencyMs(ctx context.Context, db *sql.DB, customerID str
 	return ms, nil
 }
 
-func passFail(v bool) string {
-	if v {
-		return "**PASS**"
-	}
-	return "**FAIL**"
-}
-
 func cycleVerdict(picks, active int64) string {
 	if picks <= active {
 		return fmt.Sprintf("**PASS**: %d Picks ≤ %d active Customers — the late-arriving Small was served within one round-robin cycle.", picks, active)
 	}
 	return fmt.Sprintf("**FAIL**: %d Picks > %d active Customers — the late-arriving Small was not served within one round-robin cycle.", picks, active)
-}
-
-type deliveryOutcome struct {
-	Status string
-	Count  int
-}
-
-func queryDeliveryOutcomes(ctx context.Context, db *sql.DB) ([]deliveryOutcome, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT status, COUNT(*)
-		FROM deliveries
-		GROUP BY status
-		ORDER BY status
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("query outcomes: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var outcomes []deliveryOutcome
-	for rows.Next() {
-		var o deliveryOutcome
-		if err := rows.Scan(&o.Status, &o.Count); err != nil {
-			return nil, fmt.Errorf("scan outcome: %w", err)
-		}
-		outcomes = append(outcomes, o)
-	}
-	return outcomes, rows.Err()
-}
-
-type retryBucket struct {
-	Attempts int
-	Count    int
-}
-
-func queryRetryDistribution(ctx context.Context, db *sql.DB) ([]retryBucket, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT attempt_count, COUNT(*)
-		FROM deliveries
-		WHERE status IN ('succeeded', 'dead')
-		GROUP BY attempt_count
-		ORDER BY attempt_count
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("query retry distribution: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var buckets []retryBucket
-	for rows.Next() {
-		var b retryBucket
-		if err := rows.Scan(&b.Attempts, &b.Count); err != nil {
-			return nil, fmt.Errorf("scan retry bucket: %w", err)
-		}
-		buckets = append(buckets, b)
-	}
-	return buckets, rows.Err()
 }

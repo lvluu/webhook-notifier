@@ -12,7 +12,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "worker,db_conns,throughput,file" >"$tmp_csv"
-matrix_report="bench/results/scenario-4-matrix.md"
+matrix_report="bench/results/scale-idempotency-matrix.md"
 if [[ -f "$matrix_report" ]]; then
   awk -F'|' -v f="$matrix_report" '
     {
@@ -27,15 +27,15 @@ if [[ -f "$matrix_report" ]]; then
   ' "$matrix_report" >>"$tmp_csv"
 else
   shopt -s nullglob
-  files=(bench/results/scenario-4-w*-c*.md)
+  files=(bench/results/scale-idempotency-w*-c*.md)
   if [[ ${#files[@]} -eq 0 ]]; then
-    echo "no scenario-4 matrix files found: bench/results/scenario-4-matrix.md or bench/results/scenario-4-w*-c*.md"
+    echo "no scale-idempotency matrix files found: bench/results/scale-idempotency-matrix.md or bench/results/scale-idempotency-w*-c*.md"
     exit 1
   fi
 
   for file in "${files[@]}"; do
     base="$(basename "$file")"
-    if [[ ! "$base" =~ ^scenario-4-w([0-9]+)-c([0-9]+)\.md$ ]]; then
+    if [[ ! "$base" =~ ^scale-idempotency-w([0-9]+)-c([0-9]+)\.md$ ]]; then
       continue
     fi
     worker="${BASH_REMATCH[1]}"
@@ -68,7 +68,7 @@ if [[ "$(wc -l <"$tmp_csv")" -le 1 ]]; then
   exit 1
 fi
 
-echo "Scenario 4 matrix summary"
+echo "Scale idempotency matrix summary"
 echo
 echo "Top 10 cells by throughput:"
 {

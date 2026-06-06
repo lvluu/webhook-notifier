@@ -1,4 +1,5 @@
-package scenarios
+// Package legacy contains issue-scoped benchmark scenarios kept for reference.
+package legacy
 
 import (
 	"context"
@@ -16,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/lvluu/webhook-notifier/bench/receiver"
+	"github.com/lvluu/webhook-notifier/bench/scenarios"
 	"github.com/lvluu/webhook-notifier/internal/observe"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/retry"
@@ -24,15 +26,15 @@ import (
 )
 
 const (
-	scenario5HealthyLatency           = 10 * time.Millisecond
-	scenario5ControlSeed              = "scenario-5-control"
-	scenario5DeadSeed                 = "scenario-5-dead"
-	scenario5ReportPath               = "bench/results/scenario-5.md"
-	scenario5DeadCustomerIndex        = 0
-	scenario5HealthyLatencyPathPrefix = "/hooks/customer-"
+	breakerIsolationHealthyLatency           = 10 * time.Millisecond
+	breakerIsolationControlSeed              = "scenario-5-control"
+	breakerIsolationDeadSeed                 = "scenario-5-dead"
+	breakerIsolationReportPath               = "bench/results/breaker-isolation.md"
+	breakerIsolationDeadCustomerIndex        = 0
+	breakerIsolationHealthyLatencyPathPrefix = "/hooks/customer-"
 )
 
-type scenario5Profile struct {
+type breakerIsolationProfile struct {
 	Name                    string
 	WorkerCount             int
 	CustomerCount           int
@@ -48,24 +50,24 @@ type scenario5Profile struct {
 	BreakerMaxCooldown      time.Duration
 }
 
-func scenario5ProfileFromEnv() (scenario5Profile, error) {
-	raw, name, err := loadBenchProfileConfig("scenario5")
+func breakerIsolationProfileFromEnv() (breakerIsolationProfile, error) {
+	raw, name, err := scenarios.LoadBenchProfileConfig("breaker_isolation")
 	if err != nil {
-		return scenario5Profile{}, err
+		return breakerIsolationProfile{}, err
 	}
 	if raw.WorkerCount < 1 || raw.CustomerCount < 1 || raw.DeliveriesPerCustomer < 1 {
-		return scenario5Profile{}, fmt.Errorf("scenario5 profile %q has invalid positive counts", name)
+		return breakerIsolationProfile{}, fmt.Errorf("breaker_isolation profile %q has invalid positive counts", name)
 	}
 	if raw.RequestTimeout.Duration() <= 0 || raw.DiscoveryInterval.Duration() <= 0 || raw.DiscoveryEmptyBackoff.Duration() < 0 || raw.DiscoveryErrorBackoff.Duration() < 0 || raw.DiscoveryMaxBackoff.Duration() <= 0 {
-		return scenario5Profile{}, fmt.Errorf("scenario5 profile %q has invalid durations", name)
+		return breakerIsolationProfile{}, fmt.Errorf("breaker_isolation profile %q has invalid durations", name)
 	}
 	if raw.DiscoveryLimit < 1 || raw.BreakerFailureThreshold < 1 {
-		return scenario5Profile{}, fmt.Errorf("scenario5 profile %q has invalid limits", name)
+		return breakerIsolationProfile{}, fmt.Errorf("breaker_isolation profile %q has invalid limits", name)
 	}
 	if raw.BreakerInitialCooldown.Duration() <= 0 || raw.BreakerMaxCooldown.Duration() <= 0 {
-		return scenario5Profile{}, fmt.Errorf("scenario5 profile %q has invalid breaker cooldowns", name)
+		return breakerIsolationProfile{}, fmt.Errorf("breaker_isolation profile %q has invalid breaker cooldowns", name)
 	}
-	return scenario5Profile{
+	return breakerIsolationProfile{
 		Name:                    name,
 		WorkerCount:             raw.WorkerCount,
 		CustomerCount:           raw.CustomerCount,
@@ -82,26 +84,19 @@ func scenario5ProfileFromEnv() (scenario5Profile, error) {
 	}, nil
 }
 
-func scenario5CustomerID(i int) string {
-	return fmt.Sprintf("scenario-5-customer-%02d", i+1)
+func breakerIsolationCustomerID(i int) string {
+	return fmt.Sprintf("breaker-isolation-customer-%02d", i+1)
 }
 
-func scenario5CustomerIDs(count int) []string {
+func breakerIsolationCustomerIDs(count int) []string {
 	ids := make([]string, count)
 	for i := range ids {
-		ids[i] = scenario5CustomerID(i)
+		ids[i] = breakerIsolationCustomerID(i)
 	}
 	return ids
 }
 
-type scenario5CustomerLatency struct {
-	CustomerID string
-	ControlP95 float64
-	DeadP95    float64
-	Ratio      float64
-}
-
-type scenario5BreakerSnapshot struct {
+type breakerIsolationBreakerSnapshot struct {
 	State              string
 	FailureCount       int
 	ProbeDeliveryID    string
@@ -112,25 +107,25 @@ type scenario5BreakerSnapshot struct {
 	ClosedMetric       float64
 }
 
-type scenario5RunResult struct {
+type breakerIsolationRunResult struct {
 	Name                    string
 	Duration                time.Duration
-	HealthyLatencies        []scenario5CustomerLatency
+	HealthyLatencies        []scenarios.BreakerIsolationCustomerLatency
 	DeadAttempts            int
 	DeadPending             int
 	DeadState               string
 	BaselineGoroutines      int
 	FinalGoroutines         int
-	BreakerOpenSnapshot     scenario5BreakerSnapshot
-	BreakerHalfOpenSnapshot scenario5BreakerSnapshot
-	BreakerFinalSnapshot    scenario5BreakerSnapshot
+	BreakerOpenSnapshot     breakerIsolationBreakerSnapshot
+	BreakerHalfOpenSnapshot breakerIsolationBreakerSnapshot
+	BreakerFinalSnapshot    breakerIsolationBreakerSnapshot
 }
 
-// RunScenario5 executes the legacy Scenario 5, folded into
+// RunBreakerIsolation executes the legacy Breaker Isolation, folded into
 // partner_resilience.go and kept for reference until retirement.
-func RunScenario5(ctx context.Context) error {
+func RunBreakerIsolation(ctx context.Context) error {
 	observe.RegisterMetrics(prometheus.NewRegistry())
-	db, cleanup, err := openBenchDatabase(ctx)
+	db, cleanup, err := scenarios.OpenBenchDatabase(ctx)
 	if err != nil {
 		return fmt.Errorf("open bench db: %w", err)
 	}
@@ -140,68 +135,68 @@ func RunScenario5(ctx context.Context) error {
 		return fmt.Errorf("ping db: %w", err)
 	}
 
-	profile, err := scenario5ProfileFromEnv()
+	profile, err := breakerIsolationProfileFromEnv()
 	if err != nil {
 		return fmt.Errorf("load profile: %w", err)
 	}
 
-	control, err := runScenario5Phase(ctx, db, profile, scenario5PhaseConfig{
+	control, err := runBreakerIsolationPhase(ctx, db, profile, breakerIsolationPhaseConfig{
 		name:         "control",
-		receiverSeed: scenario5ControlSeed,
+		receiverSeed: breakerIsolationControlSeed,
 		deadPartner:  false,
 	})
 	if err != nil {
 		return fmt.Errorf("run control phase: %w", err)
 	}
 
-	dead, err := runScenario5Phase(ctx, db, profile, scenario5PhaseConfig{
+	dead, err := runBreakerIsolationPhase(ctx, db, profile, breakerIsolationPhaseConfig{
 		name:         "dead-partner",
-		receiverSeed: scenario5DeadSeed,
+		receiverSeed: breakerIsolationDeadSeed,
 		deadPartner:  true,
 	})
 	if err != nil {
 		return fmt.Errorf("run dead-partner phase: %w", err)
 	}
 
-	if err := writeScenario5Report(scenario5ReportPath, profile.Name, profile.CustomerCount, profile.DeliveriesPerCustomer, profile.BreakerFailureThreshold, control, dead); err != nil {
+	if err := writeBreakerIsolationReport(breakerIsolationReportPath, profile.Name, profile.CustomerCount, profile.DeliveriesPerCustomer, profile.BreakerFailureThreshold, control, dead); err != nil {
 		return fmt.Errorf("write report: %w", err)
 	}
 
-	slog.Info("scenario 5 complete", "profile", profile.Name, "report", scenario5ReportPath)
+	slog.Info("breaker isolation complete", "profile", profile.Name, "report", breakerIsolationReportPath)
 	return nil
 }
 
-type scenario5PhaseConfig struct {
+type breakerIsolationPhaseConfig struct {
 	name         string
 	receiverSeed string
 	deadPartner  bool
 }
 
-func runScenario5Phase(ctx context.Context, db *sql.DB, profile scenario5Profile, cfg scenario5PhaseConfig) (scenario5RunResult, error) {
-	if err := resetBenchData(ctx, db); err != nil {
-		return scenario5RunResult{}, fmt.Errorf("reset bench data: %w", err)
+func runBreakerIsolationPhase(ctx context.Context, db *sql.DB, profile breakerIsolationProfile, cfg breakerIsolationPhaseConfig) (breakerIsolationRunResult, error) {
+	if err := scenarios.ResetBenchData(ctx, db); err != nil {
+		return breakerIsolationRunResult{}, fmt.Errorf("reset bench data: %w", err)
 	}
-	slog.Info("running scenario 5 phase", "phase", cfg.name)
+	slog.Info("running breaker isolation phase", "phase", cfg.name)
 
-	rs, err := newScenario5Receiver(cfg, profile.CustomerCount)
+	rs, err := newBreakerIsolationReceiver(cfg, profile.CustomerCount)
 	if err != nil {
-		return scenario5RunResult{}, err
+		return breakerIsolationRunResult{}, err
 	}
 	defer rs.Close()
 
-	if err := seedScenario5Customers(ctx, db, profile.CustomerCount); err != nil {
-		return scenario5RunResult{}, fmt.Errorf("seed customers: %w", err)
+	if err := seedBreakerIsolationCustomers(ctx, db, profile.CustomerCount); err != nil {
+		return breakerIsolationRunResult{}, fmt.Errorf("seed customers: %w", err)
 	}
-	if err := seedScenario5Webhooks(ctx, db, rs.URL(), profile.CustomerCount); err != nil {
-		return scenario5RunResult{}, fmt.Errorf("seed webhooks: %w", err)
+	if err := seedBreakerIsolationWebhooks(ctx, db, rs.URL(), profile.CustomerCount); err != nil {
+		return breakerIsolationRunResult{}, fmt.Errorf("seed webhooks: %w", err)
 	}
-	if err := seedScenario5Deliveries(ctx, db, profile.CustomerCount, profile.DeliveriesPerCustomer); err != nil {
-		return scenario5RunResult{}, fmt.Errorf("seed deliveries: %w", err)
+	if err := seedBreakerIsolationDeliveries(ctx, db, profile.CustomerCount, profile.DeliveriesPerCustomer); err != nil {
+		return breakerIsolationRunResult{}, fmt.Errorf("seed deliveries: %w", err)
 	}
 
-	allCustomerIDs := scenario5CustomerIDs(profile.CustomerCount)
+	allCustomerIDs := breakerIsolationCustomerIDs(profile.CustomerCount)
 	healthyCustomerIDs := allCustomerIDs[1:]
-	deadCustomerID := allCustomerIDs[scenario5DeadCustomerIndex]
+	deadCustomerID := allCustomerIDs[breakerIsolationDeadCustomerIndex]
 	baselineGoroutines := runtime.NumGoroutine()
 
 	sched := roundrobin.New()
@@ -255,18 +250,18 @@ func runScenario5Phase(ctx context.Context, db *sql.DB, profile scenario5Profile
 
 	started := time.Now()
 
-	var result scenario5RunResult
+	var result breakerIsolationRunResult
 	result.Name = cfg.name
 	result.BaselineGoroutines = baselineGoroutines
 
 	if cfg.deadPartner {
-		openSnap, halfOpenSnap, finalSnap, err := waitForScenario5BreakerTransitions(ctx, db, deadCustomerID, profile.BreakerFailureThreshold)
+		openSnap, halfOpenSnap, finalSnap, err := waitForBreakerIsolationBreakerTransitions(ctx, db, deadCustomerID, profile.BreakerFailureThreshold)
 		if err != nil {
 			cancelDiscovery()
 			cancelWorkers()
 			workerWg.Wait()
 			<-discoveryDone
-			return scenario5RunResult{}, err
+			return breakerIsolationRunResult{}, err
 		}
 		result.BreakerOpenSnapshot = openSnap
 		result.BreakerHalfOpenSnapshot = halfOpenSnap
@@ -283,7 +278,7 @@ func runScenario5Phase(ctx context.Context, db *sql.DB, profile scenario5Profile
 			cancelWorkers()
 			workerWg.Wait()
 			<-discoveryDone
-			return scenario5RunResult{}, fmt.Errorf("count healthy pending deliveries: %w", err)
+			return breakerIsolationRunResult{}, fmt.Errorf("count healthy pending deliveries: %w", err)
 		}
 		if healthyPending == 0 {
 			break
@@ -294,7 +289,7 @@ func runScenario5Phase(ctx context.Context, db *sql.DB, profile scenario5Profile
 			cancelWorkers()
 			workerWg.Wait()
 			<-discoveryDone
-			return scenario5RunResult{}, fmt.Errorf("healthy deliveries not drained within timeout: %d pending", healthyPending)
+			return breakerIsolationRunResult{}, fmt.Errorf("healthy deliveries not drained within timeout: %d pending", healthyPending)
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
@@ -310,22 +305,22 @@ func runScenario5Phase(ctx context.Context, db *sql.DB, profile scenario5Profile
 	result.Duration = time.Since(started)
 	result.FinalGoroutines = runtime.NumGoroutine()
 
-	latencies, err := queryHealthyCustomerLatencies(ctx, db, scenario5CustomerID(scenario5DeadCustomerIndex))
+	latencies, err := queryHealthyCustomerLatencies(ctx, db, breakerIsolationCustomerID(breakerIsolationDeadCustomerIndex))
 	if err != nil {
-		return scenario5RunResult{}, fmt.Errorf("query healthy customer latencies: %w", err)
+		return breakerIsolationRunResult{}, fmt.Errorf("query healthy customer latencies: %w", err)
 	}
 	result.HealthyLatencies = latencies
 
 	if cfg.deadPartner {
 		attempts, err := countDeliveryAttemptsForCustomer(ctx, db, deadCustomerID)
 		if err != nil {
-			return scenario5RunResult{}, fmt.Errorf("count dead customer attempts: %w", err)
+			return breakerIsolationRunResult{}, fmt.Errorf("count dead customer attempts: %w", err)
 		}
 		result.DeadAttempts = attempts
 
 		pending, err := countPendingDeliveriesForCustomers(ctx, db, []string{deadCustomerID})
 		if err != nil {
-			return scenario5RunResult{}, fmt.Errorf("count dead customer pending: %w", err)
+			return breakerIsolationRunResult{}, fmt.Errorf("count dead customer pending: %w", err)
 		}
 		result.DeadPending = pending
 		result.DeadState = result.BreakerFinalSnapshot.State
@@ -334,25 +329,25 @@ func runScenario5Phase(ctx context.Context, db *sql.DB, profile scenario5Profile
 	return result, nil
 }
 
-func newScenario5Receiver(cfg scenario5PhaseConfig, customerCount int) (*receiver.ReceiverServer, error) {
+func newBreakerIsolationReceiver(cfg breakerIsolationPhaseConfig, customerCount int) (*receiver.ReceiverServer, error) {
 	opts := []receiver.Option{receiver.WithStableDecisions(cfg.receiverSeed)}
 	for i := 0; i < customerCount; i++ {
-		path := scenario5WebhookPath(i)
-		if cfg.deadPartner && i == scenario5DeadCustomerIndex {
+		path := breakerIsolationWebhookPath(i)
+		if cfg.deadPartner && i == breakerIsolationDeadCustomerIndex {
 			opts = append(opts, receiver.WithRouteHang(path))
 			continue
 		}
-		opts = append(opts, receiver.WithRouteLatency(path, 1.0, scenario5HealthyLatency))
+		opts = append(opts, receiver.WithRouteLatency(path, 1.0, breakerIsolationHealthyLatency))
 	}
 	return receiver.NewServer(opts...), nil
 }
 
-func scenario5WebhookPath(i int) string {
-	return scenario5HealthyLatencyPathPrefix + fmt.Sprintf("%02d", i+1)
+func breakerIsolationWebhookPath(i int) string {
+	return breakerIsolationHealthyLatencyPathPrefix + fmt.Sprintf("%02d", i+1)
 }
 
-func seedScenario5Customers(ctx context.Context, db *sql.DB, customerCount int) error {
-	ids := scenario5CustomerIDs(customerCount)
+func seedBreakerIsolationCustomers(ctx context.Context, db *sql.DB, customerCount int) error {
+	ids := breakerIsolationCustomerIDs(customerCount)
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO customers (id, class) VALUES ")
 	args := make([]any, 0, len(ids)*2)
@@ -370,8 +365,8 @@ func seedScenario5Customers(ctx context.Context, db *sql.DB, customerCount int) 
 	return nil
 }
 
-func seedScenario5Webhooks(ctx context.Context, db *sql.DB, receiverBaseURL string, customerCount int) error {
-	ids := scenario5CustomerIDs(customerCount)
+func seedBreakerIsolationWebhooks(ctx context.Context, db *sql.DB, receiverBaseURL string, customerCount int) error {
+	ids := breakerIsolationCustomerIDs(customerCount)
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active) VALUES ")
 	args := make([]any, 0, len(ids)*4)
@@ -382,9 +377,9 @@ func seedScenario5Webhooks(ctx context.Context, db *sql.DB, receiverBaseURL stri
 		fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, true)", i*4+1, i*4+2, i*4+3, i*4+4)
 		args = append(args,
 			id,
-			receiverBaseURL+scenario5WebhookPath(i),
+			receiverBaseURL+breakerIsolationWebhookPath(i),
 			"",
-			fmt.Sprintf("{%s}", eventType),
+			fmt.Sprintf("{%s}", scenarios.EventType),
 		)
 	}
 	sb.WriteString(" ON CONFLICT DO NOTHING")
@@ -394,9 +389,9 @@ func seedScenario5Webhooks(ctx context.Context, db *sql.DB, receiverBaseURL stri
 	return nil
 }
 
-func seedScenario5Deliveries(ctx context.Context, db *sql.DB, customerCount int, deliveriesPerCustomer int) error {
-	for i, customerID := range scenario5CustomerIDs(customerCount) {
-		webhookID, err := scenario5WebhookID(ctx, db, customerID)
+func seedBreakerIsolationDeliveries(ctx context.Context, db *sql.DB, customerCount int, deliveriesPerCustomer int) error {
+	for i, customerID := range breakerIsolationCustomerIDs(customerCount) {
+		webhookID, err := breakerIsolationWebhookID(ctx, db, customerID)
 		if err != nil {
 			return err
 		}
@@ -411,7 +406,7 @@ func seedScenario5Deliveries(ctx context.Context, db *sql.DB, customerCount int,
 			INSERT INTO events (customer_id, type, payload)
 			VALUES ($1, $2, $3)
 			RETURNING id
-		`, customerID, eventType, []byte(fmt.Sprintf(`{"event_name":"bench.scenario5","customer_index":%d}`, i+1))).Scan(&eventID)
+		`, customerID, scenarios.EventType, []byte(fmt.Sprintf(`{"event_name":"bench.breaker_isolation","customer_index":%d}`, i+1))).Scan(&eventID)
 		if err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("insert event for %s: %w", customerID, err)
@@ -435,7 +430,7 @@ func seedScenario5Deliveries(ctx context.Context, db *sql.DB, customerCount int,
 	return nil
 }
 
-func scenario5WebhookID(ctx context.Context, db *sql.DB, customerID string) (string, error) {
+func breakerIsolationWebhookID(ctx context.Context, db *sql.DB, customerID string) (string, error) {
 	var id string
 	if err := db.QueryRowContext(ctx, `
 		SELECT id::text
@@ -478,7 +473,7 @@ func countDeliveryAttemptsForCustomer(ctx context.Context, db *sql.DB, customerI
 	return n, nil
 }
 
-func queryHealthyCustomerLatencies(ctx context.Context, db *sql.DB, deadCustomerID string) ([]scenario5CustomerLatency, error) {
+func queryHealthyCustomerLatencies(ctx context.Context, db *sql.DB, deadCustomerID string) ([]scenarios.BreakerIsolationCustomerLatency, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT
 			d.customer_id,
@@ -494,9 +489,9 @@ func queryHealthyCustomerLatencies(ctx context.Context, db *sql.DB, deadCustomer
 	}
 	defer func() { _ = rows.Close() }()
 
-	var latencies []scenario5CustomerLatency
+	var latencies []scenarios.BreakerIsolationCustomerLatency
 	for rows.Next() {
-		var row scenario5CustomerLatency
+		var row scenarios.BreakerIsolationCustomerLatency
 		if err := rows.Scan(&row.CustomerID, &row.ControlP95); err != nil {
 			return nil, fmt.Errorf("scan healthy latency: %w", err)
 		}
@@ -508,11 +503,11 @@ func queryHealthyCustomerLatencies(ctx context.Context, db *sql.DB, deadCustomer
 	return latencies, nil
 }
 
-func compareScenario5Latencies(control, dead []scenario5CustomerLatency) ([]scenario5CustomerLatency, bool, error) {
+func compareBreakerIsolationLatencies(control, dead []scenarios.BreakerIsolationCustomerLatency) ([]scenarios.BreakerIsolationCustomerLatency, bool, error) {
 	if len(control) != len(dead) {
 		return nil, false, fmt.Errorf("healthy latency rows mismatch: control=%d dead=%d", len(control), len(dead))
 	}
-	comparisons := make([]scenario5CustomerLatency, len(control))
+	comparisons := make([]scenarios.BreakerIsolationCustomerLatency, len(control))
 	ok := true
 	for i := range control {
 		if control[i].CustomerID != dead[i].CustomerID {
@@ -525,7 +520,7 @@ func compareScenario5Latencies(control, dead []scenario5CustomerLatency) ([]scen
 		if ratio > 1.10 {
 			ok = false
 		}
-		comparisons[i] = scenario5CustomerLatency{
+		comparisons[i] = scenarios.BreakerIsolationCustomerLatency{
 			CustomerID: control[i].CustomerID,
 			ControlP95: control[i].ControlP95,
 			DeadP95:    dead[i].ControlP95,
@@ -535,8 +530,8 @@ func compareScenario5Latencies(control, dead []scenario5CustomerLatency) ([]scen
 	return comparisons, ok, nil
 }
 
-func snapshotScenario5BreakerMetrics(ctx context.Context, db *sql.DB, customerID string) (scenario5BreakerSnapshot, error) {
-	var snap scenario5BreakerSnapshot
+func snapshotBreakerIsolationBreakerMetrics(ctx context.Context, db *sql.DB, customerID string) (breakerIsolationBreakerSnapshot, error) {
+	var snap breakerIsolationBreakerSnapshot
 	var webhookID string
 	err := db.QueryRowContext(ctx, `
 		SELECT id::text, breaker_state, breaker_failure_count, COALESCE(breaker_probe_delivery_id::text, ''), breaker_probe_delivery_id IS NOT NULL
@@ -546,7 +541,7 @@ func snapshotScenario5BreakerMetrics(ctx context.Context, db *sql.DB, customerID
 		LIMIT 1
 	`, customerID).Scan(&webhookID, &snap.State, &snap.FailureCount, &snap.ProbeDeliveryID, &snap.ProbeDeliveryValid)
 	if err != nil {
-		return scenario5BreakerSnapshot{}, fmt.Errorf("query breaker snapshot: %w", err)
+		return breakerIsolationBreakerSnapshot{}, fmt.Errorf("query breaker snapshot: %w", err)
 	}
 	snap.OpenMetric = testutil.ToFloat64(observe.WebhookBreakerState.WithLabelValues(webhookID, outbox.BreakerStateOpen))
 	snap.HalfOpenMetric = testutil.ToFloat64(observe.WebhookBreakerState.WithLabelValues(webhookID, outbox.BreakerStateHalfOpen))
@@ -555,19 +550,19 @@ func snapshotScenario5BreakerMetrics(ctx context.Context, db *sql.DB, customerID
 	return snap, nil
 }
 
-func waitForScenario5BreakerTransitions(ctx context.Context, db *sql.DB, customerID string, threshold int) (scenario5BreakerSnapshot, scenario5BreakerSnapshot, scenario5BreakerSnapshot, error) {
-	var openSnap, halfOpenSnap, finalSnap scenario5BreakerSnapshot
+func waitForBreakerIsolationBreakerTransitions(ctx context.Context, db *sql.DB, customerID string, threshold int) (breakerIsolationBreakerSnapshot, breakerIsolationBreakerSnapshot, breakerIsolationBreakerSnapshot, error) {
+	var openSnap, halfOpenSnap, finalSnap breakerIsolationBreakerSnapshot
 	var haveOpen, haveHalfOpen, haveFinal bool
 
-	totalTimeout, pollInterval := scenario5BreakerPollingConfig()
+	totalTimeout, pollInterval := scenarios.BreakerIsolationBreakerPollingConfig()
 
 	pollCtx, cancel := context.WithTimeout(ctx, totalTimeout)
 	defer cancel()
 
 	for {
-		snap, err := snapshotScenario5BreakerMetrics(pollCtx, db, customerID)
+		snap, err := snapshotBreakerIsolationBreakerMetrics(pollCtx, db, customerID)
 		if err != nil {
-			return scenario5BreakerSnapshot{}, scenario5BreakerSnapshot{}, scenario5BreakerSnapshot{}, err
+			return breakerIsolationBreakerSnapshot{}, breakerIsolationBreakerSnapshot{}, breakerIsolationBreakerSnapshot{}, err
 		}
 
 		switch {
@@ -588,48 +583,14 @@ func waitForScenario5BreakerTransitions(ctx context.Context, db *sql.DB, custome
 
 		select {
 		case <-pollCtx.Done():
-			return scenario5BreakerSnapshot{}, scenario5BreakerSnapshot{}, scenario5BreakerSnapshot{}, fmt.Errorf("timed out waiting for breaker transitions: open=%v half_open=%v final=%v", haveOpen, haveHalfOpen, haveFinal)
+			return breakerIsolationBreakerSnapshot{}, breakerIsolationBreakerSnapshot{}, breakerIsolationBreakerSnapshot{}, fmt.Errorf("timed out waiting for breaker transitions: open=%v half_open=%v final=%v", haveOpen, haveHalfOpen, haveFinal)
 		case <-time.After(pollInterval):
 		}
 	}
 }
 
-func scenario5BreakerPollingConfig() (time.Duration, time.Duration) {
-	profileName, err := benchProfileNameFromEnv()
-	if err != nil {
-		profileName = benchProfileDev
-	}
-
-	totalTimeout := 5 * time.Minute
-	if profileName != benchProfileStress {
-		totalTimeout = 90 * time.Second
-	}
-
-	cooldown := scenario5BreakerInitialCooldownFromProfile()
-	pollInterval := 500 * time.Millisecond
-	if cooldown > 0 {
-		pollInterval = cooldown / 20
-	}
-	if pollInterval < 250*time.Millisecond {
-		pollInterval = 250 * time.Millisecond
-	}
-	if pollInterval > 2*time.Second {
-		pollInterval = 2 * time.Second
-	}
-
-	return totalTimeout, pollInterval
-}
-
-func scenario5BreakerInitialCooldownFromProfile() time.Duration {
-	raw, _, err := loadBenchProfileConfig("scenario5")
-	if err != nil {
-		return 0
-	}
-	return raw.BreakerInitialCooldown.Duration()
-}
-
-func writeScenario5Report(path, profileName string, customerCount, deliveriesPerCustomer, breakerThreshold int, control, dead scenario5RunResult) error {
-	comparisons, withinLimit, err := compareScenario5Latencies(control.HealthyLatencies, dead.HealthyLatencies)
+func writeBreakerIsolationReport(path, profileName string, customerCount, deliveriesPerCustomer, breakerThreshold int, control, dead breakerIsolationRunResult) error {
+	comparisons, withinLimit, err := compareBreakerIsolationLatencies(control.HealthyLatencies, dead.HealthyLatencies)
 	if err != nil {
 		return err
 	}
@@ -651,7 +612,7 @@ func writeScenario5Report(path, profileName string, customerCount, deliveriesPer
 	}
 	defer func() { _ = f.Close() }()
 
-	_, _ = fmt.Fprintf(f, `# Scenario 5: Dead Partner Circuit Breaker + Pool Protection
+	_, _ = fmt.Fprintf(f, `# Breaker Isolation: Dead Partner Circuit Breaker + Pool Protection
 
 ## Description
 
@@ -734,30 +695,30 @@ The dead-customer attempt count includes a small number of in-flight claims alre
 		dead.BreakerFinalSnapshot.HalfOpenMetric,
 		dead.BreakerFinalSnapshot.ClosedMetric,
 		dead.BreakerFinalSnapshot.TripCount,
-		passFail(withinLimit),
-		passFail(withinLimit),
+		scenarios.PassFail(withinLimit),
+		scenarios.PassFail(withinLimit),
 		dead.BreakerOpenSnapshot.FailureCount,
 		breakerThreshold,
-		passFail(dead.BreakerOpenSnapshot.FailureCount >= breakerThreshold),
-		passFail(dead.BreakerHalfOpenSnapshot.ProbeDeliveryValid),
-		passFail(dead.BreakerHalfOpenSnapshot.ProbeDeliveryValid),
+		scenarios.PassFail(dead.BreakerOpenSnapshot.FailureCount >= breakerThreshold),
+		scenarios.PassFail(dead.BreakerHalfOpenSnapshot.ProbeDeliveryValid),
+		scenarios.PassFail(dead.BreakerHalfOpenSnapshot.ProbeDeliveryValid),
 		dead.DeadPending,
-		passFail(skippedOK),
+		scenarios.PassFail(skippedOK),
 		dead.DeadAttempts,
 		deadAttemptsLimit,
-		passFail(deadAttemptsOK),
+		scenarios.PassFail(deadAttemptsOK),
 		dead.BreakerFinalSnapshot.TripCount,
-		passFail(tripsOK),
+		scenarios.PassFail(tripsOK),
 		goroutineDelta,
-		passFail(goroutineOK),
-		passFail(resultOK),
-		passFail(resultOK),
+		scenarios.PassFail(goroutineOK),
+		scenarios.PassFail(resultOK),
+		scenarios.PassFail(resultOK),
 	)
 
 	return f.Close()
 }
 
-func probeID(snap scenario5BreakerSnapshot) string {
+func probeID(snap breakerIsolationBreakerSnapshot) string {
 	if snap.ProbeDeliveryValid && snap.ProbeDeliveryID != "" {
 		return snap.ProbeDeliveryID
 	}

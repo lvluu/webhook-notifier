@@ -9,11 +9,11 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 )
 
-// resetBenchData truncates all bench-managed tables so the scenario is
+// ResetBenchData truncates all bench-managed tables so the scenario is
 // idempotent across aborted runs.  The order respects FK constraints:
 // child tables (delivery_attempts, dead_letters) are dropped before/during
 // the CASCADE from deliveries; webhooks and events are truncated directly.
-func resetBenchData(ctx context.Context, db *sql.DB) error {
+func ResetBenchData(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `
 		TRUNCATE
 			webhooks,
@@ -31,28 +31,33 @@ func resetBenchData(ctx context.Context, db *sql.DB) error {
 }
 
 const (
-	whaleCustomerID = "whale"
-	lateSmallID     = "small-late"
-	eventType       = "bench.test"
+	// WhaleCustomerID is the default high-volume benchmark Customer.
+	WhaleCustomerID = "whale"
+	// LateSmallID is the Customer injected after the initial fairness backlog.
+	LateSmallID = "small-late"
+	// EventType is the event name used by shared benchmark fixtures.
+	EventType = "bench.test"
 )
 
-func smallCustomerID(i int) string {
+// SmallCustomerID returns the deterministic ID for a small benchmark Customer.
+func SmallCustomerID(i int) string {
 	return fmt.Sprintf("small-%03d", i)
 }
 
-func seedCustomers(ctx context.Context, db *sql.DB, smallCount int) error {
+// SeedCustomers inserts the shared Whale, late Small, and Small Customers.
+func SeedCustomers(ctx context.Context, db *sql.DB, smallCount int) error {
 	all := []struct {
 		id    string
 		class int
 	}{
-		{whaleCustomerID, 1},
-		{lateSmallID, 1},
+		{WhaleCustomerID, 1},
+		{LateSmallID, 1},
 	}
 	for i := 0; i < smallCount; i++ {
 		all = append(all, struct {
 			id    string
 			class int
-		}{smallCustomerID(i), 1})
+		}{SmallCustomerID(i), 1})
 	}
 
 	var sb strings.Builder
@@ -74,10 +79,11 @@ func seedCustomers(ctx context.Context, db *sql.DB, smallCount int) error {
 	return nil
 }
 
-func seedWebhooks(ctx context.Context, db *sql.DB, receiverBaseURL string, smallCount int) error {
-	customerIDs := []string{whaleCustomerID, lateSmallID}
+// SeedWebhooks inserts one active Webhook for every shared benchmark Customer.
+func SeedWebhooks(ctx context.Context, db *sql.DB, receiverBaseURL string, smallCount int) error {
+	customerIDs := []string{WhaleCustomerID, LateSmallID}
 	for i := 0; i < smallCount; i++ {
-		customerIDs = append(customerIDs, smallCustomerID(i))
+		customerIDs = append(customerIDs, SmallCustomerID(i))
 	}
 
 	var sb strings.Builder
@@ -89,7 +95,7 @@ func seedWebhooks(ctx context.Context, db *sql.DB, receiverBaseURL string, small
 		}
 		base := i * 4
 		_, _ = fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, true)", base+1, base+2, base+3, base+4)
-		args = append(args, cid, receiverBaseURL+"/hooks/"+cid, "", fmt.Sprintf("{%s}", eventType))
+		args = append(args, cid, receiverBaseURL+"/hooks/"+cid, "", fmt.Sprintf("{%s}", EventType))
 	}
 	sb.WriteString(" ON CONFLICT DO NOTHING")
 
@@ -100,7 +106,8 @@ func seedWebhooks(ctx context.Context, db *sql.DB, receiverBaseURL string, small
 	return nil
 }
 
-func seedWhaleDeliveries(ctx context.Context, db *sql.DB, whaleDeliveries int) (string, error) {
+// SeedWhaleDeliveries inserts a pending backlog for the Whale Customer.
+func SeedWhaleDeliveries(ctx context.Context, db *sql.DB, whaleDeliveries int) (string, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", fmt.Errorf("begin tx: %w", err)
@@ -112,12 +119,12 @@ func seedWhaleDeliveries(ctx context.Context, db *sql.DB, whaleDeliveries int) (
 		INSERT INTO events (customer_id, type, payload)
 		VALUES ($1, $2, '{}')
 		RETURNING id
-	`, whaleCustomerID, eventType).Scan(&eventID)
+	`, WhaleCustomerID, EventType).Scan(&eventID)
 	if err != nil {
 		return "", fmt.Errorf("insert whale event: %w", err)
 	}
 
-	webhookIDs, err := lookupCustomerWebhookIDs(ctx, tx, whaleCustomerID)
+	webhookIDs, err := lookupCustomerWebhookIDs(ctx, tx, WhaleCustomerID)
 	if err != nil {
 		return "", err
 	}
@@ -130,7 +137,7 @@ func seedWhaleDeliveries(ctx context.Context, db *sql.DB, whaleDeliveries int) (
 		INSERT INTO deliveries (event_id, webhook_id, customer_id, status, attempt_count, next_attempt_at)
 		SELECT $1, $2, $3, 'pending', 0, now()
 		FROM generate_series(1, $4)
-	`, eventID, webhookID, whaleCustomerID, whaleDeliveries)
+	`, eventID, webhookID, WhaleCustomerID, whaleDeliveries)
 	if err != nil {
 		return "", fmt.Errorf("bulk insert whale deliveries: %w", err)
 	}
@@ -163,11 +170,12 @@ func lookupCustomerWebhookIDs(ctx context.Context, tx *sql.Tx, customerID string
 	return ids, nil
 }
 
-func ingestSmallDeliveries(ctx context.Context, store *ingest.Store, customerID string, count int) error {
+// IngestSmallDeliveries submits small-Customer Events through the ingest path.
+func IngestSmallDeliveries(ctx context.Context, store *ingest.Store, customerID string, count int) error {
 	for range count {
 		_, err := store.Submit(ctx, ingest.Event{
 			CustomerID: customerID,
-			Type:       eventType,
+			Type:       EventType,
 			Payload:    []byte("{}"),
 		})
 		if err != nil {
@@ -177,7 +185,8 @@ func ingestSmallDeliveries(ctx context.Context, store *ingest.Store, customerID 
 	return nil
 }
 
-func countPendingDeliveries(ctx context.Context, db *sql.DB) (int, error) {
+// CountPendingDeliveries counts Deliveries that have not reached a terminal state.
+func CountPendingDeliveries(ctx context.Context, db *sql.DB) (int, error) {
 	var n int
 	err := db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM deliveries

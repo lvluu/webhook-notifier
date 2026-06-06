@@ -120,9 +120,9 @@ func (s *Store) ApplyBreakerOutcomes(ctx context.Context, outcomes []BreakerOutc
 }
 
 const (
-	defaultBreakerCoalesceBuffer = 4096
-	defaultBreakerCoalesceMax    = 512
-	defaultBreakerCoalesceWindow = 100 * time.Millisecond
+	defaultBreakerCoalesceBuffer = 65536
+	defaultBreakerCoalesceMax    = 1024
+	defaultBreakerCoalesceWindow = 15 * time.Millisecond
 	breakerFlushTimeout          = 15 * time.Second
 )
 
@@ -185,8 +185,10 @@ func (c *BreakerCoalescer) Run(ctx context.Context) error {
 			if len(batch) >= c.maxBatch {
 				c.flush(ctx, batch)
 				batch = batch[:0]
+				observe.SetBreakerCoalescerBufferUsed(float64(len(c.ch)))
 			}
 		case <-ticker.C:
+			observe.SetBreakerCoalescerBufferUsed(float64(len(c.ch)))
 			if len(batch) > 0 {
 				c.flush(ctx, batch)
 				batch = batch[:0]
@@ -214,10 +216,13 @@ func (c *BreakerCoalescer) flush(ctx context.Context, batch []BreakerOutcome) {
 	}
 	flushCtx, cancel := context.WithTimeout(ctx, breakerFlushTimeout)
 	defer cancel()
+	flushStart := time.Now()
 	if err := c.store.ApplyBreakerOutcomes(flushCtx, batch); err != nil {
 		if c.logger != nil {
 			c.logger.Warn("apply breaker outcomes failed; dropping batch",
 				"count", len(batch), "error", err)
 		}
 	}
+	observe.ObserveBreakerFlushDuration(time.Since(flushStart).Seconds())
+	observe.ObserveBreakerFlushBatchSize(float64(len(batch)))
 }

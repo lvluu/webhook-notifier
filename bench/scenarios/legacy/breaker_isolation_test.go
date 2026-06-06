@@ -1,37 +1,39 @@
-package scenarios
+package legacy
 
 import (
 	"strings"
 	"testing"
 	"time"
+
+	scenarios "github.com/lvluu/webhook-notifier/bench/scenarios"
 )
 
-func TestCompareScenario5Latencies(t *testing.T) {
+func TestCompareBreakerIsolationLatencies(t *testing.T) {
 	tests := []struct {
 		name      string
-		control   []scenario5CustomerLatency
-		dead      []scenario5CustomerLatency
+		control   []scenarios.BreakerIsolationCustomerLatency
+		dead      []scenarios.BreakerIsolationCustomerLatency
 		wantOK    bool
 		wantErr   string
 		wantRatio float64
 	}{
 		{
 			name:    "control p95 zero errors",
-			control: []scenario5CustomerLatency{{CustomerID: "c1", ControlP95: 0}},
-			dead:    []scenario5CustomerLatency{{CustomerID: "c1", ControlP95: 10}},
+			control: []scenarios.BreakerIsolationCustomerLatency{{CustomerID: "c1", ControlP95: 0}},
+			dead:    []scenarios.BreakerIsolationCustomerLatency{{CustomerID: "c1", ControlP95: 10}},
 			wantErr: "control P95 is zero",
 		},
 		{
 			name:      "valid comparison within threshold",
-			control:   []scenario5CustomerLatency{{CustomerID: "c1", ControlP95: 100}},
-			dead:      []scenario5CustomerLatency{{CustomerID: "c1", ControlP95: 105}},
+			control:   []scenarios.BreakerIsolationCustomerLatency{{CustomerID: "c1", ControlP95: 100}},
+			dead:      []scenarios.BreakerIsolationCustomerLatency{{CustomerID: "c1", ControlP95: 105}},
 			wantOK:    true,
 			wantRatio: 1.05,
 		},
 		{
 			name:      "valid comparison above threshold",
-			control:   []scenario5CustomerLatency{{CustomerID: "c1", ControlP95: 100}},
-			dead:      []scenario5CustomerLatency{{CustomerID: "c1", ControlP95: 120}},
+			control:   []scenarios.BreakerIsolationCustomerLatency{{CustomerID: "c1", ControlP95: 100}},
+			dead:      []scenarios.BreakerIsolationCustomerLatency{{CustomerID: "c1", ControlP95: 120}},
 			wantOK:    false,
 			wantRatio: 1.20,
 		},
@@ -39,7 +41,7 @@ func TestCompareScenario5Latencies(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok, err := compareScenario5Latencies(tc.control, tc.dead)
+			got, ok, err := compareBreakerIsolationLatencies(tc.control, tc.dead)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("error = %v, want substring %q", err, tc.wantErr)
@@ -47,7 +49,7 @@ func TestCompareScenario5Latencies(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("compareScenario5Latencies error: %v", err)
+				t.Fatalf("compareBreakerIsolationLatencies error: %v", err)
 			}
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
@@ -62,20 +64,20 @@ func TestCompareScenario5Latencies(t *testing.T) {
 	}
 }
 
-func TestScenario5BreakerPollingConfig(t *testing.T) {
+func TestBreakerIsolationBreakerPollingConfig(t *testing.T) {
 	tests := []struct {
 		name             string
 		profile          string
 		wantTotalTimeout time.Duration
 	}{
-		{name: "dev profile shorter timeout", profile: benchProfileDev, wantTotalTimeout: 90 * time.Second},
-		{name: "stress profile full timeout", profile: benchProfileStress, wantTotalTimeout: 5 * time.Minute},
+		{name: "dev profile shorter timeout", profile: scenarios.BenchProfileDev, wantTotalTimeout: 90 * time.Second},
+		{name: "stress profile full timeout", profile: scenarios.BenchProfileStress, wantTotalTimeout: 5 * time.Minute},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("BENCH_PROFILE", tc.profile)
-			total, interval := scenario5BreakerPollingConfig()
+			total, interval := scenarios.BreakerIsolationBreakerPollingConfig()
 			if total != tc.wantTotalTimeout {
 				t.Fatalf("total timeout = %s, want %s", total, tc.wantTotalTimeout)
 			}
@@ -86,7 +88,7 @@ func TestScenario5BreakerPollingConfig(t *testing.T) {
 	}
 }
 
-func TestScenario3WebhookURLMatches(t *testing.T) {
+func TestTerminalFastFailWebhookURLMatches(t *testing.T) {
 	tests := []struct {
 		name     string
 		url      string
@@ -100,9 +102,9 @@ func TestScenario3WebhookURLMatches(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := scenario3WebhookURLMatches(tc.url, tc.expected)
+			got := terminalFastFailWebhookURLMatches(tc.url, tc.expected)
 			if got != tc.want {
-				t.Fatalf("scenario3WebhookURLMatches(%q,%q)=%v want %v", tc.url, tc.expected, got, tc.want)
+				t.Fatalf("terminalFastFailWebhookURLMatches(%q,%q)=%v want %v", tc.url, tc.expected, got, tc.want)
 			}
 		})
 	}

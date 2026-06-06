@@ -20,9 +20,15 @@ import (
 	"github.com/lvluu/webhook-notifier/bench/receiver"
 )
 
-const scenario8ReportPath = "bench/results/scenario-8.md"
+const horizontalScaleReportPath = "bench/results/horizontal-scale.md"
 
-type scenario8Profile struct {
+const (
+	horizontalScaleWorkersPerReplica     = 8
+	horizontalScaleDeliveryConcurrency   = 16
+	horizontalScaleBenchmarkHostCapacity = horizontalScaleWorkersPerReplica * horizontalScaleDeliveryConcurrency
+)
+
+type horizontalScaleProfile struct {
 	Name                       string
 	ReplicaCounts              []int
 	SparseCustomers            int
@@ -36,9 +42,10 @@ type scenario8Profile struct {
 	RetryBaseDelay             time.Duration
 	RetryCapDelay              time.Duration
 	FairnessRatioLimit         float64
+	BreakerFailureThreshold    int
 }
 
-type scenario8Replica struct {
+type horizontalScaleReplica struct {
 	id          string
 	businessURL string
 	metricsURL  string
@@ -47,7 +54,7 @@ type scenario8Replica struct {
 	stderr      bytes.Buffer
 }
 
-type scenario8SparseResult struct {
+type horizontalScaleSparseResult struct {
 	ReplicaCount                  int
 	ExpectedDeliveries            int
 	TerminalDeliveries            int
@@ -62,10 +69,10 @@ type scenario8SparseResult struct {
 	FairnessGateOK                bool
 	AllTerminalOK                 bool
 	DuplicateOK                   bool
-	Distribution                  scenario8DistributionVerdict
+	Distribution                  horizontalScaleDistributionVerdict
 }
 
-type scenario8DenseRun struct {
+type horizontalScaleDenseRun struct {
 	ReplicaCount        int
 	Duration            time.Duration
 	Throughput          float64
@@ -76,48 +83,48 @@ type scenario8DenseRun struct {
 	AllTerminalOK       bool
 	DuplicateOK         bool
 	ReplicaGateOK       bool
-	Distribution        scenario8DistributionVerdict
+	Distribution        horizontalScaleDistributionVerdict
 }
 
-type scenario8ScalingVerdict struct {
+type horizontalScaleScalingVerdict struct {
 	Mode       string
 	Message    string
 	Pass       bool
 	Bottleneck string
 }
 
-type scenario8DistributionVerdict struct {
+type horizontalScaleDistributionVerdict struct {
 	MissingReplicaIDs []string
 	ImbalanceRatio    float64
 	Diagnostic        string
 	HardFail          bool
 }
 
-func scenario8ProfileFromEnv() (scenario8Profile, error) {
-	raw, name, err := loadBenchProfileConfig("scenario8")
+func horizontalScaleProfileFromEnv() (horizontalScaleProfile, error) {
+	raw, name, err := LoadBenchProfileConfig("horizontal_scale")
 	if err != nil {
-		return scenario8Profile{}, err
+		return horizontalScaleProfile{}, err
 	}
 	if len(raw.ReplicaCounts) == 0 {
-		return scenario8Profile{}, fmt.Errorf("scenario8 profile %q requires replica_counts", name)
+		return horizontalScaleProfile{}, fmt.Errorf("horizontal_scale profile %q requires replica_counts", name)
 	}
 	if raw.SparseCustomers < 1 || raw.SparseEventsPerCustomer < 1 || raw.DenseCustomers < 1 || raw.DenseDeliveriesPerCustomer < 1 {
-		return scenario8Profile{}, fmt.Errorf("scenario8 profile %q has invalid customer/delivery counts", name)
+		return horizontalScaleProfile{}, fmt.Errorf("horizontal_scale profile %q has invalid customer/delivery counts", name)
 	}
 	if raw.RequestTimeout.Duration() <= 0 {
-		return scenario8Profile{}, fmt.Errorf("scenario8 profile %q requires request_timeout > 0", name)
+		return horizontalScaleProfile{}, fmt.Errorf("horizontal_scale profile %q requires request_timeout > 0", name)
 	}
 	if raw.MinBatchHint < 1 || raw.MultiPickCount < 1 {
-		return scenario8Profile{}, fmt.Errorf("scenario8 profile %q requires min_batch_hint >=1 and multi_pick_count >=1", name)
+		return horizontalScaleProfile{}, fmt.Errorf("horizontal_scale profile %q requires min_batch_hint >=1 and multi_pick_count >=1", name)
 	}
 	if raw.RetryMaxAttempts < 1 || raw.RetryBaseDelay.Duration() < 0 || raw.RetryCapDelay.Duration() < 0 {
-		return scenario8Profile{}, fmt.Errorf("scenario8 profile %q has invalid retry config", name)
+		return horizontalScaleProfile{}, fmt.Errorf("horizontal_scale profile %q has invalid retry config", name)
 	}
 	if raw.FairnessRatioLimit <= 0 {
-		return scenario8Profile{}, fmt.Errorf("scenario8 profile %q requires fairness_ratio_limit > 0", name)
+		return horizontalScaleProfile{}, fmt.Errorf("horizontal_scale profile %q requires fairness_ratio_limit > 0", name)
 	}
 
-	return scenario8Profile{
+	return horizontalScaleProfile{
 		Name:                       name,
 		ReplicaCounts:              raw.ReplicaCounts,
 		SparseCustomers:            raw.SparseCustomers,
@@ -131,18 +138,19 @@ func scenario8ProfileFromEnv() (scenario8Profile, error) {
 		RetryBaseDelay:             raw.RetryBaseDelay.Duration(),
 		RetryCapDelay:              raw.RetryCapDelay.Duration(),
 		FairnessRatioLimit:         raw.FairnessRatioLimit,
+		BreakerFailureThreshold:    raw.BreakerFailureThreshold,
 	}, nil
 }
 
-// RunScenario8 executes Scenario 8: horizontal scalability across real notifier
+// RunHorizontalScale executes Horizontal Scale: horizontal scalability across real notifier
 // OS processes sharing one Postgres outbox.
-func RunScenario8(ctx context.Context) error {
-	profile, err := scenario8ProfileFromEnv()
+func RunHorizontalScale(ctx context.Context) error {
+	profile, err := horizontalScaleProfileFromEnv()
 	if err != nil {
-		return fmt.Errorf("load scenario8 profile: %w", err)
+		return fmt.Errorf("load horizontal scale profile: %w", err)
 	}
 
-	db, cleanup, err := openBenchDatabase(ctx)
+	db, cleanup, err := OpenBenchDatabase(ctx)
 	if err != nil {
 		return fmt.Errorf("open bench db: %w", err)
 	}
@@ -153,31 +161,31 @@ func RunScenario8(ctx context.Context) error {
 	}
 
 	maxReplicas := profile.ReplicaCounts[len(profile.ReplicaCounts)-1]
-	sparse, err := runScenario8SparsePhase(ctx, db, profile, maxReplicas)
+	sparse, err := runHorizontalScaleSparsePhase(ctx, db, profile, maxReplicas)
 	if err != nil {
 		return fmt.Errorf("run sparse phase: %w", err)
 	}
 
-	denseRuns := make([]scenario8DenseRun, 0, len(profile.ReplicaCounts))
+	denseRuns := make([]horizontalScaleDenseRun, 0, len(profile.ReplicaCounts))
 	for _, replicas := range profile.ReplicaCounts {
-		run, runErr := runScenario8DensePhase(ctx, db, profile, replicas)
+		run, runErr := runHorizontalScaleDensePhase(ctx, db, profile, replicas)
 		if runErr != nil {
 			return fmt.Errorf("run dense phase (replicas=%d): %w", replicas, runErr)
 		}
 		denseRuns = append(denseRuns, run)
 	}
 
-	scaling := scenario8ComputeScalingVerdict(denseRuns)
-	if err := writeScenario8Report(scenario8ReportPath, profile, sparse, denseRuns, scaling); err != nil {
-		return fmt.Errorf("write scenario8 report: %w", err)
+	scaling := horizontalScaleComputeScalingVerdict(denseRuns)
+	if err := writeHorizontalScaleReport(horizontalScaleReportPath, profile, sparse, denseRuns, scaling); err != nil {
+		return fmt.Errorf("write horizontal scale report: %w", err)
 	}
 
 	if !sparse.AllTerminalOK || !sparse.DuplicateOK || !sparse.FairnessGateOK || !sparse.ReplicaGateOK {
-		return fmt.Errorf("scenario8 sparse hard gate failed")
+		return fmt.Errorf("horizontal scale sparse hard gate failed")
 	}
 	for _, run := range denseRuns {
 		if !run.AllTerminalOK || !run.DuplicateOK || !run.ReplicaGateOK {
-			return fmt.Errorf("scenario8 dense hard gate failed for replicas=%d", run.ReplicaCount)
+			return fmt.Errorf("horizontal scale dense hard gate failed for replicas=%d", run.ReplicaCount)
 		}
 	}
 	// Scaling verdict is diagnostic — a regression or flat throughput is reported
@@ -189,41 +197,41 @@ func RunScenario8(ctx context.Context) error {
 	return nil
 }
 
-func runScenario8SparsePhase(ctx context.Context, db *sql.DB, profile scenario8Profile, replicaCount int) (scenario8SparseResult, error) {
-	if err := resetBenchData(ctx, db); err != nil {
-		return scenario8SparseResult{}, fmt.Errorf("reset bench data: %w", err)
+func runHorizontalScaleSparsePhase(ctx context.Context, db *sql.DB, profile horizontalScaleProfile, replicaCount int) (horizontalScaleSparseResult, error) {
+	if err := ResetBenchData(ctx, db); err != nil {
+		return horizontalScaleSparseResult{}, fmt.Errorf("reset bench data: %w", err)
 	}
 
 	rs := receiver.NewServer(
-		receiver.WithStableDecisions(fmt.Sprintf("scenario8-sparse-%d", replicaCount)),
+		receiver.WithStableDecisions(fmt.Sprintf("hs-sparse-%d", replicaCount)),
 		receiver.WithRouteLatency("/hooks/fast", 1.0, 15*time.Millisecond),
 		receiver.WithRouteLatency("/hooks/slow", 0.25, 250*time.Millisecond),
 		receiver.WithRouteStatus("/hooks/flaky", 0.03, http.StatusServiceUnavailable),
 	)
 	defer rs.Close()
 
-	if err := seedScenario8Customers(ctx, db, "scenario8-sparse-small-", profile.SparseCustomers); err != nil {
-		return scenario8SparseResult{}, err
+	if err := seedHorizontalScaleCustomers(ctx, db, "hs-sparse-small-", profile.SparseCustomers); err != nil {
+		return horizontalScaleSparseResult{}, err
 	}
-	if err := seedScenario8Webhooks(ctx, db, "scenario8-sparse-small-", profile.SparseCustomers, rs.URL(), []string{"/hooks/fast", "/hooks/slow", "/hooks/flaky"}); err != nil {
-		return scenario8SparseResult{}, err
+	if err := seedHorizontalScaleWebhooks(ctx, db, "hs-sparse-small-", profile.SparseCustomers, rs.URL(), []string{"/hooks/fast", "/hooks/slow", "/hooks/flaky"}); err != nil {
+		return horizontalScaleSparseResult{}, err
 	}
 
-	replicas, err := startScenario8Replicas(ctx, db, profile, replicaCount)
+	replicas, err := startHorizontalScaleReplicas(ctx, db, profile, replicaCount)
 	if err != nil {
-		return scenario8SparseResult{}, err
+		return horizontalScaleSparseResult{}, err
 	}
-	defer stopScenario8Replicas(replicas)
+	defer stopHorizontalScaleReplicas(replicas)
 
-	if err := submitScenario8SparseEvents(ctx, profile, replicas); err != nil {
-		return scenario8SparseResult{}, err
-	}
-
-	if err := waitForScenario8Drain(ctx, db, 8*time.Minute); err != nil {
-		return scenario8SparseResult{}, err
+	if err := submitHorizontalScaleSparseEvents(ctx, profile, replicas); err != nil {
+		return horizontalScaleSparseResult{}, err
 	}
 
-	claimSum, claimCount, emptyClaims := collectScenario8ClaimMetrics(replicas)
+	if err := waitForHorizontalScaleDrain(ctx, db, 8*time.Minute); err != nil {
+		return horizontalScaleSparseResult{}, err
+	}
+
+	claimSum, claimCount, emptyClaims := collectHorizontalScaleClaimMetrics(replicas)
 	avgClaim := 0.0
 	avgPerCustomerClaim := 0.0
 	emptyRate := 0.0
@@ -235,22 +243,22 @@ func runScenario8SparsePhase(ctx context.Context, db *sql.DB, profile scenario8P
 
 	recordings := rs.Recorded()
 	expected := profile.SparseCustomers * profile.SparseEventsPerCustomer * 3
-	terminal, err := queryTerminalDeliveries(ctx, db)
+	terminal, err := QueryTerminalDeliveries(ctx, db)
 	if err != nil {
-		return scenario8SparseResult{}, fmt.Errorf("query terminal deliveries: %w", err)
+		return horizontalScaleSparseResult{}, fmt.Errorf("query terminal deliveries: %w", err)
 	}
-	firstP95, err := queryScenario6FirstAttemptP95(ctx, db, "scenario8-sparse-small-%")
+	firstP95, err := queryProductionWorkloadFirstAttemptP95(ctx, db, "hs-sparse-small-%")
 	if err != nil {
-		return scenario8SparseResult{}, fmt.Errorf("query sparse first-attempt p95: %w", err)
+		return horizontalScaleSparseResult{}, fmt.Errorf("query sparse first-attempt p95: %w", err)
 	}
 
-	expectedReplicaIDs := scenario8ReplicaIDs(replicaCount)
-	perReplica := scenario8CountByReplica(recordings)
-	distribution := scenario8PerReplicaDistributionVerdict(perReplica, expectedReplicaIDs)
-	thresholdMs := scenario8SparseFairnessThreshold(profile.Name)
+	expectedReplicaIDs := horizontalScaleReplicaIDs(replicaCount)
+	perReplica := horizontalScaleCountByReplica(recordings)
+	distribution := horizontalScalePerReplicaDistributionVerdict(perReplica, expectedReplicaIDs)
+	thresholdMs := horizontalScaleSparseFairnessThreshold(profile.Name)
 
-	duplicates := countDuplicateAttemptTuples(recordings)
-	return scenario8SparseResult{
+	duplicates := CountDuplicateAttemptTuples(recordings)
+	return horizontalScaleSparseResult{
 		ReplicaCount:                  replicaCount,
 		ExpectedDeliveries:            expected,
 		TerminalDeliveries:            terminal,
@@ -269,54 +277,54 @@ func runScenario8SparsePhase(ctx context.Context, db *sql.DB, profile scenario8P
 	}, nil
 }
 
-func runScenario8DensePhase(ctx context.Context, db *sql.DB, profile scenario8Profile, replicaCount int) (scenario8DenseRun, error) {
-	if err := resetBenchData(ctx, db); err != nil {
-		return scenario8DenseRun{}, fmt.Errorf("reset bench data: %w", err)
+func runHorizontalScaleDensePhase(ctx context.Context, db *sql.DB, profile horizontalScaleProfile, replicaCount int) (horizontalScaleDenseRun, error) {
+	if err := ResetBenchData(ctx, db); err != nil {
+		return horizontalScaleDenseRun{}, fmt.Errorf("reset bench data: %w", err)
 	}
 
 	rs := receiver.NewServer(
-		receiver.WithStableDecisions(fmt.Sprintf("scenario8-dense-%d", replicaCount)),
+		receiver.WithStableDecisions(fmt.Sprintf("hs-dense-%d", replicaCount)),
 		receiver.WithRouteLatency("/hooks/dense-fast", 1.0, 5*time.Millisecond),
 	)
 	defer rs.Close()
 
-	if err := seedScenario8Customers(ctx, db, "scenario8-dense-customer-", profile.DenseCustomers); err != nil {
-		return scenario8DenseRun{}, err
+	if err := seedHorizontalScaleCustomers(ctx, db, "hs-dense-customer-", profile.DenseCustomers); err != nil {
+		return horizontalScaleDenseRun{}, err
 	}
-	if err := seedScenario8Webhooks(ctx, db, "scenario8-dense-customer-", profile.DenseCustomers, rs.URL(), []string{"/hooks/dense-fast"}); err != nil {
-		return scenario8DenseRun{}, err
+	if err := seedHorizontalScaleWebhooks(ctx, db, "hs-dense-customer-", profile.DenseCustomers, rs.URL(), []string{"/hooks/dense-fast"}); err != nil {
+		return horizontalScaleDenseRun{}, err
 	}
-	if err := seedScenario8DenseDeliveries(ctx, db, profile.DenseCustomers, profile.DenseDeliveriesPerCustomer); err != nil {
-		return scenario8DenseRun{}, err
+	if err := seedHorizontalScaleDenseDeliveries(ctx, db, profile.DenseCustomers, profile.DenseDeliveriesPerCustomer); err != nil {
+		return horizontalScaleDenseRun{}, err
 	}
 
-	replicas, err := startScenario8Replicas(ctx, db, profile, replicaCount)
+	replicas, err := startHorizontalScaleReplicas(ctx, db, profile, replicaCount)
 	if err != nil {
-		return scenario8DenseRun{}, err
+		return horizontalScaleDenseRun{}, err
 	}
-	defer stopScenario8Replicas(replicas)
+	defer stopHorizontalScaleReplicas(replicas)
 
 	start := time.Now()
-	if err := waitForScenario8Drain(ctx, db, 12*time.Minute); err != nil {
-		return scenario8DenseRun{}, err
+	if err := waitForHorizontalScaleDrain(ctx, db, 12*time.Minute); err != nil {
+		return horizontalScaleDenseRun{}, err
 	}
 	duration := time.Since(start)
 
 	recordings := rs.Recorded()
 	expected := profile.DenseCustomers * profile.DenseDeliveriesPerCustomer
-	terminal, err := queryTerminalDeliveries(ctx, db)
+	terminal, err := QueryTerminalDeliveries(ctx, db)
 	if err != nil {
-		return scenario8DenseRun{}, fmt.Errorf("query terminal deliveries: %w", err)
+		return horizontalScaleDenseRun{}, fmt.Errorf("query terminal deliveries: %w", err)
 	}
-	perReplica := scenario8CountByReplica(recordings)
-	distribution := scenario8PerReplicaDistributionVerdict(perReplica, scenario8ReplicaIDs(replicaCount))
+	perReplica := horizontalScaleCountByReplica(recordings)
+	distribution := horizontalScalePerReplicaDistributionVerdict(perReplica, horizontalScaleReplicaIDs(replicaCount))
 	throughput := float64(expected)
 	if duration > 0 {
 		throughput /= duration.Seconds()
 	}
 
-	duplicates := countDuplicateAttemptTuples(recordings)
-	return scenario8DenseRun{
+	duplicates := CountDuplicateAttemptTuples(recordings)
+	return horizontalScaleDenseRun{
 		ReplicaCount:        replicaCount,
 		Duration:            duration,
 		Throughput:          throughput,
@@ -331,7 +339,7 @@ func runScenario8DensePhase(ctx context.Context, db *sql.DB, profile scenario8Pr
 	}, nil
 }
 
-func startScenario8Replicas(ctx context.Context, db *sql.DB, profile scenario8Profile, count int) ([]*scenario8Replica, error) {
+func startHorizontalScaleReplicas(ctx context.Context, db *sql.DB, profile horizontalScaleProfile, count int) ([]*horizontalScaleReplica, error) {
 	var dsn string
 	if err := db.QueryRowContext(ctx, "SELECT current_setting('transaction_read_only')").Scan(new(string)); err != nil {
 		return nil, fmt.Errorf("validate bench database connection: %w", err)
@@ -356,42 +364,46 @@ func startScenario8Replicas(ctx context.Context, db *sql.DB, profile scenario8Pr
 		return nil, fmt.Errorf("empty benchmark database dsn")
 	}
 
-	receiverAddr := strings.TrimSpace(os.Getenv("SCENARIO8_RECEIVER_ADDR"))
+	receiverAddr := strings.TrimSpace(os.Getenv("HORIZONTAL_SCALE_RECEIVER_ADDR"))
 
-	replicas := make([]*scenario8Replica, 0, count)
+	replicas := make([]*horizontalScaleReplica, 0, count)
 	for i := 1; i <= count; i++ {
 		replicaID := fmt.Sprintf("replica-%d", i)
-		businessAddr, err := scenario8ReserveAddr()
+		businessAddr, err := horizontalScaleReserveAddr()
 		if err != nil {
-			stopScenario8Replicas(replicas)
+			stopHorizontalScaleReplicas(replicas)
 			return nil, err
 		}
-		metricsAddr, err := scenario8ReserveAddr()
+		metricsAddr, err := horizontalScaleReserveAddr()
 		if err != nil {
-			stopScenario8Replicas(replicas)
+			stopHorizontalScaleReplicas(replicas)
 			return nil, err
 		}
 
-		//nolint:gosec // Scenario 8 intentionally launches local notifier OS processes with benchmark-controlled args.
+		//nolint:gosec // Horizontal Scale intentionally launches local notifier OS processes with benchmark-controlled args.
 		cmd := exec.CommandContext(ctx,
 			"go", "run", "./cmd/notifier",
 			"-db", dsn,
 			"-addr", businessAddr,
 			"-metrics-addr", metricsAddr,
-			"-workers", "8",
+			"-workers", strconv.Itoa(horizontalScaleWorkersPerReplica),
+			"-delivery-concurrency", strconv.Itoa(horizontalScaleDeliveryConcurrency),
+			"-host-cap", strconv.Itoa(horizontalScaleBenchmarkHostCapacity),
+			"-request-timeout", profile.RequestTimeout.String(),
 			"-min-batch", strconv.Itoa(profile.MinBatchHint),
 			"-multi-pick", strconv.Itoa(profile.MultiPickCount),
+			"-breaker-failure-threshold", strconv.Itoa(profile.BreakerFailureThreshold),
 			"-discovery-interval", "50ms",
 			"-replica-id", replicaID,
 		)
 		cmd.Dir = repoRoot()
 		cmd.Env = append(os.Environ(),
 			"NOTIFIER_REPLICA_ID="+replicaID,
-			"SCENARIO8_RECEIVER_ADDR="+receiverAddr,
+			"HORIZONTAL_SCALE_RECEIVER_ADDR="+receiverAddr,
 		)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-		replica := &scenario8Replica{
+		replica := &horizontalScaleReplica{
 			id:          replicaID,
 			businessURL: "http://" + businessAddr,
 			metricsURL:  "http://" + metricsAddr,
@@ -401,12 +413,12 @@ func startScenario8Replicas(ctx context.Context, db *sql.DB, profile scenario8Pr
 		cmd.Stderr = &replica.stderr
 
 		if err := cmd.Start(); err != nil {
-			stopScenario8Replicas(replicas)
+			stopHorizontalScaleReplicas(replicas)
 			return nil, fmt.Errorf("start %s: %w", replicaID, err)
 		}
 
-		if err := scenario8WaitReady(replica.businessURL+"/", 12*time.Second); err != nil {
-			stopScenario8Replicas(append(replicas, replica))
+		if err := horizontalScaleWaitReady(replica.businessURL+"/", 12*time.Second); err != nil {
+			stopHorizontalScaleReplicas(append(replicas, replica))
 			return nil, fmt.Errorf("wait ready %s: %w; stderr=%s", replicaID, err, replica.stderr.String())
 		}
 		replicas = append(replicas, replica)
@@ -415,7 +427,7 @@ func startScenario8Replicas(ctx context.Context, db *sql.DB, profile scenario8Pr
 	return replicas, nil
 }
 
-func stopScenario8Replicas(replicas []*scenario8Replica) {
+func stopHorizontalScaleReplicas(replicas []*horizontalScaleReplica) {
 	for _, replica := range replicas {
 		if replica == nil || replica.cmd == nil || replica.cmd.Process == nil {
 			continue
@@ -444,7 +456,7 @@ func stopScenario8Replicas(replicas []*scenario8Replica) {
 	}
 }
 
-func scenario8ReserveAddr() (string, error) {
+func horizontalScaleReserveAddr() (string, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", fmt.Errorf("reserve tcp addr: %w", err)
@@ -456,7 +468,7 @@ func scenario8ReserveAddr() (string, error) {
 	return addr, nil
 }
 
-func scenario8WaitReady(url string, timeout time.Duration) error {
+func horizontalScaleWaitReady(url string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -481,11 +493,11 @@ func scenario8WaitReady(url string, timeout time.Duration) error {
 	}
 }
 
-func submitScenario8SparseEvents(ctx context.Context, profile scenario8Profile, replicas []*scenario8Replica) error {
+func submitHorizontalScaleSparseEvents(ctx context.Context, profile horizontalScaleProfile, replicas []*horizontalScaleReplica) error {
 	client := &http.Client{Timeout: 2 * time.Second}
 	idx := 0
 	for c := 0; c < profile.SparseCustomers; c++ {
-		customerID := fmt.Sprintf("scenario8-sparse-small-%05d", c)
+		customerID := fmt.Sprintf("hs-sparse-small-%05d", c)
 		for e := 0; e < profile.SparseEventsPerCustomer; e++ {
 			replica := replicas[idx%len(replicas)]
 			idx++
@@ -520,12 +532,12 @@ func submitScenario8SparseEvents(ctx context.Context, profile scenario8Profile, 
 	return nil
 }
 
-func waitForScenario8Drain(ctx context.Context, db *sql.DB, timeout time.Duration) error {
+func waitForHorizontalScaleDrain(ctx context.Context, db *sql.DB, timeout time.Duration) error {
 	pollCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	for {
-		pending, err := countPendingDeliveries(pollCtx, db)
+		pending, err := CountPendingDeliveries(pollCtx, db)
 		if err != nil {
 			return fmt.Errorf("count pending deliveries: %w", err)
 		}
@@ -540,9 +552,9 @@ func waitForScenario8Drain(ctx context.Context, db *sql.DB, timeout time.Duratio
 	}
 }
 
-func seedScenario8Customers(ctx context.Context, db *sql.DB, prefix string, count int) error {
-	for start := 0; start < count; start += scenario6SeedBatchRows {
-		end := min(start+scenario6SeedBatchRows, count)
+func seedHorizontalScaleCustomers(ctx context.Context, db *sql.DB, prefix string, count int) error {
+	for start := 0; start < count; start += productionWorkloadSeedBatchRows {
+		end := min(start+productionWorkloadSeedBatchRows, count)
 		var sb strings.Builder
 		sb.WriteString("INSERT INTO customers (id, class) VALUES ")
 		args := make([]any, 0, end-start)
@@ -555,18 +567,34 @@ func seedScenario8Customers(ctx context.Context, db *sql.DB, prefix string, coun
 		}
 		sb.WriteString(" ON CONFLICT (id) DO NOTHING")
 		if _, err := db.ExecContext(ctx, sb.String(), args...); err != nil {
-			return fmt.Errorf("seed scenario8 customers: %w", err)
+			return fmt.Errorf("seed horizontal scale customers: %w", err)
 		}
 	}
 	return nil
 }
 
-func seedScenario8Webhooks(ctx context.Context, db *sql.DB, prefix string, count int, receiverURL string, paths []string) error {
+func seedHorizontalScaleWebhooks(ctx context.Context, db *sql.DB, prefix string, count int, receiverURL string, paths []string) error {
+	if count == 0 || len(paths) == 0 {
+		return nil
+	}
+	const maxWebhookInsertParams = 60000
+	rowsPerCustomer := len(paths) * 4
+	batchCustomers := max(1, maxWebhookInsertParams/rowsPerCustomer)
+	for start := 0; start < count; start += batchCustomers {
+		end := min(start+batchCustomers, count)
+		if err := seedHorizontalScaleWebhookBatch(ctx, db, prefix, start, end, receiverURL, paths); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func seedHorizontalScaleWebhookBatch(ctx context.Context, db *sql.DB, prefix string, start, end int, receiverURL string, paths []string) error {
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active) VALUES ")
-	args := make([]any, 0, count*len(paths)*4)
+	args := make([]any, 0, (end-start)*len(paths)*4)
 	row := 0
-	for i := 0; i < count; i++ {
+	for i := start; i < end; i++ {
 		customerID := fmt.Sprintf("%s%05d", prefix, i)
 		for _, path := range paths {
 			if row > 0 {
@@ -580,14 +608,14 @@ func seedScenario8Webhooks(ctx context.Context, db *sql.DB, prefix string, count
 	}
 	sb.WriteString(" ON CONFLICT (customer_id, url) DO UPDATE SET active = true")
 	if _, err := db.ExecContext(ctx, sb.String(), args...); err != nil {
-		return fmt.Errorf("seed scenario8 webhooks: %w", err)
+		return fmt.Errorf("seed horizontal scale webhooks: %w", err)
 	}
 	return nil
 }
 
-func seedScenario8DenseDeliveries(ctx context.Context, db *sql.DB, customerCount, deliveriesPerCustomer int) error {
+func seedHorizontalScaleDenseDeliveries(ctx context.Context, db *sql.DB, customerCount, deliveriesPerCustomer int) error {
 	for i := 0; i < customerCount; i++ {
-		customerID := fmt.Sprintf("scenario8-dense-customer-%05d", i)
+		customerID := fmt.Sprintf("hs-dense-customer-%05d", i)
 		var webhookID string
 		if err := db.QueryRowContext(ctx, `
 			SELECT id::text
@@ -609,7 +637,7 @@ func seedScenario8DenseDeliveries(ctx context.Context, db *sql.DB, customerCount
 			INSERT INTO events (customer_id, type, payload)
 			VALUES ($1, $2, $3)
 			RETURNING id
-		`, customerID, eventType, []byte(`{"event_name":"scenario8.dense"}`)).Scan(&eventID); err != nil {
+		`, customerID, EventType, []byte(`{"event_name":"horizontal-scale.dense"}`)).Scan(&eventID); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("insert dense event for %s: %w", customerID, err)
 		}
@@ -630,7 +658,7 @@ func seedScenario8DenseDeliveries(ctx context.Context, db *sql.DB, customerCount
 	return nil
 }
 
-func collectScenario8ClaimMetrics(replicas []*scenario8Replica) (claimSum, claimCount, emptyClaims float64) {
+func collectHorizontalScaleClaimMetrics(replicas []*horizontalScaleReplica) (claimSum, claimCount, emptyClaims float64) {
 	client := &http.Client{Timeout: time.Second}
 	for _, replica := range replicas {
 		resp, err := client.Get(replica.metricsURL + "/metrics")
@@ -640,9 +668,9 @@ func collectScenario8ClaimMetrics(replicas []*scenario8Replica) (claimSum, claim
 		body, _ := ioReadAllLimit(resp.Body, 2<<20)
 		_ = resp.Body.Close()
 		text := string(body)
-		claimSum += scenario8MetricValue(text, "webhook_claim_batch_size_sum")
-		claimCount += scenario8MetricValue(text, "webhook_claim_batch_size_count")
-		emptyClaims += scenario8MetricValue(text, "webhook_claim_empty_total")
+		claimSum += horizontalScaleMetricValue(text, "webhook_claim_batch_size_sum")
+		claimCount += horizontalScaleMetricValue(text, "webhook_claim_batch_size_count")
+		emptyClaims += horizontalScaleMetricValue(text, "webhook_claim_empty_total")
 	}
 	return claimSum, claimCount, emptyClaims
 }
@@ -652,7 +680,7 @@ func ioReadAllLimit(rc io.ReadCloser, limit int64) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(rc, limit))
 }
 
-func scenario8MetricValue(metricsText, metric string) float64 {
+func horizontalScaleMetricValue(metricsText, metric string) float64 {
 	prefix := metric + " "
 	for _, line := range strings.Split(metricsText, "\n") {
 		if !strings.HasPrefix(line, prefix) {
@@ -671,14 +699,14 @@ func scenario8MetricValue(metricsText, metric string) float64 {
 	return 0
 }
 
-func scenario8SparseFairnessThreshold(profileName string) float64 {
-	if profileName == benchProfileStress {
+func horizontalScaleSparseFairnessThreshold(profileName string) float64 {
+	if profileName == BenchProfileStress {
 		return 3000
 	}
 	return 6000
 }
 
-func scenario8ReplicaIDs(count int) []string {
+func horizontalScaleReplicaIDs(count int) []string {
 	ids := make([]string, 0, count)
 	for i := 1; i <= count; i++ {
 		ids = append(ids, fmt.Sprintf("replica-%d", i))
@@ -686,7 +714,7 @@ func scenario8ReplicaIDs(count int) []string {
 	return ids
 }
 
-func scenario8CountByReplica(recordings []receiver.Recording) map[string]int {
+func horizontalScaleCountByReplica(recordings []receiver.Recording) map[string]int {
 	counts := make(map[string]int)
 	for _, r := range recordings {
 		rid := r.Headers.Get("X-Notifier-Replica")
@@ -698,7 +726,7 @@ func scenario8CountByReplica(recordings []receiver.Recording) map[string]int {
 	return counts
 }
 
-func scenario8PerReplicaDistributionVerdict(counts map[string]int, expectedReplicaIDs []string) scenario8DistributionVerdict {
+func horizontalScalePerReplicaDistributionVerdict(counts map[string]int, expectedReplicaIDs []string) horizontalScaleDistributionVerdict {
 	missing := make([]string, 0)
 	minCount := -1
 	maxCount := 0
@@ -722,7 +750,7 @@ func scenario8PerReplicaDistributionVerdict(counts map[string]int, expectedRepli
 	if imbalance > 1.0 {
 		diagnostic = fmt.Sprintf("imbalance ratio %.2fx (max/min)", imbalance)
 	}
-	return scenario8DistributionVerdict{
+	return horizontalScaleDistributionVerdict{
 		MissingReplicaIDs: missing,
 		ImbalanceRatio:    imbalance,
 		Diagnostic:        diagnostic,
@@ -730,30 +758,30 @@ func scenario8PerReplicaDistributionVerdict(counts map[string]int, expectedRepli
 	}
 }
 
-func scenario8ComputeScalingVerdict(runs []scenario8DenseRun) scenario8ScalingVerdict {
+func horizontalScaleComputeScalingVerdict(runs []horizontalScaleDenseRun) horizontalScaleScalingVerdict {
 	if len(runs) < 2 {
-		return scenario8ScalingVerdict{Mode: "insufficient", Message: "need at least two dense runs", Pass: false}
+		return horizontalScaleScalingVerdict{Mode: "insufficient", Message: "need at least two dense runs", Pass: false}
 	}
-	sorted := append([]scenario8DenseRun(nil), runs...)
+	sorted := append([]horizontalScaleDenseRun(nil), runs...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ReplicaCount < sorted[j].ReplicaCount })
 	base := sorted[0]
 	best := sorted[len(sorted)-1]
 	if best.Throughput > base.Throughput {
-		return scenario8ScalingVerdict{
+		return horizontalScaleScalingVerdict{
 			Mode:    "improvement",
 			Message: fmt.Sprintf("throughput improved %.2f -> %.2f deliveries/s", base.Throughput, best.Throughput),
 			Pass:    true,
 		}
 	}
 	if best.Throughput == base.Throughput {
-		return scenario8ScalingVerdict{
+		return horizontalScaleScalingVerdict{
 			Mode:       "no-improvement",
 			Message:    fmt.Sprintf("throughput flat at %.2f deliveries/s", best.Throughput),
 			Pass:       true,
 			Bottleneck: "No scaling gain observed; likely DB claim-path contention or partner latency ceiling.",
 		}
 	}
-	return scenario8ScalingVerdict{
+	return horizontalScaleScalingVerdict{
 		Mode:       "regression",
 		Message:    fmt.Sprintf("throughput regressed %.2f -> %.2f deliveries/s", base.Throughput, best.Throughput),
 		Pass:       true,
@@ -761,14 +789,14 @@ func scenario8ComputeScalingVerdict(runs []scenario8DenseRun) scenario8ScalingVe
 	}
 }
 
-func writeScenario8Report(path string, profile scenario8Profile, sparse scenario8SparseResult, denseRuns []scenario8DenseRun, scaling scenario8ScalingVerdict) error {
+func writeHorizontalScaleReport(path string, profile horizontalScaleProfile, sparse horizontalScaleSparseResult, denseRuns []horizontalScaleDenseRun, scaling horizontalScaleScalingVerdict) error {
 	f, err := os.Create(path) // #nosec G304 -- scenario-owned report path
 	if err != nil {
-		return fmt.Errorf("create scenario8 report: %w", err)
+		return fmt.Errorf("create horizontal scale report: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
-	_, _ = fmt.Fprintf(f, `# Scenario 8: Horizontal Scalability (Shared Postgres Outbox)
+	_, _ = fmt.Fprintf(f, `# Horizontal Scale: Horizontal Scalability (Shared Postgres Outbox)
 
 ## Description
 
@@ -806,7 +834,7 @@ Outbound attempts include `+"`X-Notifier-Replica`"+` only when replica identity 
 |---|---|
 | All expected Deliveries terminal | %s |
 | Zero duplicate tuples | %s |
-| Small P95 within Scenario 6 threshold | %s |
+| Small P95 within sparse fairness threshold | %s |
 | No zero-work replica in multi-replica run | %s |
 
 ## Sparse per-replica distribution (diagnostic)
@@ -825,13 +853,13 @@ Outbound attempts include `+"`X-Notifier-Replica`"+` only when replica identity 
 		sparse.AvgDeliveriesPerClaimQuery,
 		sparse.AvgDeliveriesPerCustomerClaim,
 		sparse.EmptyClaimRate*100,
-		passFail(sparse.AllTerminalOK),
-		passFail(sparse.DuplicateOK),
-		passFail(sparse.FairnessGateOK),
-		passFail(sparse.ReplicaGateOK),
+		PassFail(sparse.AllTerminalOK),
+		PassFail(sparse.DuplicateOK),
+		PassFail(sparse.FairnessGateOK),
+		PassFail(sparse.ReplicaGateOK),
 	)
 
-	for _, replicaID := range scenario8ReplicaIDs(sparse.ReplicaCount) {
+	for _, replicaID := range horizontalScaleReplicaIDs(sparse.ReplicaCount) {
 		_, _ = fmt.Fprintf(f, "| %s | %d |\n", replicaID, sparse.PerReplicaDelivered[replicaID])
 	}
 	_, _ = fmt.Fprintf(f, "\nSparse distribution diagnostic: %s\n\n", sparse.Distribution.Diagnostic)
@@ -849,9 +877,9 @@ Outbound attempts include `+"`X-Notifier-Replica`"+` only when replica identity 
 			run.Duration.Round(time.Millisecond),
 			run.Throughput,
 			run.Duplicates,
-			passFail(run.AllTerminalOK),
-			passFail(run.DuplicateOK),
-			passFail(run.ReplicaGateOK),
+			PassFail(run.AllTerminalOK),
+			PassFail(run.DuplicateOK),
+			PassFail(run.ReplicaGateOK),
 		)
 	}
 
@@ -864,12 +892,12 @@ Outbound attempts include `+"`X-Notifier-Replica`"+` only when replica identity 
 | Summary | %s |
 | Bottleneck (if no improvement/regression) | %s |
 | Gate | %s |
-`, scaling.Mode, scaling.Message, scenario8DefaultIfEmpty(scaling.Bottleneck, "-"), passFail(scaling.Pass))
+`, scaling.Mode, scaling.Message, horizontalScaleDefaultIfEmpty(scaling.Bottleneck, "-"), PassFail(scaling.Pass))
 
 	return f.Close()
 }
 
-func scenario8DefaultIfEmpty(value, fallback string) string {
+func horizontalScaleDefaultIfEmpty(value, fallback string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback
 	}

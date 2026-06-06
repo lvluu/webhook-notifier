@@ -1,4 +1,4 @@
-# Scenario 4 Matrix: Workers × DB Connections
+# Scale Idempotency Matrix: Workers × DB Connections
 
 ## Description
 

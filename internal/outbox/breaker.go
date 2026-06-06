@@ -247,24 +247,43 @@ func (s *Store) openBreaker(ctx context.Context, tx *sql.Tx, webhookID string, f
 // webhook's ready backlog and runs only at the (rare) open transition, so it
 // trades an occasional bulk write for read savings on every claim during an
 // outage.
+const deferBlockedDeliveriesChunkSize = 500
+
 func deferBlockedDeliveries(ctx context.Context, tx *sql.Tx, webhookIDs []string) error {
 	if len(webhookIDs) == 0 {
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE deliveries d
-		SET next_attempt_at = GREATEST(d.next_attempt_at, w.breaker_next_probe_at),
-		    updated_at = now()
-		FROM webhooks w
-		WHERE w.id = ANY($1::uuid[])
-		  AND d.webhook_id = w.id
-		  AND d.status IN ('pending', 'failed_retry')
-		  AND w.breaker_next_probe_at IS NOT NULL
-		  AND d.next_attempt_at < w.breaker_next_probe_at
-	`, webhookIDs); err != nil {
-		return fmt.Errorf("defer blocked deliveries: %w", err)
+	for {
+		result, err := tx.ExecContext(ctx, `
+			WITH candidates AS (
+				SELECT d.id, w.breaker_next_probe_at
+				FROM deliveries d
+				JOIN webhooks w ON w.id = d.webhook_id
+				WHERE w.id = ANY($1::uuid[])
+				  AND d.status IN ('pending', 'failed_retry')
+				  AND w.breaker_next_probe_at IS NOT NULL
+				  AND d.next_attempt_at < w.breaker_next_probe_at
+				ORDER BY d.id
+				LIMIT $2
+				FOR UPDATE OF d SKIP LOCKED
+			)
+			UPDATE deliveries d
+			SET next_attempt_at = GREATEST(d.next_attempt_at, c.breaker_next_probe_at),
+			    updated_at = now()
+			FROM candidates c
+			WHERE d.id = c.id
+		`, webhookIDs, deferBlockedDeliveriesChunkSize)
+		if err != nil {
+			return fmt.Errorf("defer blocked deliveries: %w", err)
+		}
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("count deferred blocked deliveries: %w", err)
+		}
+		if updated < deferBlockedDeliveriesChunkSize {
+			return nil
+		}
 	}
-	return nil
 }
 
 type breakerStateRow struct {
