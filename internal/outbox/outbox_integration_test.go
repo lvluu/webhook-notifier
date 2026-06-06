@@ -520,6 +520,14 @@ func TestDiscoverClaimableCustomersSurfacesReadyCustomers(t *testing.T) {
 	if _, err := store.DiscoverClaimableCustomers(ctx, "", 0); err == nil {
 		t.Fatal("DiscoverClaimableCustomers limit 0: got nil error, want error")
 	}
+
+	largePage, err := store.DiscoverClaimableCustomers(ctx, "", 1000)
+	if err != nil {
+		t.Fatalf("DiscoverClaimableCustomers large page: %v", err)
+	}
+	if !slices.Equal(largePage, want) {
+		t.Fatalf("large-page claimable customers: got %v, want %v", largePage, want)
+	}
 }
 
 func TestHasClaimableWorkMatchesClaimEligibility(t *testing.T) {
@@ -770,6 +778,11 @@ func TestClaimNextSkipsOpenWebhookUntilHalfOpenProbe(t *testing.T) {
 		t.Fatalf("DiscoverClaimableCustomers: %v", err)
 	} else if len(got) != 0 {
 		t.Fatalf("claimable customers with open breaker: got %v, want none", got)
+	}
+	if got, err := store.DiscoverClaimableCustomers(ctx, "", 1000); err != nil {
+		t.Fatalf("DiscoverClaimableCustomers large page: %v", err)
+	} else if len(got) != 0 {
+		t.Fatalf("large-page claimable customers with open breaker: got %v, want none", got)
 	}
 	if got, err := store.HasClaimableWorkBatch(ctx, []string{"cus_open_breaker"}); err != nil {
 		t.Fatalf("HasClaimableWorkBatch: %v", err)

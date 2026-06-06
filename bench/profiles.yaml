@@ -104,7 +104,7 @@ scenarios:
       retry_base_delay: 25ms
       retry_cap_delay: 2s
       fairness_ratio_limit: 1.05
-      breaker_failure_threshold: 0
+      breaker_failure_threshold: 1000
     stress:
       worker_counts: [16, 32, 64]
       whale_deliveries: 5000
@@ -117,7 +117,7 @@ scenarios:
       retry_base_delay: 25ms
       retry_cap_delay: 2s
       fairness_ratio_limit: 1.05
-      breaker_failure_threshold: 0
+      breaker_failure_threshold: 1000
   # Breaker Storm: mass breaker tripping under batch mark — validates that the
   # batch breaker bookkeeping path handles many webhooks tripping
   # simultaneously in production-sized batches without N+1 per-item

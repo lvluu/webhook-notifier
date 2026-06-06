@@ -25,6 +25,9 @@ const (
 	productionWorkloadSmallPrefix     = "pw-small-"
 	productionWorkloadReportPath      = "bench/results/production-workload.md"
 	productionWorkloadSeedBatchRows   = 1000
+	productionWorkloadDiscoveryLimit  = 1000
+	productionWorkloadDiscoveryPeriod = time.Second
+	productionWorkloadPendingPoll     = 200 * time.Millisecond
 )
 
 type productionWorkloadProfile struct {
@@ -386,16 +389,34 @@ type productionWorkloadNotifier interface {
 	Notify(customerID string)
 }
 
-func waitProductionWorkloadDrain(ctx context.Context, db *sql.DB, store *productionWorkloadInstrumentedStore, sched productionWorkloadNotifier) error {
+type productionWorkloadClaimableStore interface {
+	DiscoverClaimableCustomers(ctx context.Context, afterCustomerID string, limit int) ([]string, error)
+}
+
+func waitProductionWorkloadDrain(ctx context.Context, db *sql.DB, store productionWorkloadClaimableStore, sched productionWorkloadNotifier) error {
 	pollCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
+	cursor := ""
+	nextDiscovery := time.Now()
 	for {
-		customers, err := store.DiscoverClaimableCustomers(pollCtx, "", 1000)
-		if err != nil {
-			return fmt.Errorf("discover claimable customers: %w", err)
-		}
-		for _, customerID := range customers {
-			sched.Notify(customerID)
+		discoveryDelay := time.Until(nextDiscovery)
+		if discoveryDelay <= 0 {
+			customers, nextCursor, err := discoverProductionWorkloadCustomers(
+				pollCtx,
+				store,
+				sched,
+				cursor,
+				productionWorkloadDiscoveryLimit,
+			)
+			if err != nil {
+				return err
+			}
+			cursor = nextCursor
+			if len(customers) == productionWorkloadDiscoveryLimit {
+				nextDiscovery = time.Now()
+			} else {
+				nextDiscovery = time.Now().Add(productionWorkloadDiscoveryPeriod)
+			}
 		}
 
 		pending, err := CountPendingDeliveries(pollCtx, db)
@@ -405,12 +426,43 @@ func waitProductionWorkloadDrain(ctx context.Context, db *sql.DB, store *product
 		if pending == 0 {
 			return nil
 		}
+		delay := minDuration(productionWorkloadPendingPoll, time.Until(nextDiscovery))
 		select {
 		case <-pollCtx.Done():
 			return fmt.Errorf("deliveries not drained within timeout: %d pending", pending)
-		case <-time.After(200 * time.Millisecond):
+		case <-time.After(delay):
 		}
 	}
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if b < 0 {
+		return 0
+	}
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func discoverProductionWorkloadCustomers(
+	ctx context.Context,
+	store productionWorkloadClaimableStore,
+	sched productionWorkloadNotifier,
+	cursor string,
+	limit int,
+) ([]string, string, error) {
+	customers, err := store.DiscoverClaimableCustomers(ctx, cursor, limit)
+	if err != nil {
+		return nil, cursor, fmt.Errorf("discover claimable customers: %w", err)
+	}
+	for _, customerID := range customers {
+		sched.Notify(customerID)
+	}
+	if len(customers) == 0 {
+		return customers, "", nil
+	}
+	return customers, customers[len(customers)-1], nil
 }
 
 func seedProductionWorkloadCustomers(ctx context.Context, db *sql.DB, smallCount int) error {

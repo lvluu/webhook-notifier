@@ -20,6 +20,14 @@ Fairness metric note:
 
 | Workers | Total Deliveries | Duration | Throughput (Deliveries/sec) | Avg Claim Batch | Claim Calls | Empty Claims | Retry Rate | Dead Rate | Duplicate (delivery_id, attempt_number) tuples | Small P95 First-Attempt Latency (ms) | Whale P95 First-Attempt Latency (ms) | Reliability | Fairness |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 16 | 135000 | 2m59.138s | 753.61 | 78.57 | 1735 | 427 | 0.97% | 0.00% | 0 | 169317.73 | 178712.53 | **PASS** | **PASS** |
-| 32 | 135000 | 21.342s | 6325.41 | 48.79 | 2795 | 1590 | 1.01% | 0.00% | 0 | 13820.49 | 20755.43 | **PASS** | **PASS** |
-| 64 | 135000 | 19.42s | 6951.60 | 35.90 | 3798 | 2498 | 0.99% | 0.00% | 0 | 13062.68 | 18814.03 | **PASS** | **PASS** |
+| 16 | 135000 | 32.848s | 4109.87 | 88.69 | 1538 | 109 | 1.03% | 0.00% | 0 | 18521.04 | 29947.65 | **PASS** | **PASS** |
+| 32 | 135000 | 17.306s | 7800.85 | 88.20 | 1546 | 131 | 1.00% | 0.00% | 0 | 9495.59 | 14804.06 | **PASS** | **PASS** |
+| 64 | 135000 | 13.738s | 9826.43 | 83.74 | 1629 | 232 | 1.04% | 0.00% | 0 | 5592.34 | 11136.48 | **PASS** | **PASS** |
+
+## DB Hotspot Note
+
+This stress run uses breaker-aware discovery (`breaker_failure_threshold: 1000`)
+without intentionally opening breakers. `pg_stat_statements` moved
+claimable-Customer discovery from the former rank-1 hotspot (~134-153s total DB
+time in prior stress runs) to rank 3 at ~9.2s total / ~50.5ms mean. The top
+remaining query costs are now multi-Customer claim SQL and batch mark SQL.
