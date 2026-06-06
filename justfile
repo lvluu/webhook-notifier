@@ -8,7 +8,7 @@ compose      := "docker compose -f compose/docker-compose.yml --project-director
 stack_base_services := "postgres pgbouncer notifier caddy webhook-receiver"
 stack_observe_services := "prometheus grafana"
 stack_chaos_services := "chaos-whales chaos-small"
-stack_profiles := "--profile observe --profile chaos --profile retention"
+stack_profiles := "--profile observe --profile chaos"
 
 # list available recipes
 default:
