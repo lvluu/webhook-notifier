@@ -121,6 +121,7 @@ func openBenchDatabaseAtDSN(ctx context.Context, dsn string, migrate bool) (*sql
 	}, nil
 }
 
+// ApplyBenchMigrations applies all repo SQL migrations to a benchmark database.
 func ApplyBenchMigrations(ctx context.Context, db *sql.DB) error {
 	files, err := filepath.Glob(filepath.Join(repoRoot(), "migrations", "*.up.sql"))
 	if err != nil {

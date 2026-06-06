@@ -114,7 +114,7 @@ func defaultRuntimeDeps() runtimeDeps {
 			return roundrobin.New()
 		},
 		newStore: func(db *sql.DB, cfg workerRuntimeConfig) *outbox.Store {
-			return outbox.New(db, outbox.WithDeferredBreaker())
+			return outbox.New(db, outbox.WithBreakerConfig(cfg.Breaker), outbox.WithDeferredBreaker())
 		},
 		newLimiter: func(maxPerHost int) *worker.HostLimiter {
 			return worker.NewHostLimiter(worker.HostLimiterConfig{MaxPerHost: maxPerHost})

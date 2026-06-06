@@ -1,6 +1,6 @@
 scenarios:
-  # Scenario 1: fairness under load with a late-arriving small customer.
-  scenario1:
+  # Late Arrival Fairness: fairness under load with a late-arriving small customer.
+  late_arrival_fairness:
     dev:
       worker_count: 4
       whale_deliveries: 5000
@@ -20,8 +20,8 @@ scenarios:
       late_notify_delay: 30s
       breaker_failure_threshold: 0
   # Legacy — folded into partner_resilience.
-  # Scenario 2: transient partner failures plus a recoverable outage window.
-  scenario2:
+  # Transient Recovery: transient partner failures plus a recoverable outage window.
+  transient_recovery:
     dev:
       worker_count: 16
       customer_count: 5
@@ -39,8 +39,8 @@ scenarios:
       outage_duration: 30s
       breaker_failure_threshold: 0
   # Legacy — folded into partner_resilience.
-  # Scenario 3: terminal 4xx failures should fast-fail without retry churn.
-  scenario3:
+  # Terminal Fast-Fail: terminal 4xx failures should fast-fail without retry churn.
+  terminal_fast_fail:
     dev:
       worker_count: 4
       event_count: 100
@@ -49,8 +49,8 @@ scenarios:
       worker_count: 32
       event_count: 1000
       breaker_failure_threshold: 0
-  # Scenario 4: horizontal scale, claim atomicity, and idempotency stability.
-  scenario4:
+  # Scale Idempotency: horizontal scale, claim atomicity, and idempotency stability.
+  scale_idempotency:
     dev:
       worker_counts: [1, 2, 4]
       throughput_deliveries: 1000
@@ -62,8 +62,8 @@ scenarios:
       retry_deliveries: 100
       breaker_failure_threshold: 0
   # Legacy — folded into partner_resilience.
-  # Scenario 5: dead-partner circuit breaker plus healthy-customer pool protection.
-  scenario5:
+  # Breaker Isolation: dead-partner circuit breaker plus healthy-customer pool protection.
+  breaker_isolation:
     dev:
       worker_count: 16
       customer_count: 5
@@ -90,8 +90,8 @@ scenarios:
       breaker_failure_threshold: 2
       breaker_initial_cooldown: 15s
       breaker_max_cooldown: 15s
-  # Scenario 6: assignment-aligned production-like mixed ingest and delivery workload.
-  scenario6:
+  # Production Workload: assignment-aligned production-like mixed ingest and delivery workload.
+  production_workload:
     dev:
       worker_counts: [4, 8]
       whale_deliveries: 200
@@ -106,10 +106,10 @@ scenarios:
       fairness_ratio_limit: 1.05
       breaker_failure_threshold: 0
     stress:
-      worker_counts: [16, 32]
-      whale_deliveries: 2000
-      small_count: 10000
-      small_deliveries: 1
+      worker_counts: [16, 32, 64]
+      whale_deliveries: 5000
+      small_count: 20000
+      small_deliveries: 2
       submit_interval: 1ms
       request_timeout: 1500ms
       min_batch_hint: 8
@@ -118,11 +118,11 @@ scenarios:
       retry_cap_delay: 2s
       fairness_ratio_limit: 1.05
       breaker_failure_threshold: 0
-  # Scenario 7: mass breaker tripping under batch mark — validates that the
+  # Breaker Storm: mass breaker tripping under batch mark — validates that the
   # batch breaker bookkeeping path handles many webhooks tripping
   # simultaneously in production-sized batches without N+1 per-item
   # queries inside the marking transaction.
-  scenario7:
+  breaker_storm:
     dev:
       worker_count: 4
       customer_count: 10
@@ -157,7 +157,7 @@ scenarios:
       retry_max_attempts: 3
       retry_base_delay: 50ms
       retry_cap_delay: 50ms
-  scenario8:
+  horizontal_scale:
     dev:
       replica_counts: [1, 2]
       sparse_customers: 1000
@@ -173,8 +173,8 @@ scenarios:
       retry_cap_delay: 2s
       fairness_ratio_limit: 1.05
     stress:
-      replica_counts: [1, 2, 3]
-      sparse_customers: 10000
+      replica_counts: [1, 2, 4]
+      sparse_customers: 20000
       sparse_events_per_customer: 1
       dense_customers: 100
       dense_deliveries_per_customer: 1000

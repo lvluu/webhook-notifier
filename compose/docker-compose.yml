@@ -1,3 +1,25 @@
+x-notifier-common: &notifier-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:9090/ready"]
+    interval: 2s
+    timeout: 2s
+    retries: 15
+  depends_on:
+    pgbouncer:
+      condition: service_started
+  deploy:
+    resources:
+      limits:
+        cpus: "2"
+        memory: 1g
+      reservations:
+        cpus: "0.5"
+        memory: 256m
+
 x-chaos-common: &chaos-common
   build:
     context: .
@@ -111,10 +133,7 @@ services:
           memory: 128m
 
   notifier:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    restart: unless-stopped
+    <<: *notifier-common
     command:
       - notifier
       - -db
@@ -144,22 +163,6 @@ services:
       - webhook_customer_ready
       - -max-conns
       - "60"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9090/ready"]
-      interval: 2s
-      timeout: 2s
-      retries: 15
-    depends_on:
-      pgbouncer:
-        condition: service_started
-    deploy:
-      resources:
-        limits:
-          cpus: "2"
-          memory: 1g
-        reservations:
-          cpus: "0.5"
-          memory: 256m
 
   caddy:
     image: caddy:2-alpine
@@ -465,7 +468,7 @@ services:
       - -rate
       - "250"
       - -burst
-      - "500"
+      - "300"
     deploy:
       resources:
         limits:

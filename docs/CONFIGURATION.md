@@ -81,14 +81,16 @@ Behavior:
 
 ## Circuit Breaker
 
-Configured in `internal/outbox/outbox.go`. Per-Webhook state persisted in
-`webhooks` table.
+Configured by `cmd/notifier` flags and persisted per Webhook in the `webhooks`
+table. A failure threshold of `0` disables breaker filtering/tripping, which is
+useful for benchmark scenarios that isolate scheduler or claim-path behavior
+from partner-protection behavior.
 
-| Constant | Default | Purpose |
+| Flag | Default | Purpose |
 |---|---|---|
-| `DefaultBreakerThreshold` | `20` | Consecutive failures before opening breaker |
-| `DefaultBreakerCooldown` | `5m` | Cooldown before first half-open probe |
-| `DefaultBreakerMaxCooldown` | `15m` | Maximum cooldown after repeated probe failures |
+| `--breaker-failure-threshold` | `20` | Consecutive failures before opening a Webhook breaker; `0` disables breaker filtering |
+| `--breaker-initial-cooldown` | `5m` | Cooldown before first half-open probe |
+| `--breaker-max-cooldown` | `15m` | Maximum cooldown after repeated probe failures; must be at least the initial cooldown |
 
 ## Host Concurrency Cap
 
@@ -197,7 +199,7 @@ Defined in `bench/profiles.yaml`:
    too long per pick, lower `--claim-batch-hint` (and `--min-batch`) toward
    `1`–`8` so workers yield to rotation sooner; this trades throughput for
    tighter fairness tail latency.
-4. **Infrastructure fourth**: DB sizing, pooling, partitioning/sharding.
+4. **Infrastructure fourth**: DB sizing, pooling, partitioning, or a broker-backed queue if Postgres claim contention becomes the ceiling.
 
 See [docs/WORKFLOW.md](WORKFLOW.md) for the full execution path and tuning
 checklist.

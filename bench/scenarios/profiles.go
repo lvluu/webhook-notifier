@@ -12,7 +12,9 @@ import (
 )
 
 const (
-	BenchProfileDev    = "dev"
+	// BenchProfileDev is the small, fast local benchmark profile.
+	BenchProfileDev = "dev"
+	// BenchProfileStress is the report-quality benchmark profile.
 	BenchProfileStress = "stress"
 )
 
@@ -20,6 +22,7 @@ type benchProfilesFile struct {
 	Scenarios map[string]map[string]BenchProfileConfig `yaml:"scenarios"`
 }
 
+// BenchProfileConfig is the YAML-backed configuration shared by benchmark scenarios.
 type BenchProfileConfig struct {
 	WorkerCount                int           `yaml:"worker_count"`
 	WorkerCounts               []int         `yaml:"worker_counts"`
@@ -95,6 +98,7 @@ var (
 	benchProfilesErr  error
 )
 
+// LoadBenchProfileConfig returns the selected profile config for a scenario.
 func LoadBenchProfileConfig(scenario string) (BenchProfileConfig, string, error) {
 	profiles, err := ReadBenchProfiles()
 	if err != nil {
@@ -119,6 +123,7 @@ func LoadBenchProfileConfig(scenario string) (BenchProfileConfig, string, error)
 	return profile, name, nil
 }
 
+// BenchProfileNameFromEnv returns the selected BENCH_PROFILE name.
 func BenchProfileNameFromEnv() (string, error) {
 	name := os.Getenv("BENCH_PROFILE")
 	if name == "" {
@@ -132,6 +137,7 @@ func BenchProfileNameFromEnv() (string, error) {
 	}
 }
 
+// ReadBenchProfiles parses bench/profiles.yaml once and caches the result.
 func ReadBenchProfiles() (benchProfilesFile, error) {
 	benchProfilesOnce.Do(func() {
 		path, err := benchProfilesPath()

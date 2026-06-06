@@ -23,9 +23,9 @@ const ClaimBatchSize uint32 = 64
 // degrade with active Customer count.
 //
 // Notify appends a Customer when not already present; Pick returns the
-// Customer at the cursor and advances. Customers remain in rotation until
-// explicitly removed via Remove, so multiple workers can claim from the same
-// Customer concurrently.
+// Customer at the cursor and removes it from the active list. Workers re-Notify
+// Customers that still have claimable work, so a Customer is not picked
+// concurrently by multiple workers within the same process.
 type roundRobin struct {
 	mu     sync.Mutex
 	list   *list.List
@@ -44,10 +44,11 @@ func New() scheduler.Scheduler {
 	return r
 }
 
-// Pick returns the next Customer in rotation and advances the cursor.
-// Customers remain in rotation — the caller must call Remove when the
-// Customer has no remaining work. batchHint is set to ClaimBatchSize so
-// workers can claim multiple deliveries per round-trip.
+// Pick returns the next Customer in rotation and removes it from the list.
+// The caller must call Notify to re-add the Customer after a successful claim
+// or after confirming that the Customer still has claimable work. This prevents
+// multiple workers from picking the same Customer concurrently, reducing empty
+// claims from intra-process contention.
 func (r *roundRobin) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return "", 0, false, err
@@ -64,8 +65,11 @@ func (r *roundRobin) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bo
 		r.cursor = r.list.Front()
 	}
 
-	customerID := r.cursor.Value.(scheduler.CustomerID)
-	r.cursor = r.cursor.Next()
+	elem := r.cursor
+	customerID := elem.Value.(scheduler.CustomerID)
+	r.cursor = elem.Next()
+	delete(r.index, customerID)
+	r.list.Remove(elem)
 
 	return customerID, ClaimBatchSize, true, nil
 }

@@ -44,6 +44,15 @@ func TestParseCLIConfig_Defaults(t *testing.T) {
 	if cfg.Runtime.Worker.DeliveryConcurrency != 16 {
 		t.Errorf("DeliveryConcurrency: got %d, want 16", cfg.Runtime.Worker.DeliveryConcurrency)
 	}
+	if cfg.Runtime.Breaker.FailureThreshold != 20 {
+		t.Errorf("Breaker.FailureThreshold: got %d, want 20", cfg.Runtime.Breaker.FailureThreshold)
+	}
+	if cfg.Runtime.Breaker.InitialCooldown != 5*time.Minute {
+		t.Errorf("Breaker.InitialCooldown: got %s, want 5m", cfg.Runtime.Breaker.InitialCooldown)
+	}
+	if cfg.Runtime.Breaker.MaxCooldown != 15*time.Minute {
+		t.Errorf("Breaker.MaxCooldown: got %s, want 15m", cfg.Runtime.Breaker.MaxCooldown)
+	}
 }
 
 func TestParseCLIConfig_OverridesNewDeliveryFlags(t *testing.T) {
@@ -54,6 +63,9 @@ func TestParseCLIConfig_OverridesNewDeliveryFlags(t *testing.T) {
 		"--delivery-concurrency=4",
 		"--workers=8",
 		"--host-cap=2",
+		"--breaker-failure-threshold=0",
+		"--breaker-initial-cooldown=2s",
+		"--breaker-max-cooldown=10s",
 	})
 
 	if got := cfg.Runtime.Worker.RequestTimeout; got != 5*time.Second {
@@ -67,6 +79,33 @@ func TestParseCLIConfig_OverridesNewDeliveryFlags(t *testing.T) {
 	}
 	if got := cfg.Runtime.HostConcurrencyCap; got != 2 {
 		t.Errorf("HostConcurrencyCap: got %d, want 2", got)
+	}
+	if got := cfg.Runtime.Breaker.FailureThreshold; got != 0 {
+		t.Errorf("Breaker.FailureThreshold: got %d, want 0", got)
+	}
+	if got := cfg.Runtime.Breaker.InitialCooldown; got != 2*time.Second {
+		t.Errorf("Breaker.InitialCooldown: got %s, want 2s", got)
+	}
+	if got := cfg.Runtime.Breaker.MaxCooldown; got != 10*time.Second {
+		t.Errorf("Breaker.MaxCooldown: got %s, want 10s", got)
+	}
+}
+
+func TestParseCLIConfig_RejectsInvalidBreakerConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := [][]string{
+		{"--breaker-failure-threshold=-1"},
+		{"--breaker-initial-cooldown=0"},
+		{"--breaker-max-cooldown=0"},
+		{"--breaker-initial-cooldown=10s", "--breaker-max-cooldown=2s"},
+	}
+	for _, args := range tests {
+		fs := flag.NewFlagSet("notifier-test", flag.ContinueOnError)
+		fs.SetOutput(discardWriter{})
+		if _, err := parseCLIConfig(fs, args); err == nil {
+			t.Fatalf("parseCLIConfig(%v): expected error, got nil", args)
+		}
 	}
 }
 

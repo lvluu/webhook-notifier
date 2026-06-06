@@ -1,4 +1,4 @@
-# Scenario 4: Horizontal Scale + Claim Atomicity + Idempotency
+# Scale Idempotency: Horizontal Scale + Claim Atomicity + Idempotency
 
 ## Description
 
@@ -11,11 +11,11 @@ This repo uses just bench-4 as the canonical task command for the issue #15 benc
 | Profile | stress |
 | Workers | Deliveries | Received Attempts | Duration | Throughput (Deliveries/sec) | Duplicate (delivery_id, attempt_number) tuples |
 |---:|---:|---:|---:|---:|---:|
-| 1 | 10000 | 10000 | 12.361s | 809.01 | 0 |
-| 4 | 10000 | 10000 | 4.156s | 2405.88 | 0 |
-| 8 | 10000 | 10000 | 2.112s | 4735.88 | 0 |
-| 32 | 10000 | 10000 | 1.857s | 5384.88 | 0 |
-| 64 | 10000 | 10000 | 2.598s | 3848.92 | 0 |
+| 1 | 10000 | 10000 | 8.239s | 1213.67 | 0 |
+| 4 | 10000 | 10000 | 2.187s | 4572.57 | 0 |
+| 8 | 10000 | 10000 | 1.26s | 7936.96 | 0 |
+| 32 | 10000 | 10000 | 878ms | 11387.43 | 0 |
+| 64 | 10000 | 10000 | 1s | 10000.69 | 0 |
 
 ## Retry Probe
 
@@ -34,9 +34,9 @@ This repo uses just bench-4 as the canonical task command for the issue #15 benc
 
 ## Acceptance Criteria
 
-| Criterion | Observed | Limit | Result |
-|---|---:|---:|---|
-| Scaling: 64 workers vs 1 workers | 4.76x | >= 4.00x | **PASS** |
-| Throughput duplicate tuples | 0 | 0 | **PASS** |
-| Retry probe duplicate tuples | 0 | 0 | **PASS** |
-| Retry probe idempotency header stability | true | true | **PASS** |
+| Pillar | Criterion | Observed | Limit | Result |
+|---|---|---:|---:|---|
+| Scalability | Scaling: 64 workers vs 1 workers | 8.24x | >= 4.00x | **PASS** |
+| Reliability | Throughput duplicate tuples | 0 | 0 | **PASS** |
+| Reliability | Retry probe duplicate tuples | 0 | 0 | **PASS** |
+| Reliability | Retry probe idempotency header stability | true | true | **PASS** |

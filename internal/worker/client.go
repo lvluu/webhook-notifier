@@ -91,7 +91,7 @@ func (w *Worker) Send(ctx context.Context, d Delivery) (*http.Response, error) {
 		req.Header.Set("X-Signature-256", signer.Sign([]byte(d.Secret), d.Body, ts))
 	}
 
-	rewriteScenario8ReceiverURL(req)
+	rewriteHorizontalScaleReceiverURL(req)
 
 	resp, err := w.HTTP.Do(req)
 	if err != nil {
@@ -110,12 +110,12 @@ func (w *Worker) Send(ctx context.Context, d Delivery) (*http.Response, error) {
 	return resp, nil
 }
 
-func rewriteScenario8ReceiverURL(req *http.Request) {
-	addr := strings.TrimSpace(os.Getenv("SCENARIO8_RECEIVER_ADDR"))
+func rewriteHorizontalScaleReceiverURL(req *http.Request) {
+	addr := strings.TrimSpace(os.Getenv("HORIZONTAL_SCALE_RECEIVER_ADDR"))
 	if addr == "" {
 		return
 	}
-	if req.URL == nil || req.URL.Hostname() != "scenario8-receiver.local" {
+	if req.URL == nil || req.URL.Hostname() != "horizontal-scale-receiver.local" {
 		return
 	}
 	host, port, err := net.SplitHostPort(addr)
@@ -131,7 +131,7 @@ func rewriteScenario8ReceiverURL(req *http.Request) {
 	} else {
 		req.URL.Host = host
 	}
-	req.Host = "scenario8-receiver.local"
+	req.Host = "horizontal-scale-receiver.local"
 }
 
 type cancelOnCloseReadCloser struct {

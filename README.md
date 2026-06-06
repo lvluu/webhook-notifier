@@ -6,7 +6,8 @@ Design: [docs/DESIGN.md](docs/DESIGN.md) · Requirements: [REQUIREMENTS.md](REQU
 
 ## Status
 
-PoC complete. All 8 benchmark scenarios pass. Ready for submission and pair-session review.
+PoC complete. The assignment-facing benchmark scenarios pass, with legacy
+issue-scoped scenarios retained under `cmd/bench-legacy` for reference.
 
 ```bash
 gh issue list --label ready-for-agent --state open
@@ -72,7 +73,7 @@ just bench-7                  # internal breaker hardening
 Direct runner form:
 
 ```bash
-BENCH_PROFILE=stress go run ./cmd/bench scenario6
+BENCH_PROFILE=stress go run ./cmd/bench production_workload
 ```
 
 See [bench/README.md](bench/README.md) for all scenarios and
@@ -165,7 +166,8 @@ DATABASE_URL=postgres://notifier:notifier@localhost:5432/notifier?sslmode=disabl
 │   └── adr/               # numbered architectural decisions
 ├── cmd/
 │   ├── notifier/          # service entrypoint
-│   └── bench/             # benchmark scenario runner
+│   ├── bench/             # assignment-facing benchmark scenario runner
+│   └── bench-legacy/      # legacy issue-scoped benchmark runner
 ├── internal/
 │   ├── ingest/            # Event ingest + fan-out to Deliveries
 │   ├── scheduler/         # Scheduler interface + round-robin impl (ADR-0001)

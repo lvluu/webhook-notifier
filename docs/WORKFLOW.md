@@ -80,7 +80,7 @@ just bench-7                  # internal breaker hardening
 The benchmark command can also be run directly:
 
 ```bash
-BENCH_PROFILE=stress go run ./cmd/bench scenario6
+BENCH_PROFILE=stress go run ./cmd/bench production_workload
 ```
 
 See [bench/README.md](../bench/README.md) for the full scenario map and
@@ -117,7 +117,7 @@ See [bench/README.md](../bench/README.md) for the full scenario map and
 | Worker | `--host-cap` | Process-local Integration Partner hostname cap | Lower to reduce partner pressure |
 | Retry | `MaxAttempts` | Reliability under transient failures | Increase for resilience, watch tail latency |
 | Retry | `BaseDelay`, `CapDelay` | Retry storm vs recovery speed | Increase to smooth load |
-| Breaker | threshold/cooldown | Isolation of broken Webhooks | Lower to protect workers earlier |
+| Breaker | `--breaker-failure-threshold`, `--breaker-initial-cooldown`, `--breaker-max-cooldown` | Isolation of broken Webhooks; threshold `0` disables breaker filtering for isolated benchmarks | Lower threshold to protect workers earlier |
 | Discovery | interval/backoff/limit | How quickly retries and stale claims are rediscovered | Lower for responsiveness, higher to reduce DB load |
 | DB pool | `--max-conns` | DB concurrency and wait time | Tune with worker count and PgBouncer; high `webhook_pg_pool_wait_count` means workers are pool-starved |
 | DB | indexes/partitioning | Claim path cost at scale | Add/tune when queue tables grow |

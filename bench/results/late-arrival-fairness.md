@@ -1,10 +1,10 @@
-# Scenario 1: Fairness Under Load — Late-Arriving Small Customer
+# Late Arrival Fairness: Fairness Under Load — Late-Arriving Small Customer
 
 ## Description
 
 Profile **stress**: one **Whale** (50000 deliveries, burst at T=0) + **100 Small Customers** (5 deliveries each, dripped every 1s starting at T=1) + **1 Late Small Customer** (3 deliveries, injected at T=30s).
 
-**Chaos conditions**: 15% of requests experience 300ms latency (simulating network round-trips). No status-code failures are injected; Scenario 1 isolates fairness under burst load from retry-policy behavior.
+**Chaos conditions**: 15% of requests experience 300ms latency (simulating network round-trips). No status-code failures are injected; Late Arrival Fairness isolates fairness under burst load from retry-policy behavior.
 
 The acceptance criteria are that Small Customers have lifecycle p99 under 2s, the late-arriving Small Customer is picked within at most one round-robin cycle of its Notify, and the generated workload matches the deterministic setup.
 
@@ -16,23 +16,23 @@ The acceptance criteria are that Small Customers have lifecycle p99 under 2s, th
 | Verdict | Small Customers stayed responsive while the Whale backlog drained |
 | Total duration | 1m41s |
 | Total deliveries | 50503 / 50503 |
-| End-to-end throughput (includes drip) | 502 deliveries/s |
+| End-to-end throughput (includes drip) | 501 deliveries/s |
 | Workers | 8 |
-| All Small lifecycle p99 | 391 ms |
-| Late Small first terminal lifecycle latency | 355 ms |
-| Whale backlog-drain p99 | 34408 ms |
-| Whale backlog-drain max | 34721 ms |
-| Implied whale drain throughput | 1440 deliveries/s |
-| Projected 1000-whale drain on one node | 9h38m41s |
+| All Small lifecycle p99 | 472 ms |
+| Late Small first terminal lifecycle latency | 58 ms |
+| Whale backlog-drain p99 | 33016 ms |
+| Whale backlog-drain max | 33327 ms |
+| Implied whale drain throughput | 1500 deliveries/s |
+| Projected 1000-whale drain on one node | 9h15m27s |
 | HTTP attempt p99 | 301 ms |
 
 ## Acceptance Criteria
 
-| Criterion | Observed | Limit | Result |
-|---|---:|---:|---|
-| Full workload created | 50503 deliveries | 50503 deliveries | **PASS** |
-| All Small lifecycle p99 | 391 ms | < 2000 ms | **PASS** |
-| Late Small picked within one RR cycle | 3 picks | <= 3 active Customers | **PASS** |
+| Pillar | Criterion | Observed | Limit | Result |
+|---|---|---:|---:|---|
+| Reliability | Full workload created | 50503 deliveries | 50503 deliveries | **PASS** |
+| Fairness | All Small lifecycle p99 | 472 ms | < 2000 ms | **PASS** |
+| Fairness | Late Small picked within one RR cycle | 2 picks | <= 3 active Customers | **PASS** |
 
 ## Backlog Drain Latency
 
@@ -41,15 +41,15 @@ The 1000-whale projection is a single-node capacity estimate from this run, not 
 
 | Class | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|
-| **Whale** | 18557 ms | 33137 ms | 34408 ms | 34721 ms |
-| **All Small** | 55 ms | 367 ms | 391 ms | 404 ms |
-| **Late Small** | 354 ms | 355 ms | 355 ms | 355 ms |
+| **Whale** | 17403 ms | 31792 ms | 33016 ms | 33327 ms |
+| **All Small** | 323 ms | 397 ms | 472 ms | 531 ms |
+| **Late Small** | 57 ms | 58 ms | 58 ms | 58 ms |
 
 ## HTTP Attempt Duration
 
 | Scope | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|
-| **All attempts** | 0 ms | 300 ms | 301 ms | 308 ms |
+| **All attempts** | 0 ms | 300 ms | 301 ms | 310 ms |
 
 
 ## Delivery Outcomes
@@ -66,4 +66,4 @@ The 1000-whale projection is a single-node capacity estimate from this run, not 
 
 ## Round-Robin Reactivity
 
-**PASS**: 3 Picks ≤ 3 active Customers — the late-arriving Small was served within one round-robin cycle.
+**PASS**: 2 Picks ≤ 3 active Customers — the late-arriving Small was served within one round-robin cycle.

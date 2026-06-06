@@ -3,6 +3,7 @@ package main
 import (
 	"time"
 
+	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/worker"
 )
 
@@ -16,6 +17,7 @@ type workerRuntimeConfig struct {
 	PgNotifyChannel         string
 	EnableWeightedScheduler bool
 	Discovery               worker.DiscoveryConfig
+	Breaker                 outbox.BreakerConfig
 }
 
 func loadWorkerRuntimeConfig() workerRuntimeConfig {
@@ -27,6 +29,7 @@ func loadWorkerRuntimeConfig() workerRuntimeConfig {
 		BacklogSampleInterval: 5 * time.Second,
 		EnablePgNotifyWakeups: true,
 		PgNotifyChannel:       "webhook_customer_ready",
+		Breaker:               outbox.BreakerConfig{FailureThreshold: 20, InitialCooldown: 5 * time.Minute, MaxCooldown: 15 * time.Minute},
 		Discovery: worker.DiscoveryConfig{
 			Interval:     time.Second,
 			EmptyBackoff: 5 * time.Second,

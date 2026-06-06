@@ -24,9 +24,9 @@ type alwaysScheduler struct{ id string }
 func (s alwaysScheduler) Pick(context.Context) (scheduler.CustomerID, uint32, bool, error) {
 	return scheduler.CustomerID(s.id), 0, true, nil
 }
-func (alwaysScheduler) WaitForWork(context.Context) error  { return nil }
-func (alwaysScheduler) Notify(scheduler.CustomerID)        {}
-func (alwaysScheduler) Remove(scheduler.CustomerID)        {}
+func (alwaysScheduler) WaitForWork(context.Context) error { return nil }
+func (alwaysScheduler) Notify(scheduler.CustomerID)       {}
+func (alwaysScheduler) Remove(scheduler.CustomerID)       {}
 
 // claimErrorStore returns a fixed error from ClaimNextN and counts attempts.
 type claimErrorStore struct {
