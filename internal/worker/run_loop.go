@@ -15,6 +15,7 @@ import (
 const (
 	idleBackoff              = 50 * time.Millisecond
 	defaultEmptyClaimBackoff = 20 * time.Millisecond
+	maxEmptyClaimBackoff     = 250 * time.Millisecond
 	// transientErrorBackoff is the pause after a recoverable database error
 	// (statement timeout, deadlock, connection churn). Long enough to let an
 	// overloaded database shed load, short enough to resume promptly. Kept
@@ -30,6 +31,14 @@ func (w *Worker) emptyClaimDelay() time.Duration {
 	return defaultEmptyClaimBackoff
 }
 
+func (w *Worker) maxEmptyClaimDelay() time.Duration {
+	base := w.emptyClaimDelay()
+	if base > maxEmptyClaimBackoff {
+		return base
+	}
+	return maxEmptyClaimBackoff
+}
+
 // Run continuously claims scheduled Deliveries and processes them.
 func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 	if store == nil {
@@ -39,6 +48,8 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 		return fmt.Errorf("scheduler is required")
 	}
 
+	emptyDelay := w.emptyClaimDelay()
+	maxEmptyDelay := w.maxEmptyClaimDelay()
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -62,11 +73,13 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(w.emptyClaimDelay()):
+			case <-time.After(emptyDelay):
 			}
+			emptyDelay = growBackoff(emptyDelay, maxEmptyDelay)
 			continue
 		}
 
+		emptyDelay = w.emptyClaimDelay()
 		if err := w.processDeliveries(ctx, store, deliveries); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()

@@ -33,13 +33,35 @@ services:
     command:
       - postgres
       - -c
-      - max_connections=200
+      - max_connections=400
       - -c
-      - shared_buffers=128MB
+      - shared_buffers=2GB
+      - -c
+      - effective_cache_size=6GB
+      - -c
+      - work_mem=64MB
+      - -c
+      - maintenance_work_mem=512MB
+      - -c
+      - wal_buffers=64MB
       - -c
       - max_wal_senders=0
       - -c
-      - synchronous_commit=off
+      - synchronous_commit=on
+      - -c
+      - wal_level=minimal
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - max_wal_size=8GB
+      - -c
+      - min_wal_size=1GB
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
       - -c
       - password_encryption=md5
       - -c
@@ -54,6 +76,14 @@ services:
       - transaction_timeout=2min
       - -c
       - idle_in_transaction_session_timeout=5min
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: 8g
+        reservations:
+          cpus: "2"
+          memory: 2g
 
   pgbouncer:
     image: edoburu/pgbouncer:v1.25.1-p0
@@ -64,13 +94,21 @@ services:
       DB_PASSWORD: notifier
       DB_NAME: notifier
       POOL_MODE: transaction
-      DEFAULT_POOL_SIZE: "80"
+      DEFAULT_POOL_SIZE: "120"
       MAX_PREPARED_STATEMENTS: "200"
-      MAX_CLIENT_CONN: "400"
+      MAX_CLIENT_CONN: "600"
       LISTEN_PORT: "6432"
     depends_on:
       postgres:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 256m
+        reservations:
+          cpus: "0.25"
+          memory: 128m
 
   notifier:
     build:
@@ -105,7 +143,7 @@ services:
       - -pg-notify-channel
       - webhook_customer_ready
       - -max-conns
-      - "30"
+      - "60"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9090/ready"]
       interval: 2s
@@ -114,6 +152,14 @@ services:
     depends_on:
       pgbouncer:
         condition: service_started
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1g
+        reservations:
+          cpus: "0.5"
+          memory: 256m
 
   caddy:
     image: caddy:2-alpine
@@ -123,6 +169,14 @@ services:
       - ./compose/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
     depends_on:
       - notifier
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+        reservations:
+          cpus: "0.1"
+          memory: 64m
 
   webhook-receiver:
     build:
@@ -149,6 +203,193 @@ services:
       - "8081:8080"
       - "9092:9091"
 
+  webhook-receiver-fast:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - webhook-receiver
+      - -addr
+      - :8080
+      - -metrics-addr
+      - :9091
+      - -latency-min
+      - 1ms
+      - -latency-max
+      - 5ms
+      - -failure-rate
+      - "0"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/metrics"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+        reservations:
+          cpus: "0.1"
+          memory: 64m
+    profiles:
+      - production
+
+  webhook-receiver-flaky:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - webhook-receiver
+      - -addr
+      - :8080
+      - -metrics-addr
+      - :9091
+      - -latency-min
+      - 5ms
+      - -latency-max
+      - 50ms
+      - -failure-rate
+      - "0.3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/metrics"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+        reservations:
+          cpus: "0.1"
+          memory: 64m
+    profiles:
+      - production
+
+  webhook-receiver-slow:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - webhook-receiver
+      - -addr
+      - :8080
+      - -metrics-addr
+      - :9091
+      - -latency-min
+      - 50ms
+      - -latency-max
+      - 200ms
+      - -failure-rate
+      - "0"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/metrics"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+        reservations:
+          cpus: "0.1"
+          memory: 64m
+    profiles:
+      - production
+
+  webhook-receiver-dead:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - webhook-receiver
+      - -addr
+      - :8080
+      - -metrics-addr
+      - :9091
+      - -failure-rate
+      - "1.0"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/metrics"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128m
+        reservations:
+          cpus: "0.05"
+          memory: 32m
+    profiles:
+      - production
+
+  webhook-receiver-tls:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - webhook-receiver
+      - -addr
+      - :8443
+      - -metrics-addr
+      - :9091
+      - -latency-min
+      - 5ms
+      - -latency-max
+      - 15ms
+      - -failure-rate
+      - "0"
+      - -tls-cert
+      - /certs/server.crt
+      - -tls-key
+      - /certs/server.key
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/metrics"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    volumes:
+      - certs:/certs:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+        reservations:
+          cpus: "0.1"
+          memory: 64m
+    depends_on:
+      certs-init:
+        condition: service_completed_successfully
+    profiles:
+      - production
+
+  certs-init:
+    image: alpine:3.20
+    command:
+      - sh
+      - -c
+      - |
+        apk add --no-cache openssl &&
+        mkdir -p /certs &&
+        openssl req -x509 -newkey rsa:2048 -nodes \
+          -keyout /certs/server.key \
+          -out /certs/server.crt \
+          -days 365 \
+          -subj "/CN=webhook-receiver-tls" \
+          -addext "subjectAltName=DNS:webhook-receiver-tls,DNS:localhost" &&
+        chmod 644 /certs/server.crt &&
+        chmod 600 /certs/server.key &&
+        echo "TLS certs generated"
+    volumes:
+      - certs:/certs
+    profiles:
+      - production
+
   delivery-history-retention:
     build:
       context: .
@@ -160,14 +401,22 @@ services:
         while true; do
           delivery-history-retention \
             -db postgres://notifier:notifier@pgbouncer:6432/notifier?sslmode=disable \
-            -retention 1m \
-            -batch-size 300 \
+            -retention 24h \
+            -batch-size 500 \
             -enrichment deferred;
-          sleep 60;
+          sleep 300;
         done
     depends_on:
       pgbouncer:
         condition: service_started
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+        reservations:
+          cpus: "0.1"
+          memory: 64m
     profiles:
       - retention
       - chaos
@@ -189,7 +438,15 @@ services:
       - -rate
       - "200"
       - -burst
-      - "200"
+      - "300"
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 256m
+        reservations:
+          cpus: "0.25"
+          memory: 128m
 
   chaos-small:
     <<: *chaos-common
@@ -202,13 +459,21 @@ services:
       - -customer-base
       - small
       - -customers
-      - "10000"
+      - "5000"
       - -class
       - "1"
       - -rate
-      - "100"
+      - "250"
       - -burst
-      - "400"
+      - "500"
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512m
+        reservations:
+          cpus: "0.25"
+          memory: 256m
 
   prometheus:
     image: prom/prometheus:latest
@@ -218,6 +483,14 @@ services:
       - "9091:9090"
     volumes:
       - ./compose/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+        reservations:
+          cpus: "0.1"
+          memory: 256m
 
   grafana:
     image: grafana/grafana:latest
@@ -235,6 +508,15 @@ services:
       - ./compose/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+        reservations:
+          cpus: "0.1"
+          memory: 256m
 
 volumes:
   pgdata:
+  certs:

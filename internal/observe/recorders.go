@@ -219,6 +219,33 @@ func IncBreakerCoalescerDropped() {
 	WebhookBreakerCoalescerDroppedTotal.Add(1)
 }
 
+// SetBreakerCoalescerBufferUsed safely sets the current coalescer buffer fill
+// level, skipping if metrics are not registered.
+func SetBreakerCoalescerBufferUsed(n float64) {
+	if !metricsRegistered() {
+		return
+	}
+	WebhookBreakerCoalescerBufferUsed.Set(n)
+}
+
+// ObserveBreakerFlushDuration safely observes breaker coalescer flush duration,
+// skipping if metrics are not registered.
+func ObserveBreakerFlushDuration(seconds float64) {
+	if !metricsRegistered() {
+		return
+	}
+	WebhookBreakerFlushDurationSeconds.Observe(seconds)
+}
+
+// ObserveBreakerFlushBatchSize safely observes breaker outcomes per coalescer
+// flush, skipping if metrics are not registered.
+func ObserveBreakerFlushBatchSize(n float64) {
+	if !metricsRegistered() {
+		return
+	}
+	WebhookBreakerFlushBatchSize.Observe(n)
+}
+
 // IncPgNotifyBroadcast safely increments the remote wake broadcaster outcome.
 func IncPgNotifyBroadcast(result string) {
 	if !metricsRegistered() {

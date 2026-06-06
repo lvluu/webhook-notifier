@@ -112,14 +112,14 @@ See [bench/README.md](../bench/README.md) for the full scenario map and
 | Worker | `--min-batch` / `MinBatchHint` | Lower bound for claim batch size per scheduler pick | Higher for throughput, lower for fairness |
 | Worker | `--claim-batch-hint` / `MaxBatchHint` | Upper bound for claim batch size per scheduler pick (`0` = unbounded) | Higher for throughput, lower for fairness |
 | Worker | `--multi-pick` / `MultiPickCount` | Customers batched into one claim query | Increase for sparse-Customer workloads |
-| Worker | `--empty-claim-backoff` | Pause after empty claim cycle | Raise to reduce DB churn, lower for reactivity |
+| Worker | `--empty-claim-backoff` | Base pause after empty claim cycle; grows adaptively to reduce hot polling | Raise to reduce DB churn, lower for reactivity |
 | Worker | request timeout | HTTP timeout behavior and retries | Raise if false timeouts; lower to fail fast |
 | Worker | `--host-cap` | Process-local Integration Partner hostname cap | Lower to reduce partner pressure |
 | Retry | `MaxAttempts` | Reliability under transient failures | Increase for resilience, watch tail latency |
 | Retry | `BaseDelay`, `CapDelay` | Retry storm vs recovery speed | Increase to smooth load |
 | Breaker | threshold/cooldown | Isolation of broken Webhooks | Lower to protect workers earlier |
 | Discovery | interval/backoff/limit | How quickly retries and stale claims are rediscovered | Lower for responsiveness, higher to reduce DB load |
-| DB pool | `--max-conns` | DB concurrency and wait time | Tune with worker count and PgBouncer |
+| DB pool | `--max-conns` | DB concurrency and wait time | Tune with worker count and PgBouncer; high `webhook_pg_pool_wait_count` means workers are pool-starved |
 | DB | indexes/partitioning | Claim path cost at scale | Add/tune when queue tables grow |
 | DB | autovacuum/WAL/checkpoints | Write-heavy stability | Tune for sustained queue writes |
 
@@ -130,9 +130,12 @@ See [bench/README.md](../bench/README.md) for the full scenario map and
 3. Fairness third: verify Small Customer P95 first-attempt queue latency.
 4. Sparse workload fourth: tune `MultiPickCount` before raising per-Customer
    batch size.
-5. Partner protection fifth: validate host limiter requeues and breaker
+5. Empty-claim rate fifth: interpret it with backlog and claim latency. A high
+   percentage alone is expected under sparse/drained load; chasing it by making
+   claim queries heavier can reduce throughput.
+6. Partner protection sixth: validate host limiter requeues and breaker
    isolation under failing Integration Partners.
-6. Infrastructure last: DB sizing, pooling, retention, then partitioning or a
+7. Infrastructure last: DB sizing, pooling, retention, then partitioning or a
    broker-backed queue if Postgres claim contention becomes the ceiling.
 
 ## Related Docs

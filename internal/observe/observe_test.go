@@ -207,6 +207,8 @@ func TestMetricsEndpoint_returns_nonzero_after_seed(t *testing.T) {
 	WebhookIngestFanoutPerEvent.Observe(3)
 	SetBreakerState("webhook_1", "open")
 	IncBreakerTrip("retryable_5xx")
+	ObserveBreakerFlushDuration(0.1)
+	ObserveBreakerFlushBatchSize(25)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
@@ -250,6 +252,8 @@ func TestMetricsEndpoint_returns_nonzero_after_seed(t *testing.T) {
 	requireContains(`webhook_ingest_fanout_per_event_bucket`)
 	requireContains(`webhook_breaker_state{state="open",webhook_id="webhook_1"} 1`)
 	requireContains(`webhook_breaker_trips_total{reason="retryable_5xx"} 1`)
+	requireContains(`webhook_breaker_coalescer_flush_duration_seconds_bucket`)
+	requireContains(`webhook_breaker_coalescer_flush_batch_size_bucket`)
 }
 
 func TestCustomerClassFromValue(t *testing.T) {

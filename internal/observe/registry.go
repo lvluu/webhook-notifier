@@ -33,6 +33,9 @@ var (
 	WebhookPgNotifyBroadcastTotal       *prometheus.CounterVec
 	WebhookWorkerTransientDBErrorsTotal *prometheus.CounterVec
 	WebhookBreakerCoalescerDroppedTotal prometheus.Counter
+	WebhookBreakerCoalescerBufferUsed   prometheus.Gauge
+	WebhookBreakerFlushDurationSeconds  prometheus.Histogram
+	WebhookBreakerFlushBatchSize        prometheus.Histogram
 	metricsRegistrationWarned           atomic.Bool
 )
 
@@ -63,6 +66,9 @@ func ResetMetricsForTest() {
 	WebhookPgNotifyBroadcastTotal = nil
 	WebhookWorkerTransientDBErrorsTotal = nil
 	WebhookBreakerCoalescerDroppedTotal = nil
+	WebhookBreakerCoalescerBufferUsed = nil
+	WebhookBreakerFlushDurationSeconds = nil
+	WebhookBreakerFlushBatchSize = nil
 	metricsRegistrationWarned.Store(false)
 }
 
@@ -210,6 +216,23 @@ func initMetrics(reg prometheus.Registerer) {
 		Help: "Total number of breaker outcomes dropped because the per-process coalescer buffer was full. A sustained rise indicates the coalescer is not keeping up (stuck flush or saturation), distinct from normal operation.",
 	})
 
+	WebhookBreakerCoalescerBufferUsed = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "webhook_breaker_coalescer_buffer_used",
+		Help: "Current number of breaker outcomes buffered in the coalescer channel. Approaching the buffer capacity signals backpressure before drops begin.",
+	})
+
+	WebhookBreakerFlushDurationSeconds = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "webhook_breaker_coalescer_flush_duration_seconds",
+		Help:    "Duration of breaker coalescer flush transactions.",
+		Buckets: []float64{0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10},
+	})
+
+	WebhookBreakerFlushBatchSize = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "webhook_breaker_coalescer_flush_batch_size",
+		Help:    "Number of breaker outcomes applied per coalescer flush.",
+		Buckets: []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000},
+	})
+
 	reg.MustRegister(
 		WebhookDeliveriesTotal,
 		WebhookDeliveryLatencySeconds,
@@ -234,5 +257,8 @@ func initMetrics(reg prometheus.Registerer) {
 		WebhookPgNotifyBroadcastTotal,
 		WebhookWorkerTransientDBErrorsTotal,
 		WebhookBreakerCoalescerDroppedTotal,
+		WebhookBreakerCoalescerBufferUsed,
+		WebhookBreakerFlushDurationSeconds,
+		WebhookBreakerFlushBatchSize,
 	)
 }
