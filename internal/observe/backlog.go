@@ -50,7 +50,7 @@ func samplePendingDeliveries(ctx context.Context, db *sql.DB) (err error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT COALESCE(c.class, 1),
 		       COUNT(*),
-		       COALESCE(MAX(EXTRACT(EPOCH FROM now() - d.created_at)), 0)
+		       COALESCE(MAX(EXTRACT(EPOCH FROM now() - d.created_at)) FILTER (WHERE d.status = 'pending'), 0)
 		FROM deliveries d
 		LEFT JOIN customers c ON c.id = d.customer_id
 		WHERE d.status IN ('pending', 'failed_retry')

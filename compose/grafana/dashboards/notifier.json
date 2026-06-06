@@ -209,7 +209,7 @@
         },
         {
           "title": "Oldest Pending Delivery",
-          "description": "Age of the oldest pending or retryable delivery. Rising age indicates delayed work or starvation even when queue depth is stable.",
+          "description": "Age of the oldest pending delivery. Retryable rows are excluded, so this tracks unclaimed work only. Rising age indicates delayed work or starvation even when queue depth is stable.",
           "type": "timeseries",
           "gridPos": {
             "h": 8,

@@ -173,7 +173,7 @@ func initMetrics(reg prometheus.Registerer) {
 
 	WebhookPendingOldestAgeSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "webhook_pending_oldest_age_seconds",
-		Help: "Age in seconds of the oldest pending or retryable delivery.",
+		Help: "Age in seconds of the oldest pending delivery.",
 	})
 
 	WebhookActiveCustomers = prometheus.NewGauge(prometheus.GaugeOpts{
