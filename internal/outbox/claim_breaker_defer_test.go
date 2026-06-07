@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lvluu/webhook-notifier/internal/breaker"
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/retry"
@@ -47,17 +48,10 @@ func submitEventTo(t *testing.T, ctx context.Context, db *sql.DB, customerID, ev
 }
 
 func breakerStore(db *sql.DB, threshold int, cooldown time.Duration) *outbox.Store {
-	return outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: threshold,
-		InitialCooldown:  cooldown,
-		MaxCooldown:      cooldown,
-	}))
+	return outbox.New(db, outbox.WithBreakerFiltering(threshold > 0))
 }
 
-// TestDeferBlocked_SingleMarkRetryPath covers the single-delivery openBreaker
-// path (MarkRetry -> recordBreakerFailure -> openBreaker), distinct from the
-// batch path the main test exercises.
-func TestDeferBlocked_SingleMarkRetryPath(t *testing.T) {
+func TestDeferBlocked_OpenTransition(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)
 
@@ -70,18 +64,7 @@ func TestDeferBlocked_SingleMarkRetryPath(t *testing.T) {
 		t.Fatalf("append backlog: %v", err)
 	}
 
-	store := breakerStore(db, 2, cooldown)
-
-	// Two single-mark failures on the same webhook trip the breaker via the
-	// single path.
-	c1 := claimDelivery(t, ctx, store, customerID, firstID)
-	if err := store.MarkRetry(ctx, c1.ID, 500, retry.ReasonRetryable5xx, time.Millisecond, 0); err != nil {
-		t.Fatalf("MarkRetry 1: %v", err)
-	}
-	c2 := waitForClaim(t, ctx, store, customerID, time.Second)
-	if err := store.MarkRetry(ctx, c2.ID, 500, retry.ReasonRetryable5xx, time.Millisecond, 0); err != nil {
-		t.Fatalf("MarkRetry 2: %v", err)
-	}
+	persistBreakerOpenForDelivery(t, ctx, db, firstID, 2, cooldown)
 
 	assertWebhookBreaker(t, ctx, db, firstID, "open", 2)
 
@@ -111,12 +94,7 @@ func TestDeferBlocked_OnlyAffectsOpenedWebhook(t *testing.T) {
 	healthy := submitEventTo(t, ctx, db, customerID, "healthy.event")
 
 	store := breakerStore(db, 1, time.Hour)
-
-	// One failure on the blocked webhook (threshold 1) opens it.
-	cA := claimDelivery(t, ctx, store, customerID, blockedA)
-	if err := store.MarkRetry(ctx, cA.ID, 500, retry.ReasonRetryable5xx, time.Millisecond, 0); err != nil {
-		t.Fatalf("MarkRetry blockedA: %v", err)
-	}
+	persistBreakerOpenForDelivery(t, ctx, db, blockedA, 1, time.Hour)
 	assertWebhookBreaker(t, ctx, db, blockedA, "open", 1)
 
 	// blockedB deferred; healthy still ready.
@@ -155,16 +133,7 @@ func TestDeferBlocked_GreatestPreservesLaterSchedule(t *testing.T) {
 		t.Fatalf("set far schedule: %v", err)
 	}
 
-	store := breakerStore(db, 2, time.Hour) // probe ~1h out, far less than 5h
-
-	c1 := claimDelivery(t, ctx, store, customerID, firstID)
-	if err := store.MarkRetry(ctx, c1.ID, 500, retry.ReasonRetryable5xx, time.Millisecond, 0); err != nil {
-		t.Fatalf("MarkRetry 1: %v", err)
-	}
-	c2 := waitForClaim(t, ctx, store, customerID, time.Second)
-	if err := store.MarkRetry(ctx, c2.ID, 500, retry.ReasonRetryable5xx, time.Millisecond, 0); err != nil {
-		t.Fatalf("MarkRetry 2: %v", err)
-	}
+	persistBreakerOpenForDelivery(t, ctx, db, firstID, 2, time.Hour) // probe ~1h out, far less than 5h
 	assertWebhookBreaker(t, ctx, db, firstID, "open", 2)
 
 	// farID must keep its ~5h schedule (GREATEST), not be pulled to the ~1h probe.
@@ -191,20 +160,9 @@ func TestDeferBlocked_HalfOpenReopenRedefers(t *testing.T) {
 
 	// Small initial cooldown so the probe is testable; large max so the doubled
 	// cooldown on reopen lands further in the future.
-	store := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: 2,
-		InitialCooldown:  cooldown,
-		MaxCooldown:      24 * time.Hour,
-	}))
+	store := outbox.New(db, outbox.WithBreakerFiltering(true))
 
-	c1 := claimDelivery(t, ctx, store, customerID, firstID)
-	if err := store.MarkRetry(ctx, c1.ID, 500, retry.ReasonRetryable5xx, time.Millisecond, 0); err != nil {
-		t.Fatalf("MarkRetry 1: %v", err)
-	}
-	c2 := waitForClaim(t, ctx, store, customerID, time.Second)
-	if err := store.MarkRetry(ctx, c2.ID, 500, retry.ReasonRetryable5xx, time.Millisecond, 0); err != nil {
-		t.Fatalf("MarkRetry 2: %v", err)
-	}
+	persistBreakerOpenForDelivery(t, ctx, db, firstID, 2, cooldown)
 	assertWebhookBreaker(t, ctx, db, firstID, "open", 2)
 
 	// Wait out the initial cooldown, claim the probe (half_open), then fail it.
@@ -216,6 +174,7 @@ func TestDeferBlocked_HalfOpenReopenRedefers(t *testing.T) {
 	if err := store.MarkRetry(ctx, probe.ID, 500, retry.ReasonRetryable5xx, time.Millisecond, 0); err != nil {
 		t.Fatalf("MarkRetry probe: %v", err)
 	}
+	persistBreakerOpenForDelivery(t, ctx, db, probe.ID, 3, 2*cooldown)
 
 	// Reopened with a doubled cooldown: probe time should be well in the future
 	// and the backlog re-deferred past now.
@@ -245,15 +204,7 @@ func TestDeferBlocked_ClosedBreakerRestoresReadiness(t *testing.T) {
 	}
 
 	store := breakerStore(db, 2, cooldown)
-
-	c1 := claimDelivery(t, ctx, store, customerID, firstID)
-	if err := store.MarkRetry(ctx, c1.ID, 500, retry.ReasonRetryable5xx, time.Millisecond, 0); err != nil {
-		t.Fatalf("MarkRetry 1: %v", err)
-	}
-	c2 := waitForClaim(t, ctx, store, customerID, time.Second)
-	if err := store.MarkRetry(ctx, c2.ID, 500, retry.ReasonRetryable5xx, time.Millisecond, 0); err != nil {
-		t.Fatalf("MarkRetry 2: %v", err)
-	}
+	persistBreakerOpenForDelivery(t, ctx, db, firstID, 2, cooldown)
 	assertWebhookBreaker(t, ctx, db, firstID, "open", 2)
 
 	// Probe, then succeed it to close the breaker.
@@ -265,6 +216,12 @@ func TestDeferBlocked_ClosedBreakerRestoresReadiness(t *testing.T) {
 	if err := store.MarkSucceeded(ctx, probe.ID, 200, 0); err != nil {
 		t.Fatalf("MarkSucceeded probe: %v", err)
 	}
+	persistBreakerTransition(t, ctx, db, breaker.Transition{
+		WebhookID:    webhookIDForDelivery(t, ctx, db, probe.ID),
+		State:        breaker.Closed,
+		FailureCount: 0,
+		Cooldown:     cooldown,
+	})
 	assertWebhookBreaker(t, ctx, db, backlogID, "closed", 0)
 
 	// The deferred backlog was scheduled to the probe time, now in the past, so

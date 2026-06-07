@@ -2,7 +2,7 @@
 
 This document describes the design of the Webhook Notifier component: a service that consumes business Events from a multi-tenant platform and reliably delivers them to Integration Partners over HTTP POST, with horizontal scalability and fair scheduling across Customers of vastly different sizes.
 
-Vocabulary used here is defined in [CONTEXT.md](../CONTEXT.md). Architectural commitments are anchored in [ADR-0001](adr/0001-round-robin-fairness-with-pluggable-scheduler.md), [ADR-0002](adr/0002-postgres-as-queue-no-broker-for-poc.md), [ADR-0003](adr/0003-retry-policy-and-delivery-lifecycle.md), [ADR-0004](adr/0004-requeue-without-attempt.md), [ADR-0005](adr/0005-subscription-registry-lru-ttl-cache.md), [ADR-0006](adr/0006-db-backed-claimable-customer-discovery.md), [ADR-0007](adr/0007-http-transport-and-response-body-drain.md), [ADR-0008](adr/0008-persisted-webhook-circuit-breaker.md), [ADR-0009](adr/0009-retry-max-age-expiration.md), [ADR-0010](adr/0010-terminal-delivery-retention-archive.md), [ADR-0011](adr/0011-delivery-claims-authoritative-claim-store.md), [ADR-0012](adr/0012-pgbouncer-prepared-statements-and-pgxpool-deferral.md), and [ADR-0013](adr/0013-claim-agnostic-claimable-customer-discovery.md).
+Vocabulary used here is defined in [CONTEXT.md](../CONTEXT.md). Architectural commitments are anchored in [ADR-0001](adr/0001-round-robin-fairness-with-pluggable-scheduler.md), [ADR-0002](adr/0002-postgres-as-queue-no-broker-for-poc.md), [ADR-0003](adr/0003-retry-policy-and-delivery-lifecycle.md), [ADR-0004](adr/0004-requeue-without-attempt.md), [ADR-0005](adr/0005-subscription-registry-lru-ttl-cache.md), [ADR-0006](adr/0006-db-backed-claimable-customer-discovery.md), [ADR-0007](adr/0007-http-transport-and-response-body-drain.md), [ADR-0008](adr/0008-persisted-webhook-circuit-breaker.md), [ADR-0009](adr/0009-retry-max-age-expiration.md), [ADR-0010](adr/0010-terminal-delivery-retention-archive.md), [ADR-0011](adr/0011-delivery-claims-authoritative-claim-store.md), [ADR-0012](adr/0012-pgbouncer-prepared-statements-and-pgxpool-deferral.md), [ADR-0013](adr/0013-claim-agnostic-claimable-customer-discovery.md), and [ADR-0014](adr/0014-in-memory-webhook-circuit-breaker.md).
 For a step-by-step execution path and tuning checklist, see [WORKFLOW.md](WORKFLOW.md).
 
 The implementation is Go plus Postgres. Go keeps the service small,
@@ -184,13 +184,14 @@ flowchart LR
       - POST with a shared tuned HTTP client and per-Attempt request timeout.
       - Drain and close the response body so the transport can reuse the connection.
       - `RetryPolicy.Next()` decides outcome.
-  5. Batch-mark all outcomes by kind in one SQL round-trip per outcome (`MarkSucceededBatch`, `MarkRetryBatch`, `MarkDeadBatch`) using `UNNEST` arrays + CTE transactions that delete `delivery_claims` rows and update `deliveries` atomically, including breaker state recording via set-based SQL (no per-item loops).
-  6. Return to step 1.
+  5. Batch-mark all outcomes by kind in one SQL round-trip per outcome (`MarkSucceededBatch`, `MarkRetryBatch`, `MarkDeadBatch`) using `UNNEST` arrays + CTE transactions that delete `delivery_claims` rows, insert Attempt records, update `deliveries`, and write DLQ rows. These mark transactions do not update `webhooks`.
+  6. After the mark transaction commits, record success or failure in the process-local Webhook Circuit Breaker. The breaker persists only state transitions asynchronously.
+  7. Return to step 1.
 - **SubscriptionRegistry** — Read-only `customer_id → []Webhook`. In-memory LRU with short TTL; cache miss falls back to PG. Avoids hot lookup on every Delivery.
 - **DLQ** (`dead_letters` table) — Terminal Deliveries with reason (`exhausted`, `terminal_4xx`, `terminal_network`). Written at MarkDead time alongside the `deliveries.status = 'dead'` update.
   Terminal `deliveries` rows stay in the live queue for a configurable operational retention window (initially 24 hours), after which the archive process copies them into a time-partitioned `delivery_history` table and removes them from `deliveries` so claim indexes do not accumulate unbounded terminal rows (ADR-0010).
 - **Process-local HostLimiter** — `map[host]*semaphore.Weighted`. Enforces a per-process limit per Integration Partner hostname, default 20. This is the PoC's partial enforcement of the Host Concurrency Cap; a horizontally scaled production deployment needs fleet-wide coordination to preserve the partner-protection invariant. Animation source: [host-limiter.mmd](animations/host-limiter.mmd).
-- **Webhook circuit breaker** — Persisted per-Webhook breaker state (`closed`, `open`, `half_open`) that keeps chronically failing Webhooks out of claim/discovery until a cooldown permits one probe. Complements RetryPolicy and the Host Concurrency Cap: RetryPolicy decides the outcome of an Attempt, HostLimiter limits local pressure on a hostname, and the breaker stops a broken Webhook from repeatedly occupying worker capacity across many Deliveries. Animation source: [breaker-lifecycle.mmd](animations/breaker-lifecycle.mmd).
+- **Webhook circuit breaker** — Process-local per-Webhook breaker decision state backed by persisted transition state (`closed`, `open`, `half_open`) on `webhooks`. Workers record Attempt outcomes in memory after mark commits, so the mark hot path does not touch Webhook rows or scan Attempt history. The database is still the claim-visible coordination layer: claim/discovery filter by persisted breaker state, and the claim query assigns exactly one half-open probe Delivery across workers. Opening a breaker persists the transition asynchronously and defers blocked Deliveries to the next probe time so an open Webhook backlog does not remain ready-scan ballast. Complements RetryPolicy and the Host Concurrency Cap: RetryPolicy decides the outcome of an Attempt, HostLimiter limits local pressure on a hostname, and the breaker stops a broken Webhook from repeatedly occupying worker capacity across many Deliveries. Animation source: [breaker-lifecycle.mmd](animations/breaker-lifecycle.mmd).
 
 ## Data model
 
@@ -256,8 +257,8 @@ Indexes:
 - `deliveries (customer_id, next_attempt_at, created_at, id) WHERE status IN ('pending', 'failed_retry')` — ready-candidate claim scan (partial, index-friendly).
 - `delivery_claims (claimed_at, delivery_id)` — stale-claim scan.
 - `delivery_attempts (delivery_id, attempt_number)` — audit lookup.
-- `delivery_attempts (delivery_id, sent_at)` — webhook circuit-breaker consecutive-failure scan: backs both the `max(sent_at)` last-success probe and the since-last-success failure range scan in `consecutiveWebhookFailures` / `batchConsecutiveWebhookFailures`, keeping the scan off the full delivery_attempts history during a partner outage.
-- `deliveries (webhook_id)` — webhook circuit-breaker consecutive-failure join (`delivery_attempts ⋈ deliveries` on `webhook_id`).
+- `delivery_attempts (delivery_id, sent_at)` — Attempt audit lookup by Delivery and time. Breaker failure counting is process-local and no longer scans Attempt history in mark transactions.
+- `deliveries (webhook_id)` — Webhook-scoped Delivery maintenance, including blocked-Delivery deferral when a breaker opens.
 - `deliveries (customer_id, next_attempt_at) WHERE status IN ('pending', 'failed_retry')` — claimable-customer discovery scan.
 - `dead_letters (final_at desc)` — ops inspection.
 - `delivery_history (customer_id, final_at desc)` — historical lookup.

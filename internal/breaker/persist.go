@@ -1,0 +1,227 @@
+package breaker
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/lvluu/webhook-notifier/internal/observe"
+)
+
+// LoadFromDB loads persisted Webhook Circuit Breaker state.
+func LoadFromDB(ctx context.Context, db *sql.DB) (map[string]Snapshot, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT id::text, breaker_state, breaker_failure_count,
+		       breaker_cooldown_ms, breaker_next_probe_at,
+		       breaker_probe_delivery_id::text
+		FROM webhooks
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("load breaker states: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	snapshots := make(map[string]Snapshot)
+	for rows.Next() {
+		var snapshot Snapshot
+		var cooldownMillis int64
+		var nextProbeAt sql.NullTime
+		var probeDeliveryID sql.NullString
+		if err := rows.Scan(
+			&snapshot.WebhookID,
+			&snapshot.State,
+			&snapshot.FailureCount,
+			&cooldownMillis,
+			&nextProbeAt,
+			&probeDeliveryID,
+		); err != nil {
+			return nil, fmt.Errorf("scan breaker state: %w", err)
+		}
+		snapshot.Cooldown = time.Duration(cooldownMillis) * time.Millisecond
+		if nextProbeAt.Valid {
+			snapshot.NextProbeAt = nextProbeAt.Time
+		}
+		if probeDeliveryID.Valid {
+			snapshot.ProbeDeliveryID = probeDeliveryID.String
+		}
+		snapshots[snapshot.WebhookID] = snapshot
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate breaker states: %w", err)
+	}
+	return snapshots, nil
+}
+
+// PersistTransition writes one breaker lifecycle transition to Postgres.
+func PersistTransition(ctx context.Context, db *sql.DB, transition Transition) error {
+	switch transition.State {
+	case Closed:
+		if err := persistClosed(ctx, db, transition); err != nil {
+			return err
+		}
+	case Open:
+		if err := persistOpen(ctx, db, transition); err != nil {
+			return err
+		}
+		observe.IncBreakerTrip(transition.Reason)
+	case HalfOpen:
+		if err := persistHalfOpen(ctx, db, transition); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unknown breaker state %q", transition.State)
+	}
+	observe.SetBreakerState(transition.WebhookID, string(transition.State))
+	return nil
+}
+
+// AsyncPersister persists breaker transitions from a bounded queue.
+type AsyncPersister struct {
+	db      *sql.DB
+	logger  *slog.Logger
+	ch      chan Transition
+	persist func(context.Context, *sql.DB, Transition) error
+}
+
+// NewAsyncPersister creates a bounded asynchronous transition persister.
+func NewAsyncPersister(db *sql.DB, logger *slog.Logger, capacity int) *AsyncPersister {
+	if capacity < 1 {
+		capacity = 1
+	}
+	return &AsyncPersister{
+		db:      db,
+		logger:  logger,
+		ch:      make(chan Transition, capacity),
+		persist: PersistTransition,
+	}
+}
+
+// Sink returns a transition sink suitable for passing to NewMemory.
+func (p *AsyncPersister) Sink() TransitionSink {
+	return func(transition Transition) {
+		select {
+		case p.ch <- transition:
+		default:
+			if p.logger != nil {
+				p.logger.Warn("breaker transition persistence queue full; applying transition synchronously",
+					"webhook_id", transition.WebhookID,
+					"state", transition.State,
+				)
+			}
+			if err := p.persist(context.Background(), p.db, transition); err != nil && p.logger != nil {
+				p.logger.Error("persist breaker transition failed",
+					"webhook_id", transition.WebhookID,
+					"state", transition.State,
+					"error", err,
+				)
+			}
+		}
+	}
+}
+
+// Run persists queued transitions until ctx is canceled.
+func (p *AsyncPersister) Run(ctx context.Context) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case transition := <-p.ch:
+			if err := p.persist(ctx, p.db, transition); err != nil && p.logger != nil {
+				p.logger.Error("persist breaker transition failed",
+					"webhook_id", transition.WebhookID,
+					"state", transition.State,
+					"error", err,
+				)
+			}
+		}
+	}
+}
+
+func persistClosed(ctx context.Context, db *sql.DB, transition Transition) error {
+	_, err := db.ExecContext(ctx, `
+		UPDATE webhooks
+		SET breaker_state = 'closed',
+		    breaker_failure_count = 0,
+		    breaker_opened_at = NULL,
+		    breaker_next_probe_at = NULL,
+		    breaker_cooldown_ms = $2,
+		    breaker_probe_delivery_id = NULL
+		WHERE id = $1::uuid
+		  AND breaker_state <> 'closed'
+	`, transition.WebhookID, transition.Cooldown.Milliseconds())
+	if err != nil {
+		return fmt.Errorf("persist breaker closed: %w", err)
+	}
+	return nil
+}
+
+func persistOpen(ctx context.Context, db *sql.DB, transition Transition) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin breaker open transition: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	nextProbeAt := transition.NextProbeAt
+	if nextProbeAt.IsZero() {
+		nextProbeAt = time.Now().Add(transition.Cooldown)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE webhooks
+		SET breaker_state = 'open',
+		    breaker_failure_count = $2,
+		    breaker_opened_at = now(),
+		    breaker_next_probe_at = $3,
+		    breaker_cooldown_ms = $4,
+		    breaker_probe_delivery_id = NULL
+		WHERE id = $1::uuid
+	`, transition.WebhookID, transition.FailureCount, nextProbeAt, transition.Cooldown.Milliseconds()); err != nil {
+		return fmt.Errorf("persist breaker open: %w", err)
+	}
+	if err := deferBlockedDeliveries(ctx, tx, []string{transition.WebhookID}); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit breaker open transition: %w", err)
+	}
+	return nil
+}
+
+func persistHalfOpen(ctx context.Context, db *sql.DB, transition Transition) error {
+	if transition.ProbeDeliveryID == "" {
+		return nil
+	}
+	_, err := db.ExecContext(ctx, `
+		UPDATE webhooks
+		SET breaker_state = 'half_open',
+		    breaker_probe_delivery_id = $2::uuid
+		WHERE id = $1::uuid
+		  AND breaker_state <> 'closed'
+	`, transition.WebhookID, transition.ProbeDeliveryID)
+	if err != nil {
+		return fmt.Errorf("persist breaker half-open: %w", err)
+	}
+	return nil
+}
+
+func deferBlockedDeliveries(ctx context.Context, tx *sql.Tx, webhookIDs []string) error {
+	if len(webhookIDs) == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE deliveries d
+		SET next_attempt_at = GREATEST(d.next_attempt_at, w.breaker_next_probe_at),
+		    updated_at = now()
+		FROM webhooks w
+		WHERE w.id = ANY($1::uuid[])
+		  AND d.webhook_id = w.id
+		  AND d.status IN ('pending', 'failed_retry')
+		  AND w.breaker_next_probe_at IS NOT NULL
+		  AND d.next_attempt_at < w.breaker_next_probe_at
+	`, webhookIDs); err != nil {
+		return fmt.Errorf("defer blocked deliveries: %w", err)
+	}
+	return nil
+}

@@ -196,9 +196,7 @@ func prepareScenario4Workload(ctx context.Context, db *sql.DB, receiverBaseURL s
 
 func drainScenario4(ctx context.Context, db *sql.DB, numWorkers int, profile scenario4Profile, policy retry.RetryPolicy) (time.Duration, error) {
 	plainSched := roundrobin.New()
-	outboxStore := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: profile.BreakerFailureThreshold,
-	}))
+	outboxStore := outbox.New(db, outbox.WithBreakerFiltering(profile.BreakerFailureThreshold > 0))
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()

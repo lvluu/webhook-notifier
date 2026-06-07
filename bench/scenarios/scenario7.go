@@ -115,10 +115,10 @@ type scenario7Result struct {
 
 // RunScenario7 executes the internal hardening Scenario 7, which is not part
 // of the assignment-facing proof map. All webhooks return 5xx, workers claim
-// batches of deliveries per Customer, and the batch breaker bookkeeping path
-// (MarkRetryBatch → batchRecordBreakerFailure) handles every failure in O(1)
-// set-based SQL instead of N+1 per-item queries. The scenario verifies that
-// all breakers open correctly under mass downstream outage.
+// batches of deliveries per Customer. The in-memory breaker records failures
+// after mark commits so breaker bookkeeping stays out of mark SQL. The
+// scenario verifies that all breakers open correctly under mass downstream
+// outage.
 func RunScenario7(ctx context.Context) error {
 	db, cleanup, err := openBenchDatabase(ctx)
 	if err != nil {
@@ -178,11 +178,11 @@ func runScenario7Phase(ctx context.Context, db *sql.DB, profile scenario7Profile
 	}
 
 	sched := roundrobin.New()
-	outboxStore := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: profile.BreakerFailureThreshold,
-		InitialCooldown:  profile.BreakerInitialCooldown,
-		MaxCooldown:      profile.BreakerMaxCooldown,
-	}))
+	outboxStore := outbox.New(db, outbox.WithBreakerFiltering(profile.BreakerFailureThreshold > 0))
+	webhookBreaker, err := newBenchBreaker(ctx, db, profile.BreakerFailureThreshold, profile.BreakerInitialCooldown, profile.BreakerMaxCooldown)
+	if err != nil {
+		return scenario7Result{}, err
+	}
 	httpClient := worker.NewHTTPClient(worker.DefaultHTTPConfig())
 	workerLog := slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -206,6 +206,7 @@ func runScenario7Phase(ctx context.Context, db *sql.DB, profile scenario7Profile
 					BaseDelay:   profile.RetryBaseDelay,
 					CapDelay:    profile.RetryCapDelay,
 				})),
+				worker.WithBreaker(webhookBreaker),
 				worker.WithLogger(workerLog),
 				worker.WithMinBatchHint(profile.MinBatchHint),
 			)
@@ -516,9 +517,8 @@ func writeScenario7Report(path string, profile scenario7Profile, result scenario
 Profile **%s**: %d Customers each own one Webhook. All webhooks point at a
 500-ing Integration Partner endpoint, simulating a downstream outage.
 Workers claim batches of up to **%d** deliveries per customer and mark
-them concurrently. Each batch of failures exercises the O(1) batch breaker
-bookkeeping path (`+"`batchRecordBreakerFailure`"+`), which replaces the
-N+1 per-item query pattern with set-based SQL.
+them concurrently. Each batch of failures exercises the in-memory breaker
+path after mark commits, which removes breaker bookkeeping from mark SQL.
 
 The breaker opens after **%d** consecutive 5xx responses.
 

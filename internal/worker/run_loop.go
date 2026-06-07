@@ -207,6 +207,12 @@ type classified struct {
 }
 
 func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, deliveries []outbox.Delivery) error {
+	for _, delivery := range deliveries {
+		if delivery.BreakerProbe && w.Breaker != nil {
+			w.Breaker.SetProbeDelivery(delivery.WebhookID, delivery.ID)
+		}
+	}
+
 	results := make([]classified, len(deliveries))
 	sem := make(chan struct{}, w.Config.DeliveryConcurrency)
 	var wg sync.WaitGroup
@@ -226,6 +232,10 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 
 	var succeeded, retries, dead []outbox.BatchMarkItem
 	var requeued []string
+	deliveryByID := make(map[string]outbox.Delivery, len(deliveries))
+	for _, delivery := range deliveries {
+		deliveryByID[delivery.ID] = delivery
+	}
 
 	for _, r := range results {
 		delivery, outcome := r.delivery, r.outcome
@@ -313,6 +323,7 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 			return fmt.Errorf("batch mark succeeded: %w", err)
 		}
 		for _, item := range succeeded {
+			w.recordBreakerSuccess(deliveryByID[item.DeliveryID])
 			customerClass := observe.CustomerClassFromValue(classByID[item.DeliveryID])
 			recordSucceededMetrics(customerClass, item.Lifetime.Seconds(), item.AttemptNumber)
 		}
@@ -321,18 +332,36 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 		if err := store.MarkRetryBatch(ctx, retries); err != nil {
 			return fmt.Errorf("batch mark retry: %w", err)
 		}
+		for _, item := range retries {
+			w.recordBreakerFailure(deliveryByID[item.DeliveryID], item.ErrorClass)
+		}
 	}
 	if len(dead) > 0 {
 		if err := store.MarkDeadBatch(ctx, dead); err != nil {
 			return fmt.Errorf("batch mark dead: %w", err)
 		}
 		for _, item := range dead {
+			w.recordBreakerFailure(deliveryByID[item.DeliveryID], item.Reason)
 			customerClass := observe.CustomerClassFromValue(classByID[item.DeliveryID])
 			recordDeadMetrics(customerClass, item.Lifetime.Seconds(), item.AttemptNumber, item.Reason)
 		}
 	}
 
 	return nil
+}
+
+func (w *Worker) recordBreakerSuccess(delivery outbox.Delivery) {
+	if w.Breaker == nil {
+		return
+	}
+	w.Breaker.RecordSuccess(delivery.WebhookID)
+}
+
+func (w *Worker) recordBreakerFailure(delivery outbox.Delivery, reason string) {
+	if w.Breaker == nil {
+		return
+	}
+	w.Breaker.RecordFailure(delivery.WebhookID, reason)
 }
 
 func (w *Worker) requeueDelay() time.Duration {

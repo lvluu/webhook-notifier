@@ -93,6 +93,12 @@ services:
       - "8"
       - -host-cap
       - "1000"
+      - -breaker-threshold
+      - "20"
+      - -breaker-initial-cooldown
+      - 5m
+      - -breaker-max-cooldown
+      - 15m
       - -discovery-interval
       - 10s
       - -empty-claim-backoff
@@ -170,7 +176,6 @@ services:
         condition: service_started
     profiles:
       - retention
-      - chaos
 
   chaos-whales:
     <<: *chaos-common

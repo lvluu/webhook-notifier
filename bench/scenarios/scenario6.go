@@ -167,9 +167,7 @@ func runScenario6Once(ctx context.Context, db *sql.DB, profile scenario6Profile,
 	}
 
 	sched := roundrobin.New()
-	outboxStore := newScenario6InstrumentedStore(outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: profile.BreakerFailureThreshold,
-	})))
+	outboxStore := newScenario6InstrumentedStore(outbox.New(db, outbox.WithBreakerFiltering(profile.BreakerFailureThreshold > 0)))
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()

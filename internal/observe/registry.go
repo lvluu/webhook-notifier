@@ -30,7 +30,7 @@ var (
 	WebhookIngestFanoutPerEvent         prometheus.Histogram
 	WebhookBreakerState                 *prometheus.GaugeVec
 	WebhookBreakerTripsTotal            *prometheus.CounterVec
-	WebhookPgNotifyBroadcastTotal           *prometheus.CounterVec
+	WebhookPgNotifyBroadcastTotal       *prometheus.CounterVec
 	WebhookWorkerTransientDBErrorsTotal *prometheus.CounterVec
 	metricsRegistrationWarned           atomic.Bool
 )

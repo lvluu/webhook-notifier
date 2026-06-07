@@ -101,20 +101,7 @@ func (s *Store) MarkSucceededBatch(ctx context.Context, items []BatchMarkItem) e
 	if marked != len(items) {
 		return fmt.Errorf("batch mark succeeded: marked %d of %d deliveries", marked, len(items))
 	}
-	if s.breakerConfig.FailureThreshold == 0 {
-		return s.commitBatchTx(tx, "success")
-	}
-	closedBreakers, err := s.batchRecordBreakerSuccess(ctx, tx, base.ids)
-	if err != nil {
-		return err
-	}
-	if err := s.commitBatchTx(tx, "success"); err != nil {
-		return err
-	}
-	for _, wid := range closedBreakers {
-		emitBreakerClosed(wid)
-	}
-	return nil
+	return s.commitBatchTx(tx, "success")
 }
 
 // MarkRetryBatch schedules multiple deliveries for retry in one round trip.
@@ -180,20 +167,7 @@ func (s *Store) MarkRetryBatch(ctx context.Context, items []BatchMarkItem) error
 	if marked != len(items) {
 		return fmt.Errorf("batch mark retry: marked %d of %d deliveries", marked, len(items))
 	}
-	if s.breakerConfig.FailureThreshold == 0 {
-		return s.commitBatchTx(tx, "retry")
-	}
-	trippedBreakers, err := s.batchRecordBreakerFailure(ctx, tx, retryBatch.ids, items, func(item BatchMarkItem) string { return item.ErrorClass })
-	if err != nil {
-		return err
-	}
-	if err := s.commitBatchTx(tx, "retry"); err != nil {
-		return err
-	}
-	for _, ev := range trippedBreakers {
-		emitBreakerOpened(ev.webhookID, ev.reason)
-	}
-	return nil
+	return s.commitBatchTx(tx, "retry")
 }
 
 // MarkDeadBatch marks multiple deliveries as dead in one round trip, recording
@@ -265,20 +239,7 @@ func (s *Store) MarkDeadBatch(ctx context.Context, items []BatchMarkItem) error 
 	if attemptsMarked != len(items) || deadLettersMarked != len(items) {
 		return fmt.Errorf("batch mark dead: marked %d attempts and %d dead letters of %d deliveries", attemptsMarked, deadLettersMarked, len(items))
 	}
-	if s.breakerConfig.FailureThreshold == 0 {
-		return s.commitBatchTx(tx, "dead")
-	}
-	trippedBreakers, err := s.batchRecordBreakerFailure(ctx, tx, deadBatch.ids, items, func(item BatchMarkItem) string { return item.Reason })
-	if err != nil {
-		return err
-	}
-	if err := s.commitBatchTx(tx, "dead"); err != nil {
-		return err
-	}
-	for _, ev := range trippedBreakers {
-		emitBreakerOpened(ev.webhookID, ev.reason)
-	}
-	return nil
+	return s.commitBatchTx(tx, "dead")
 }
 
 func prepareBatchBase(items []BatchMarkItem) (batchBase, error) {

@@ -99,9 +99,7 @@ func RunScenario3(ctx context.Context) error {
 	plainSched := roundrobin.New()
 	reg := registry.New(db)
 	ingestStore := ingest.New(db, reg, plainSched)
-	outboxStore := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: profile.BreakerFailureThreshold,
-	}))
+	outboxStore := outbox.New(db, outbox.WithBreakerFiltering(profile.BreakerFailureThreshold > 0))
 
 	startTime := time.Now()
 	if err := submitScenario3Events(ctx, ingestStore, profile.EventCount); err != nil {

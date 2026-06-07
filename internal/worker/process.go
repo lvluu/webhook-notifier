@@ -11,6 +11,10 @@ import (
 
 // Process sends a claimed Delivery and records its success, retry, or death.
 func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Delivery) ProcessResult {
+	if d.BreakerProbe && w.Breaker != nil {
+		w.Breaker.SetProbeDelivery(d.WebhookID, d.ID)
+	}
+
 	outcome := w.classifyDelivery(ctx, d)
 	if outcome.err != nil {
 		return ProcessResult{Err: outcome.err}
@@ -30,6 +34,7 @@ func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Deli
 	if outcome.reason == retry.ReasonSucceeded || (outcome.reason == "" && outcome.errorClass == "") {
 		resultErr := store.MarkSucceeded(ctx, d.ID, outcome.statusCode, outcome.duration)
 		if resultErr == nil {
+			w.recordBreakerSuccess(d)
 			recordSucceededMetrics(customerClass, outcome.lifetime.Seconds(), d.AttemptNumber)
 		}
 		log.Debug("delivery succeeded", "status_code", outcome.statusCode, "duration_ms", outcome.duration.Milliseconds())
@@ -38,6 +43,7 @@ func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Deli
 	if outcome.reason != "" {
 		resultErr := store.MarkDead(ctx, d.ID, outcome.statusCode, outcome.errorClass, outcome.reason, outcome.duration)
 		if resultErr == nil {
+			w.recordBreakerFailure(d, outcome.reason)
 			recordDeadMetrics(customerClass, outcome.lifetime.Seconds(), d.AttemptNumber, outcome.reason)
 		}
 		log.Warn("delivery dead", "reason", outcome.reason, "status_code", outcome.statusCode, "duration_ms", outcome.duration.Milliseconds())
@@ -45,6 +51,9 @@ func (w *Worker) Process(ctx context.Context, store DeliveryStore, d outbox.Deli
 	}
 
 	resultErr := store.MarkRetry(ctx, d.ID, outcome.statusCode, outcome.errorClass, outcome.delay, outcome.duration)
+	if resultErr == nil {
+		w.recordBreakerFailure(d, outcome.errorClass)
+	}
 	logArgs := []any{"reason", outcome.errorClass, "retry_delay_ms", outcome.delay.Milliseconds(), "status_code", outcome.statusCode, "duration_ms", outcome.duration.Milliseconds()}
 	log.Warn("delivery scheduled for retry", logArgs...)
 	return ProcessResult{Err: resultErr}

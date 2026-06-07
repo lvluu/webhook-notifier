@@ -48,10 +48,13 @@ state, plus the tuning knobs used by the service and benchmark harness.
 17. The Worker groups outcomes and writes set-based batch marks:
     `MarkSucceededBatch`, `MarkRetryBatch`, or `MarkDeadBatch`.
 18. Batch marks delete the `delivery_claims` row, insert Attempt records when
-    an HTTP Attempt happened, update `deliveries`, write `dead_letters` for
-    terminal failures, and update breaker state.
-19. Retryable Deliveries become claimable again when `next_attempt_at <= now()`.
-20. Terminal Deliveries remain in the live queue for the retention window, then
+    an HTTP Attempt happened, update `deliveries`, and write `dead_letters` for
+    terminal failures. They do not update `webhooks`.
+19. After the mark commit, the Worker records the outcome in the in-memory
+    Webhook Circuit Breaker. Only breaker state transitions are persisted
+    asynchronously.
+20. Retryable Deliveries become claimable again when `next_attempt_at <= now()`.
+21. Terminal Deliveries remain in the live queue for the retention window, then
     the retention command archives them to `delivery_history`.
 
 ## Demo And Bench Commands

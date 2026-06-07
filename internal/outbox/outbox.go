@@ -46,39 +46,6 @@ const (
 	BreakerStateHalfOpen = "half_open"
 )
 
-// BreakerConfig controls persisted per-Webhook circuit breaker transitions.
-// A FailureThreshold of 0 disables breaker tripping entirely.
-type BreakerConfig struct {
-	FailureThreshold int
-	InitialCooldown  time.Duration
-	MaxCooldown      time.Duration
-}
-
-func defaultBreakerConfig() BreakerConfig {
-	return BreakerConfig{
-		FailureThreshold: 20,
-		InitialCooldown:  5 * time.Minute,
-		MaxCooldown:      15 * time.Minute,
-	}
-}
-
-func normalizeBreakerConfig(config BreakerConfig) BreakerConfig {
-	defaults := defaultBreakerConfig()
-	if config.FailureThreshold < 0 {
-		config.FailureThreshold = defaults.FailureThreshold
-	}
-	if config.InitialCooldown <= 0 {
-		config.InitialCooldown = defaults.InitialCooldown
-	}
-	if config.MaxCooldown <= 0 {
-		config.MaxCooldown = defaults.MaxCooldown
-	}
-	if config.MaxCooldown < config.InitialCooldown {
-		config.MaxCooldown = config.InitialCooldown
-	}
-	return config
-}
-
 // Delivery is a claimed outbox row with enough data for the worker to POST it.
 type Delivery struct {
 	ID            string
@@ -99,13 +66,14 @@ type Delivery struct {
 	LastError     sql.NullString
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+	BreakerProbe  bool
 }
 
 // Store claims and mutates Delivery rows in Postgres.
 type Store struct {
-	db            *sql.DB
-	claimLease    time.Duration
-	breakerConfig BreakerConfig
+	db               *sql.DB
+	claimLease       time.Duration
+	breakerFiltering bool
 }
 
 // Option configures a Store.
@@ -121,19 +89,21 @@ func WithClaimLease(claimLease time.Duration) Option {
 	}
 }
 
-// WithBreakerConfig configures per-Webhook circuit breaker transitions.
-func WithBreakerConfig(config BreakerConfig) Option {
+// WithBreakerFiltering configures whether claim queries respect persisted
+// Webhook circuit breaker state. Breaker decision-making lives in
+// internal/breaker; this only controls the DB claim predicate.
+func WithBreakerFiltering(enabled bool) Option {
 	return func(s *Store) {
-		s.breakerConfig = normalizeBreakerConfig(config)
+		s.breakerFiltering = enabled
 	}
 }
 
 // New returns an outbox store backed by db.
 func New(db *sql.DB, opts ...Option) *Store {
 	store := &Store{
-		db:            db,
-		claimLease:    DefaultClaimLease,
-		breakerConfig: defaultBreakerConfig(),
+		db:               db,
+		claimLease:       DefaultClaimLease,
+		breakerFiltering: true,
 	}
 	for _, opt := range opts {
 		opt(store)

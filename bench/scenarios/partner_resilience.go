@@ -243,9 +243,7 @@ func runPartnerResiliencePhaseA(ctx context.Context, db *sql.DB, profile partner
 	plainSched := roundrobin.New()
 	reg := registry.New(db)
 	ingestStore := ingest.New(db, reg, plainSched)
-	outboxStore := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: 0,
-	}))
+	outboxStore := outbox.New(db, outbox.WithBreakerFiltering(false))
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()
@@ -397,9 +395,7 @@ func runPartnerResiliencePhaseB(ctx context.Context, db *sql.DB, profile partner
 	plainSched := roundrobin.New()
 	reg := registry.New(db)
 	ingestStore := ingest.New(db, reg, plainSched)
-	outboxStore := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: 0,
-	}))
+	outboxStore := outbox.New(db, outbox.WithBreakerFiltering(false))
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()
@@ -687,11 +683,11 @@ func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile part
 
 	baseline := runtime.NumGoroutine()
 	sched := roundrobin.New()
-	outboxStore := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: profile.BreakerFailureThreshold,
-		InitialCooldown:  profile.BreakerInitialCooldown,
-		MaxCooldown:      profile.BreakerMaxCooldown,
-	}))
+	outboxStore := outbox.New(db, outbox.WithBreakerFiltering(profile.BreakerFailureThreshold > 0))
+	webhookBreaker, err := newBenchBreaker(ctx, db, profile.BreakerFailureThreshold, profile.BreakerInitialCooldown, profile.BreakerMaxCooldown)
+	if err != nil {
+		return prPhaseCRunResult{}, err
+	}
 	httpClient, err := partnerResilienceHTTPClientForHosts(rs.URL(), phaseCHosts)
 	if err != nil {
 		return prPhaseCRunResult{}, fmt.Errorf("http client: %w", err)
@@ -721,6 +717,7 @@ func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile part
 				worker.WithMinBatchHint(1),
 				worker.WithDeliveryConcurrency(1),
 				worker.WithRetryPolicy(retry.New(retry.Config{MaxAttempts: 20, BaseDelay: 50 * time.Millisecond, CapDelay: 50 * time.Millisecond})),
+				worker.WithBreaker(webhookBreaker),
 				worker.WithLogger(workerLog))
 			if err := w.Run(workerCtx, outboxStore); err != nil && workerCtx.Err() == nil {
 				slog.Error("phase-C worker failed", "worker_id", id, "error", err)

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/lvluu/webhook-notifier/internal/outbox"
-	"github.com/lvluu/webhook-notifier/internal/retry"
 )
 
 // TestClaimThroughput_OpenBreakerBallast measures claim-path cost when a
@@ -30,22 +29,11 @@ func TestClaimThroughput_OpenBreakerBallast(t *testing.T) {
 
 	webhookID := bulkSeedReadyBacklog(t, ctx, db, customerID, backlog)
 
-	store := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: 2,
-		InitialCooldown:  time.Hour, // stays open for the whole measurement
-		MaxCooldown:      time.Hour,
-	}))
+	store := outbox.New(db, outbox.WithBreakerFiltering(true))
 
-	// Trip the breaker via the real path (two failed attempts on this webhook).
-	c1 := waitForClaim(t, ctx, store, customerID, 2*time.Second)
-	if err := store.MarkRetry(ctx, c1.ID, 500, retry.ReasonRetryable5xx, time.Millisecond, 0); err != nil {
-		t.Fatalf("MarkRetry 1: %v", err)
-	}
-	c2 := waitForClaim(t, ctx, store, customerID, 2*time.Second)
-	if err := store.MarkRetry(ctx, c2.ID, 500, retry.ReasonRetryable5xx, time.Millisecond, 0); err != nil {
-		t.Fatalf("MarkRetry 2: %v", err)
-	}
-	assertWebhookBreaker(t, ctx, db, c1.ID, "open", 2)
+	firstDeliveryID := firstDeliveryForWebhook(t, ctx, db, webhookID)
+	persistBreakerOpenForDelivery(t, ctx, db, firstDeliveryID, 2, time.Hour)
+	assertWebhookBreaker(t, ctx, db, firstDeliveryID, "open", 2)
 	_ = webhookID
 
 	if _, err := db.ExecContext(ctx, `ANALYZE deliveries, webhooks, delivery_claims`); err != nil {
@@ -100,4 +88,19 @@ func bulkSeedReadyBacklog(t *testing.T, ctx context.Context, db *sql.DB, custome
 		t.Fatalf("bulk seed deliveries: %v", err)
 	}
 	return webhookID
+}
+
+func firstDeliveryForWebhook(t *testing.T, ctx context.Context, db *sql.DB, webhookID string) string {
+	t.Helper()
+	var deliveryID string
+	if err := db.QueryRowContext(ctx, `
+		SELECT id::text
+		FROM deliveries
+		WHERE webhook_id = $1::uuid
+		ORDER BY created_at, id
+		LIMIT 1
+	`, webhookID).Scan(&deliveryID); err != nil {
+		t.Fatalf("first delivery for webhook: %v", err)
+	}
+	return deliveryID
 }
