@@ -3,6 +3,7 @@ package outbox
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSqlFragmentsReady(t *testing.T) {
@@ -106,4 +107,70 @@ func TestSqlFragmentsAnyRejectsDynamicInput(t *testing.T) {
 		}
 	}()
 	sel.Any(5000)
+}
+
+func TestStoreFragmentsWithCustomClaimLease(t *testing.T) {
+	s := New(nil, WithClaimLease(30*time.Second))
+	if !strings.Contains(s.staleSQL, "30000") {
+		t.Errorf("staleSQL with 30s lease should contain 30000ms, got: %s", s.staleSQL)
+	}
+	if !strings.Contains(s.anySQL, "30000") {
+		t.Errorf("anySQL with 30s lease should contain 30000ms, got: %s", s.anySQL)
+	}
+}
+
+func TestStoreFragmentsWithDefaultClaimLease(t *testing.T) {
+	s := New(nil)
+	if !strings.Contains(s.staleSQL, "300000") {
+		t.Errorf("staleSQL with default 5m lease should contain 300000ms, got: %s", s.staleSQL)
+	}
+}
+
+func TestStoreFragmentsWithShortClaimLease(t *testing.T) {
+	s := New(nil, WithClaimLease(100*time.Millisecond))
+	if !strings.Contains(s.staleSQL, "100") {
+		t.Errorf("staleSQL with 100ms lease should contain 100, got: %s", s.staleSQL)
+	}
+}
+
+func TestStoreFragmentsReadyWithoutClaim(t *testing.T) {
+	if !strings.Contains(sqlReadyWithoutClaim, "d.status IN ('pending', 'failed_retry')") {
+		t.Error("sqlReadyWithoutClaim missing status clause")
+	}
+	if !strings.Contains(sqlReadyWithoutClaim, "d.next_attempt_at <= now()") {
+		t.Error("sqlReadyWithoutClaim missing next_attempt_at clause")
+	}
+	if strings.Contains(sqlReadyWithoutClaim, "dc.delivery_id IS NULL") {
+		t.Error("sqlReadyWithoutClaim should NOT contain claim alias clause")
+	}
+	if strings.Contains(sqlReadyWithoutClaim, "$") {
+		t.Errorf("sqlReadyWithoutClaim must not contain positional parameters, got: %s", sqlReadyWithoutClaim)
+	}
+}
+
+func TestStoreFragmentsAnyCompositionOrder(t *testing.T) {
+	s := New(nil)
+	// anySQL should wrap ready and stale in parentheses with OR
+	if !strings.HasPrefix(s.anySQL, "(") {
+		t.Error("anySQL should start with opening paren")
+	}
+	if !strings.HasSuffix(s.anySQL, ")") {
+		t.Error("anySQL should end with closing paren")
+	}
+	// Should contain OR between the two fragments
+	readyIdx := strings.Index(s.anySQL, sqlReady)
+	staleIdx := strings.Index(s.anySQL, s.staleSQL)
+	orIdx := strings.Index(s.anySQL, "OR")
+	if readyIdx < 0 {
+		t.Error("anySQL missing sqlReady")
+	}
+	if staleIdx < 0 {
+		t.Error("anySQL missing staleSQL")
+	}
+	if orIdx < 0 {
+		t.Error("anySQL missing OR")
+	}
+	if orIdx < readyIdx || orIdx > staleIdx {
+		t.Error("OR should appear between ready and stale fragments")
+	}
 }

@@ -64,7 +64,8 @@ func (w *Worker) classifyDelivery(ctx context.Context, d outbox.Delivery) delive
 		defer release()
 	}
 
-	lifetime := time.Since(d.CreatedAt)
+	createdAt := d.CreatedAt
+	lifetime := time.Since(createdAt)
 
 	// Pre-flight MaxAge check
 	_, terminal, reason := w.RetryPolicy.NextWithKey(d.AttemptNumber, d.PreviousDelay, nil, nil, d.ID, lifetime)
@@ -97,7 +98,7 @@ func (w *Worker) classifyDelivery(ctx context.Context, d outbox.Delivery) delive
 	})
 	duration := time.Since(started)
 	observe.ObservePostDuration(customerClass, duration.Seconds())
-	lifetime = time.Since(d.CreatedAt)
+	lifetime = time.Since(createdAt)
 
 	if resp != nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
