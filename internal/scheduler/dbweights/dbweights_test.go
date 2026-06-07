@@ -155,33 +155,6 @@ func TestWeight_RefreshInvalidatesCache(t *testing.T) {
 	}
 }
 
-func TestWeight_RefreshAll(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	db := newTestDB(t, ctx)
-	seedCustomer(t, ctx, db, "a", 1)
-	seedCustomer(t, ctx, db, "b", 2)
-
-	ws := dbweights.New(db)
-
-	// Prime the cache.
-	ws.Weight("a")
-	ws.Weight("b")
-
-	// Change both in DB.
-	seedCustomer(t, ctx, db, "a", 10)
-	seedCustomer(t, ctx, db, "b", 20)
-
-	ws.RefreshAll()
-
-	if w := ws.Weight("a"); w != 10 {
-		t.Errorf("a weight = %d, want 10", w)
-	}
-	if w := ws.Weight("b"); w != 20 {
-		t.Errorf("b weight = %d, want 20", w)
-	}
-}
-
 func TestWeight_EmptyID(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

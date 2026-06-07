@@ -189,18 +189,18 @@ func TestPgNotifyBroadcaster_PrunesStaleCooldownEntries(t *testing.T) {
 	broadcaster := newPgNotifyBroadcaster(executor, slogDiscard(), "customer_ready", 1)
 	broadcaster.now = func() time.Time { return now }
 
-	broadcaster.mu.Lock()
 	for i := 0; i < 1025; i++ {
-		broadcaster.lastBroadcastByCustomer[fmt.Sprintf("stale_%d", i)] = now.Add(-11 * pgNotifyBroadcastCooldown)
+		broadcaster.storeCooldown(fmt.Sprintf("stale_%d", i), now.Add(-11*pgNotifyBroadcastCooldown))
 	}
-	broadcaster.mu.Unlock()
 
 	broadcaster.broadcast(context.Background(), "cus_1")
 
-	broadcaster.mu.Lock()
-	entryCount := len(broadcaster.lastBroadcastByCustomer)
-	_, keptCurrent := broadcaster.lastBroadcastByCustomer["cus_1"]
-	broadcaster.mu.Unlock()
+	entryCount := 0
+	broadcaster.lastBroadcastByCustomer.Range(func(_, _ any) bool {
+		entryCount++
+		return true
+	})
+	_, keptCurrent := broadcaster.lastBroadcastByCustomer.Load("cus_1")
 
 	if entryCount != 1 {
 		t.Fatalf("cooldown entries: got %d, want 1", entryCount)
@@ -208,6 +208,28 @@ func TestPgNotifyBroadcaster_PrunesStaleCooldownEntries(t *testing.T) {
 	if !keptCurrent {
 		t.Fatal("current Customer cooldown entry was pruned")
 	}
+}
+
+func TestPgNotifyBroadcaster_PrunesWithoutPendingMutex(t *testing.T) {
+	now := time.Now()
+	broadcaster := newPgNotifyBroadcaster(&recordingPgNotifyExecutor{}, slogDiscard(), "customer_ready", 1)
+	broadcaster.now = func() time.Time { return now }
+	broadcaster.storeCooldown("stale", now.Add(-11*pgNotifyBroadcastCooldown))
+
+	broadcaster.mu.Lock()
+	done := make(chan struct{})
+	go func() {
+		broadcaster.pruneStaleEntries()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		broadcaster.mu.Unlock()
+		t.Fatal("pruning blocked on the pending mutex")
+	}
+	broadcaster.mu.Unlock()
 }
 
 func waitForStartedCustomer(t *testing.T, started <-chan string, want string) {

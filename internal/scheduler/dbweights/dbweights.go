@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/lvluu/webhook-notifier/internal/scheduler"
 )
 
@@ -15,11 +17,12 @@ const defaultQueryTimeout = 2 * time.Second
 
 // DBWeightSource resolves Customer fairness weights from the customers table,
 // caching results in memory to avoid per-Pick DB queries. Unknown customers
-// default to weight 1. Use Refresh / RefreshAll to re-read changed classes.
+// default to weight 1. Use Refresh to re-read changed classes.
 type DBWeightSource struct {
-	db    *sql.DB
-	mu    sync.RWMutex
-	cache map[scheduler.CustomerID]uint32
+	db     *sql.DB
+	mu     sync.RWMutex
+	cache  map[scheduler.CustomerID]uint32
+	flight singleflight.Group
 }
 
 // New returns a DBWeightSource backed by db.
@@ -43,16 +46,18 @@ func (s *DBWeightSource) Weight(customerID scheduler.CustomerID) uint32 {
 		return w
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if w, ok := s.cache[customerID]; ok {
-		return w
-	}
-
-	w = s.loadWeight(customerID)
-	s.cache[customerID] = w
-	return w
+	// Cache miss: use singleflight to coalesce concurrent loads for the same
+	// customer into a single DB query. The exclusive write lock is acquired only
+	// after the query returns, so other Weight callers are not blocked for the
+	// duration of the round trip.
+	v, _, _ := s.flight.Do(customerID, func() (any, error) {
+		w := s.loadWeight(customerID)
+		s.mu.Lock()
+		s.cache[customerID] = w
+		s.mu.Unlock()
+		return w, nil
+	})
+	return v.(uint32)
 }
 
 // Refresh invalidates the cache entry for customerID and reloads from DB.
@@ -65,15 +70,6 @@ func (s *DBWeightSource) Refresh(customerID scheduler.CustomerID) {
 
 	s.mu.Lock()
 	s.cache[customerID] = w
-	s.mu.Unlock()
-}
-
-// RefreshAll reloads every cached weight from the DB.
-func (s *DBWeightSource) RefreshAll() {
-	s.mu.Lock()
-	for id := range s.cache {
-		s.cache[id] = s.loadWeight(id)
-	}
 	s.mu.Unlock()
 }
 

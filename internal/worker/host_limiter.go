@@ -33,8 +33,7 @@ func (c HostLimiterConfig) defaults() HostLimiterConfig {
 
 // HostLimiter caps concurrent in-flight requests per partner hostname.
 type HostLimiter struct {
-	mu   sync.Mutex
-	sems map[string]*semaphore.Weighted
+	sems sync.Map
 	cfg  HostLimiterConfig
 }
 
@@ -42,18 +41,17 @@ type HostLimiter struct {
 func NewHostLimiter(cfg HostLimiterConfig) *HostLimiter {
 	cfg = cfg.defaults()
 	return &HostLimiter{
-		sems: make(map[string]*semaphore.Weighted),
-		cfg:  cfg,
+		cfg: cfg,
 	}
 }
 
 func (h *HostLimiter) semFor(host string) *semaphore.Weighted {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.sems[host] == nil {
-		h.sems[host] = semaphore.NewWeighted(int64(h.cfg.MaxPerHost))
+	if v, ok := h.sems.Load(host); ok {
+		return v.(*semaphore.Weighted)
 	}
-	return h.sems[host]
+	sem := semaphore.NewWeighted(int64(h.cfg.MaxPerHost))
+	actual, _ := h.sems.LoadOrStore(host, sem)
+	return actual.(*semaphore.Weighted)
 }
 
 // Acquire blocks until a slot for host is available or the configured timeout

@@ -9,6 +9,16 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/observe"
 )
 
+// claimCtx returns a child context with s.claimTimeout applied, plus a cancel
+// func. When claimTimeout is zero the original ctx and a no-op cancel are
+// returned so callers can unconditionally defer cancel().
+func (s *Store) claimCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	if s.claimTimeout > 0 {
+		return context.WithTimeout(parent, s.claimTimeout)
+	}
+	return parent, func() {}
+}
+
 // ClaimNextBatch claims up to limit ready Deliveries across the given customer
 // IDs. It is a multi-customer generalization of ClaimNextN that amortises the
 // DB round-trip when individual customers are sparse — the sparse-Customer
@@ -49,6 +59,8 @@ func perCustomerClaimLimit(limit, numCustomers int) int {
 }
 
 func (s *Store) claimNextBatchWithoutBreaker(ctx context.Context, customerIDs []string, limit int) ([]Delivery, error) {
+	ctx, cancel := s.claimCtx(ctx)
+	defer cancel()
 	claimStarted := time.Now()
 	perCustomerLimit := perCustomerClaimLimit(limit, len(customerIDs))
 	claimSelection := sqlClaimSelectionFor("d", "dc")
@@ -128,6 +140,8 @@ func (s *Store) claimNextBatchWithoutBreaker(ctx context.Context, customerIDs []
 }
 
 func (s *Store) claimNextBatchWithBreaker(ctx context.Context, customerIDs []string, limit int) ([]Delivery, error) {
+	ctx, cancel := s.claimCtx(ctx)
+	defer cancel()
 	claimStarted := time.Now()
 	perCustomerLimit := perCustomerClaimLimit(limit, len(customerIDs))
 
@@ -254,6 +268,9 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 		return s.claimNextNWithoutBreaker(ctx, customerID, limit)
 	}
 
+	ctx, cancel := s.claimCtx(ctx)
+	defer cancel()
+
 	claimStarted := time.Now()
 
 	claimSelection := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
@@ -332,6 +349,8 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 }
 
 func (s *Store) claimNextNWithoutBreaker(ctx context.Context, customerID string, limit int) ([]Delivery, error) {
+	ctx, cancel := s.claimCtx(ctx)
+	defer cancel()
 	claimStarted := time.Now()
 	claimSelection := sqlClaimSelectionFor("d", "dc")
 
@@ -428,6 +447,8 @@ func scanClaimedDeliveries(rows *sql.Rows) ([]Delivery, error) {
 // anti-join once unclaimed rows went sparse). Dropping the anti-join lets each
 // step stop at the first ready row per customer.
 func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID string, limit int) ([]string, error) {
+	ctx, cancel := s.claimCtx(ctx)
+	defer cancel()
 	if limit < 1 {
 		return nil, fmt.Errorf("limit must be >= 1")
 	}
@@ -524,6 +545,8 @@ func (s *Store) HasClaimableWorkBatch(ctx context.Context, customerIDs []string)
 }
 
 func (s *Store) hasClaimableWorkBatchWithoutBreaker(ctx context.Context, customerIDs []string) (map[string]bool, error) {
+	ctx, cancel := s.claimCtx(ctx)
+	defer cancel()
 	claimSelection := sqlClaimSelectionFor("d", "dc")
 
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
@@ -551,6 +574,8 @@ func (s *Store) hasClaimableWorkBatchWithoutBreaker(ctx context.Context, custome
 }
 
 func (s *Store) hasClaimableWorkBatchWithBreaker(ctx context.Context, customerIDs []string) (map[string]bool, error) {
+	ctx, cancel := s.claimCtx(ctx)
+	defer cancel()
 	claimSelection := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
 	breakerEligible := claimSelection.BreakerEligible()
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
@@ -597,6 +622,8 @@ func scanClaimableWorkBatch(rows *sql.Rows, capacity int) (map[string]bool, erro
 }
 
 func (s *Store) hasClaimableWorkSplit(ctx context.Context, customerID string) (bool, error) {
+	ctx, cancel := s.claimCtx(ctx)
+	defer cancel()
 	var exists bool
 	claimSelection := sqlClaimSelectionFor("d", "dc")
 	if !s.breakerFiltering {

@@ -13,6 +13,12 @@ const (
 	// before another worker may recover it.
 	DefaultClaimLease = 5 * time.Minute
 
+	// DefaultClaimTimeout is the maximum time a single claim or discovery query
+	// may run. Prevents a stalled Postgres connection from blocking a worker
+	// indefinitely; the worker will receive a context.DeadlineExceeded error
+	// and retry after transientErrorBackoff.
+	DefaultClaimTimeout = 10 * time.Second
+
 	// StatusPending means the Delivery has not been attempted yet.
 	StatusPending DeliveryStatus = "pending"
 	// StatusInFlight means a worker has claimed the Delivery (logical status
@@ -74,6 +80,7 @@ type Store struct {
 	db               *sql.DB
 	claimLease       time.Duration
 	breakerFiltering bool
+	claimTimeout     time.Duration
 }
 
 // Option configures a Store.
@@ -98,12 +105,22 @@ func WithBreakerFiltering(enabled bool) Option {
 	}
 }
 
+// WithClaimTimeout sets the maximum duration for a single claim or
+// claimable-customer discovery query. Defaults to DefaultClaimTimeout.
+// A value of 0 disables the per-query deadline.
+func WithClaimTimeout(d time.Duration) Option {
+	return func(s *Store) {
+		s.claimTimeout = d
+	}
+}
+
 // New returns an outbox store backed by db.
 func New(db *sql.DB, opts ...Option) *Store {
 	store := &Store{
 		db:               db,
 		claimLease:       DefaultClaimLease,
 		breakerFiltering: true,
+		claimTimeout:     DefaultClaimTimeout,
 	}
 	for _, opt := range opts {
 		opt(store)

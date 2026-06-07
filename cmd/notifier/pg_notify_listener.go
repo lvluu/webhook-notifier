@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -41,7 +42,8 @@ type pgNotifyBroadcaster struct {
 	now        func() time.Time
 
 	mu                      sync.Mutex
-	lastBroadcastByCustomer map[string]time.Time
+	lastBroadcastByCustomer sync.Map
+	cooldownEntryCount      atomic.Int64
 	pending                 map[string]struct{}
 }
 
@@ -67,8 +69,7 @@ func newPgNotifyBroadcaster(executor pgNotifyExecutor, logger *slog.Logger, noti
 		queue:      make(chan string, queueSize),
 		now:        time.Now,
 
-		lastBroadcastByCustomer: make(map[string]time.Time),
-		pending:                 make(map[string]struct{}),
+		pending: make(map[string]struct{}),
 	}
 }
 
@@ -85,9 +86,11 @@ func (b *pgNotifyBroadcaster) Notify(customerID string) {
 		return
 	}
 	now := b.now()
-	if lastBroadcast := b.lastBroadcastByCustomer[customerID]; now.Sub(lastBroadcast) < b.cooldown {
-		observe.IncPgNotifyBroadcast("coalesced")
-		return
+	if last, ok := b.lastBroadcastByCustomer.Load(customerID); ok {
+		if now.Sub(last.(time.Time)) < b.cooldown {
+			observe.IncPgNotifyBroadcast("coalesced")
+			return
+		}
 	}
 
 	select {
@@ -111,18 +114,17 @@ func (b *pgNotifyBroadcaster) Run(ctx context.Context) error {
 
 func (b *pgNotifyBroadcaster) broadcast(parent context.Context, customerID string) {
 	defer func() {
+		// Update pending state and record cooldown timestamp — brief, no iteration.
 		b.mu.Lock()
 		delete(b.pending, customerID)
-		b.lastBroadcastByCustomer[customerID] = b.now()
-		if len(b.lastBroadcastByCustomer) > 1024 {
-			deadline := b.now().Add(-10 * b.cooldown)
-			for id, last := range b.lastBroadcastByCustomer {
-				if last.Before(deadline) {
-					delete(b.lastBroadcastByCustomer, id)
-				}
-			}
-		}
+		b.storeCooldown(customerID, b.now())
 		b.mu.Unlock()
+
+		// sync.Map iteration does not hold the pending mutex, so concurrent Notify
+		// calls can continue while stale cooldown entries are scanned.
+		if b.cooldownEntryCount.Load() > 1024 {
+			b.pruneStaleEntries()
+		}
 	}()
 
 	ctx, cancel := context.WithTimeout(parent, b.timeout)
@@ -135,6 +137,35 @@ func (b *pgNotifyBroadcaster) broadcast(parent context.Context, customerID strin
 		return
 	}
 	observe.IncPgNotifyBroadcast("sent")
+}
+
+// pruneStaleEntries removes cooldown map entries that are older than
+// 10x the cooldown window. Called from the broadcast defer after the
+// primary mutex section so Notify callers are not blocked for the scan.
+func (b *pgNotifyBroadcaster) pruneStaleEntries() {
+	deadline := b.now().Add(-10 * b.cooldown)
+	b.lastBroadcastByCustomer.Range(func(id, last any) bool {
+		if last.(time.Time).Before(deadline) && b.lastBroadcastByCustomer.CompareAndDelete(id, last) {
+			b.cooldownEntryCount.Add(-1)
+		}
+		return true
+	})
+}
+
+func (b *pgNotifyBroadcaster) storeCooldown(customerID string, timestamp time.Time) {
+	for {
+		last, loaded := b.lastBroadcastByCustomer.Load(customerID)
+		if !loaded {
+			if _, loaded = b.lastBroadcastByCustomer.LoadOrStore(customerID, timestamp); !loaded {
+				b.cooldownEntryCount.Add(1)
+				return
+			}
+			continue
+		}
+		if b.lastBroadcastByCustomer.CompareAndSwap(customerID, last, timestamp) {
+			return
+		}
+	}
 }
 
 func runCustomerWakeListener(ctx context.Context, logger *slog.Logger, dsn string, notifyChan string, sched roundrobinScheduler) error {
