@@ -409,6 +409,13 @@ func (r *recordingDeliveryStore) MarkDeadBatch(context.Context, []outbox.BatchMa
 	return nil
 }
 
+func (r *recordingDeliveryStore) MarkOutcomesBatch(_ context.Context, succeeded, retries, dead []outbox.BatchMarkItem) error {
+	r.succeeded += len(succeeded)
+	r.retried += len(retries)
+	r.dead += len(dead)
+	return nil
+}
+
 type claimLimitStore struct {
 	recordingDeliveryStore
 
@@ -500,6 +507,9 @@ func (s *removeOnEmptyClaimStore) MarkRetryBatch(context.Context, []outbox.Batch
 func (s *removeOnEmptyClaimStore) MarkDeadBatch(context.Context, []outbox.BatchMarkItem) error {
 	return nil
 }
+func (s *removeOnEmptyClaimStore) MarkOutcomesBatch(context.Context, []outbox.BatchMarkItem, []outbox.BatchMarkItem, []outbox.BatchMarkItem) error {
+	return nil
+}
 
 // requeueBatchStore returns a single batch of deliveries on the first claim
 // then drains. It records RequeueBatch invocations so a Run-driven test can
@@ -563,6 +573,9 @@ func (s *requeueBatchStore) MarkRetryBatch(context.Context, []outbox.BatchMarkIt
 	return nil
 }
 func (s *requeueBatchStore) MarkDeadBatch(context.Context, []outbox.BatchMarkItem) error {
+	return nil
+}
+func (s *requeueBatchStore) MarkOutcomesBatch(context.Context, []outbox.BatchMarkItem, []outbox.BatchMarkItem, []outbox.BatchMarkItem) error {
 	return nil
 }
 
@@ -958,6 +971,15 @@ func (s *whaleBatchStore) MarkSucceededBatch(_ context.Context, items []outbox.B
 }
 func (s *whaleBatchStore) MarkRetryBatch(context.Context, []outbox.BatchMarkItem) error { return nil }
 func (s *whaleBatchStore) MarkDeadBatch(context.Context, []outbox.BatchMarkItem) error  { return nil }
+func (s *whaleBatchStore) MarkOutcomesBatch(_ context.Context, succeeded, _ []outbox.BatchMarkItem, _ []outbox.BatchMarkItem) error {
+	s.mu.Lock()
+	for _, item := range succeeded {
+		s.succeeded = append(s.succeeded, item.DeliveryID)
+	}
+	s.mu.Unlock()
+	s.once.Do(func() { close(s.done) })
+	return nil
+}
 
 // TestRun_MultiClaimKeepsClaimableEmptyCustomersAndDropsExhausted verifies the
 // claimMulti rotation bookkeeping when a whale monopolizes a multi-customer
@@ -1058,8 +1080,8 @@ func TestNew_DefaultHTTPClientUsesTunedTransport(t *testing.T) {
 	if transport.MaxIdleConnsPerHost != 500 {
 		t.Errorf("MaxIdleConnsPerHost: got %d, want 500", transport.MaxIdleConnsPerHost)
 	}
-	if transport.MaxConnsPerHost != 0 {
-		t.Errorf("MaxConnsPerHost: got %d, want 0", transport.MaxConnsPerHost)
+	if transport.MaxConnsPerHost != 500 {
+		t.Errorf("MaxConnsPerHost: got %d, want 500", transport.MaxConnsPerHost)
 	}
 	if transport.IdleConnTimeout != 90*time.Second {
 		t.Errorf("IdleConnTimeout: got %s, want 90s", transport.IdleConnTimeout)

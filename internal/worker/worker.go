@@ -56,6 +56,7 @@ type DeliveryStore interface {
 	MarkSucceededBatch(ctx context.Context, items []outbox.BatchMarkItem) error
 	MarkRetryBatch(ctx context.Context, items []outbox.BatchMarkItem) error
 	MarkDeadBatch(ctx context.Context, items []outbox.BatchMarkItem) error
+	MarkOutcomesBatch(ctx context.Context, succeeded, retries, dead []outbox.BatchMarkItem) error
 }
 
 // Worker sends webhook Deliveries and records retry outcomes.

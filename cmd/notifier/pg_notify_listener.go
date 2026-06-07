@@ -111,18 +111,18 @@ func (b *pgNotifyBroadcaster) Run(ctx context.Context) error {
 
 func (b *pgNotifyBroadcaster) broadcast(parent context.Context, customerID string) {
 	defer func() {
+		// Update pending state and record cooldown timestamp — brief, no iteration.
 		b.mu.Lock()
 		delete(b.pending, customerID)
 		b.lastBroadcastByCustomer[customerID] = b.now()
-		if len(b.lastBroadcastByCustomer) > 1024 {
-			deadline := b.now().Add(-10 * b.cooldown)
-			for id, last := range b.lastBroadcastByCustomer {
-				if last.Before(deadline) {
-					delete(b.lastBroadcastByCustomer, id)
-				}
-			}
-		}
+		overLimit := len(b.lastBroadcastByCustomer) > 1024
 		b.mu.Unlock()
+
+		// Prune stale entries after releasing the lock so that concurrent Notify
+		// callers are not blocked for the O(n) scan duration.
+		if overLimit {
+			b.pruneStaleEntries()
+		}
 	}()
 
 	ctx, cancel := context.WithTimeout(parent, b.timeout)
@@ -135,6 +135,20 @@ func (b *pgNotifyBroadcaster) broadcast(parent context.Context, customerID strin
 		return
 	}
 	observe.IncPgNotifyBroadcast("sent")
+}
+
+// pruneStaleEntries removes cooldown map entries that are older than
+// 10x the cooldown window. Called from the broadcast defer after the
+// primary mutex section so Notify callers are not blocked for the scan.
+func (b *pgNotifyBroadcaster) pruneStaleEntries() {
+	deadline := b.now().Add(-10 * b.cooldown)
+	b.mu.Lock()
+	for id, last := range b.lastBroadcastByCustomer {
+		if last.Before(deadline) {
+			delete(b.lastBroadcastByCustomer, id)
+		}
+	}
+	b.mu.Unlock()
 }
 
 func runCustomerWakeListener(ctx context.Context, logger *slog.Logger, dsn string, notifyChan string, sched roundrobinScheduler) error {

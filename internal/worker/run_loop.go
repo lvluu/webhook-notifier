@@ -155,6 +155,23 @@ func (w *Worker) claimMulti(ctx context.Context, store DeliveryStore) ([]outbox.
 		return nil, nil
 	}
 
+	// Ensure each customer sent to ClaimNextBatch gets at least 2 LATERAL claim
+	// slots (perCustomerClaimLimit >= 2). When totalLimit is small relative to
+	// the number of picked customers the per-customer share would floor to 1,
+	// causing N LATERAL subqueries that each lock exactly 1 row — wasteful under
+	// sparse customer sets with low MinBatchHint. Excess customers are
+	// re-notified immediately so they stay in the scheduler rotation.
+	maxCustomers := totalLimit / 2
+	if maxCustomers < 1 {
+		maxCustomers = 1
+	}
+	if len(customerIDs) > maxCustomers {
+		for _, cid := range customerIDs[maxCustomers:] {
+			w.Scheduler.Notify(cid)
+		}
+		customerIDs = customerIDs[:maxCustomers]
+	}
+
 	deliveries, err := store.ClaimNextBatch(ctx, customerIDs, totalLimit)
 	if err != nil {
 		return nil, fmt.Errorf("claim batch: %w", err)
@@ -214,19 +231,29 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 	}
 
 	results := make([]classified, len(deliveries))
-	sem := make(chan struct{}, w.Config.DeliveryConcurrency)
+	work := make(chan int, len(deliveries))
+	for i := range deliveries {
+		work <- i
+	}
+	close(work)
+
+	poolSize := w.Config.DeliveryConcurrency
+	if poolSize > len(deliveries) {
+		poolSize = len(deliveries)
+	}
 	var wg sync.WaitGroup
-	for i, d := range deliveries {
-		wg.Add(1)
-		go func(idx int, delivery outbox.Delivery) {
+	wg.Add(poolSize)
+	for range poolSize {
+		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			results[idx] = classified{
-				delivery: delivery,
-				outcome:  w.classifyDelivery(ctx, delivery),
+			for idx := range work {
+				d := deliveries[idx]
+				results[idx] = classified{
+					delivery: d,
+					outcome:  w.classifyDelivery(ctx, d),
+				}
 			}
-		}(i, d)
+		}()
 	}
 	wg.Wait()
 
@@ -318,27 +345,17 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 			return fmt.Errorf("batch requeue: %w", err)
 		}
 	}
-	if len(succeeded) > 0 {
-		if err := store.MarkSucceededBatch(ctx, succeeded); err != nil {
-			return fmt.Errorf("batch mark succeeded: %w", err)
+	if len(succeeded) > 0 || len(retries) > 0 || len(dead) > 0 {
+		if err := store.MarkOutcomesBatch(ctx, succeeded, retries, dead); err != nil {
+			return fmt.Errorf("batch mark outcomes: %w", err)
 		}
 		for _, item := range succeeded {
 			w.recordBreakerSuccess(deliveryByID[item.DeliveryID])
 			customerClass := observe.CustomerClassFromValue(classByID[item.DeliveryID])
 			recordSucceededMetrics(customerClass, item.Lifetime.Seconds(), item.AttemptNumber)
 		}
-	}
-	if len(retries) > 0 {
-		if err := store.MarkRetryBatch(ctx, retries); err != nil {
-			return fmt.Errorf("batch mark retry: %w", err)
-		}
 		for _, item := range retries {
 			w.recordBreakerFailure(deliveryByID[item.DeliveryID], item.ErrorClass)
-		}
-	}
-	if len(dead) > 0 {
-		if err := store.MarkDeadBatch(ctx, dead); err != nil {
-			return fmt.Errorf("batch mark dead: %w", err)
 		}
 		for _, item := range dead {
 			w.recordBreakerFailure(deliveryByID[item.DeliveryID], item.Reason)

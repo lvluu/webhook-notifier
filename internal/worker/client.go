@@ -21,7 +21,7 @@ func DefaultHTTPConfig() HTTPConfig {
 	return HTTPConfig{
 		MaxIdleConns:          10000,
 		MaxIdleConnsPerHost:   500,
-		MaxConnsPerHost:       0,
+		MaxConnsPerHost:       500, // transport-level backstop; HostLimiter is the primary per-host cap
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 10 * time.Second,

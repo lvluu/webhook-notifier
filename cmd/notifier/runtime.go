@@ -35,8 +35,6 @@ type runtimeDeps struct {
 	runDiscovery func(context.Context, *outbox.Store, roundrobinScheduler, worker.DiscoveryConfig) error
 }
 
-const pgNotifyQueueSize = 1024
-
 type runtimeGroup struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -189,6 +187,13 @@ func startDeliveryRuntimeWithDeps(
 		}
 		broadcastDB.SetMaxOpenConns(1)
 		broadcastDB.SetMaxIdleConns(1)
+		// Scale queue size to absorb a burst of unique Customer wakeups per worker
+		// cycle without dropping. Floor at 1024 to preserve existing behaviour for
+		// small deployments.
+		pgNotifyQueueSize := cfg.WorkerCount * cfg.Worker.MultiPickCount * 8
+		if pgNotifyQueueSize < 1024 {
+			pgNotifyQueueSize = 1024
+		}
 		broadcaster := newPgNotifyBroadcaster(
 			broadcastDB,
 			logger.With("component", "pg-notify"),

@@ -2,6 +2,7 @@
 package swrr
 
 import (
+	"container/list"
 	"context"
 	"sync"
 	"time"
@@ -23,24 +24,23 @@ import (
 // weight and removes it from rotation. The worker loop honours the "set of
 // Customers with pending Deliveries" contract by re-calling Notify after each
 // successful claim.
+//
+// Implementation: the active set is a doubly-linked list with a companion
+// map[CustomerID]*list.Element index. This gives O(1) Notify and Remove
+// (previously O(n) for Remove) and eliminates all per-Pick slice allocations
+// (previously two: candidates and newList). The SWRR weight state is kept in
+// a separate entries map that is never evicted, preserving the invariant that
+// entry.order is assigned once and never changes.
 type swrr struct {
 	mu        sync.Mutex
 	weights   scheduler.WeightSource
-	entries   map[scheduler.CustomerID]*entry
-	activeSet map[scheduler.CustomerID]struct{}
-
-	activeList []scheduler.CustomerID
-	nextOrder  uint64
+	entries   map[scheduler.CustomerID]*entry        // persistent weight + order state
+	active    *list.List                             // ordered active customers
+	activeIdx map[scheduler.CustomerID]*list.Element // O(1) membership + removal
+	nextOrder uint64
 }
 
 type entry struct {
-	currentWeight int64
-	order         uint64
-}
-
-type candidate struct {
-	id            scheduler.CustomerID
-	weight        uint32
 	currentWeight int64
 	order         uint64
 }
@@ -52,16 +52,21 @@ func New(weights scheduler.WeightSource) scheduler.Scheduler {
 		weights = scheduler.ConstantWeights{Value: 1}
 	}
 	return &swrr{
-		weights:    weights,
-		entries:    make(map[scheduler.CustomerID]*entry),
-		activeSet:  make(map[scheduler.CustomerID]struct{}),
-		activeList: make([]scheduler.CustomerID, 0),
+		weights:   weights,
+		entries:   make(map[scheduler.CustomerID]*entry),
+		active:    list.New(),
+		activeIdx: make(map[scheduler.CustomerID]*list.Element),
 	}
 }
 
 // Pick returns the next Customer in weighted rotation and removes it from the
 // active set, or ok=false when empty. The caller must re-Notify if the
 // Customer still has pending work after this pick.
+//
+// The active list is traversed once: zero-weight Customers are evicted
+// in-place (O(1) per eviction via list.Remove), all others accumulate their
+// weight and the winner is tracked with tie-breaking by entry.order.
+// No slices are allocated during Pick.
 func (s *swrr) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return "", 0, false, err
@@ -72,114 +77,93 @@ func (s *swrr) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bool, er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var candidates []candidate
-	var totalWeight int64
-	for _, id := range s.activeList {
+	var (
+		totalWeight int64
+		winnerElem  *list.Element
+		winnerID    scheduler.CustomerID
+		winnerW     uint32
+		winnerCW    int64
+		winnerOrder uint64
+	)
+
+	for elem := s.active.Front(); elem != nil; {
+		next := elem.Next()
+		id := elem.Value.(scheduler.CustomerID)
 		w := s.weights.Weight(id)
 		if w == 0 {
-			delete(s.activeSet, id)
+			// Paused customer — evict without touching the entries map.
+			s.active.Remove(elem)
+			delete(s.activeIdx, id)
+			elem = next
 			continue
 		}
-		e := s.entryFor(id)
-		candidates = append(candidates, candidate{id: id, weight: w, order: e.order})
 		totalWeight += int64(w)
+		e := s.entryFor(id)
+		e.currentWeight += int64(w)
+		if winnerElem == nil ||
+			e.currentWeight > winnerCW ||
+			(e.currentWeight == winnerCW && e.order < winnerOrder) {
+			winnerElem = elem
+			winnerID = id
+			winnerW = w
+			winnerCW = e.currentWeight
+			winnerOrder = e.order
+		}
+		elem = next
 	}
 
-	s.activeList = make([]scheduler.CustomerID, 0, len(candidates))
-	for _, c := range candidates {
-		s.activeList = append(s.activeList, c.id)
-	}
-
-	if len(candidates) == 0 {
-		s.activeSet = make(map[scheduler.CustomerID]struct{})
+	if winnerElem == nil {
 		observe.ObserveSchedulerPick(time.Since(pickStarted).Seconds())
 		observe.SetActiveCustomers(0)
 		return "", 0, false, nil
 	}
 
-	var maxIdx int
-	for i, c := range candidates {
-		e := s.entryFor(c.id)
-		e.currentWeight += int64(c.weight)
-		candidates[i].currentWeight = e.currentWeight
-		if i == 0 ||
-			e.currentWeight > candidates[maxIdx].currentWeight ||
-			(e.currentWeight == candidates[maxIdx].currentWeight && e.order < candidates[maxIdx].order) {
-			maxIdx = i
-		}
-	}
-
-	winner := candidates[maxIdx]
-	s.entries[winner.id].currentWeight -= totalWeight
-
-	delete(s.activeSet, winner.id)
-	newList := make([]scheduler.CustomerID, 0, len(candidates)-1)
-	for _, c := range candidates {
-		if c.id != winner.id {
-			newList = append(newList, c.id)
-		}
-	}
-	s.activeList = newList
+	s.entries[winnerID].currentWeight -= totalWeight
+	s.active.Remove(winnerElem)
+	delete(s.activeIdx, winnerID)
 
 	observe.ObserveSchedulerPick(time.Since(pickStarted).Seconds())
-	observe.SetActiveCustomers(float64(len(s.activeList)))
-	return winner.id, winner.weight, true, nil
+	observe.SetActiveCustomers(float64(s.active.Len()))
+	return winnerID, winnerW, true, nil
 }
 
-// Remove removes the Customer from rotation. No-op if not present.
+// Remove removes the Customer from rotation. O(1). No-op if not present.
 func (s *swrr) Remove(customerID scheduler.CustomerID) {
 	if customerID == "" {
 		return
 	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if _, ok := s.activeSet[customerID]; !ok {
-		return
+	if elem, ok := s.activeIdx[customerID]; ok {
+		s.active.Remove(elem)
+		delete(s.activeIdx, customerID)
 	}
-
-	delete(s.activeSet, customerID)
-	newList := make([]scheduler.CustomerID, 0, len(s.activeList))
-	for _, c := range s.activeList {
-		if c != customerID {
-			newList = append(newList, c)
-		}
-	}
-	s.activeList = newList
 }
 
 // Notify registers the Customer for weighted rotation if not already present
-// and if its weight is > 0. Idempotent.
+// and if its weight is > 0. Idempotent. O(1).
 func (s *swrr) Notify(customerID scheduler.CustomerID) {
 	if customerID == "" {
 		return
 	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	if s.weights.Weight(customerID) == 0 {
 		return
 	}
-
-	if _, ok := s.activeSet[customerID]; ok {
+	if _, ok := s.activeIdx[customerID]; ok {
 		return
 	}
-
 	s.entryFor(customerID)
-
-	s.activeSet[customerID] = struct{}{}
-	s.activeList = append(s.activeList, customerID)
+	elem := s.active.PushBack(customerID)
+	s.activeIdx[customerID] = elem
 }
 
 func (s *swrr) entryFor(customerID scheduler.CustomerID) *entry {
-	e, ok := s.entries[customerID]
-	if ok {
+	if e, ok := s.entries[customerID]; ok {
 		return e
 	}
-
-	e = &entry{order: s.nextOrder}
+	e := &entry{order: s.nextOrder}
 	s.nextOrder++
 	s.entries[customerID] = e
 	return e
