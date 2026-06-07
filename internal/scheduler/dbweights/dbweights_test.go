@@ -134,6 +134,26 @@ func TestWeight_CachesResult(t *testing.T) {
 	}
 }
 
+func TestWeight_ReloadsAfterCacheTTL(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := newTestDB(t, ctx)
+	seedCustomer(t, ctx, db, "ttl", 5)
+
+	ws := dbweights.New(db, dbweights.WithCacheTTL(time.Millisecond))
+
+	if w := ws.Weight("ttl"); w != 5 {
+		t.Fatalf("first weight = %d, want 5", w)
+	}
+
+	seedCustomer(t, ctx, db, "ttl", 9)
+	time.Sleep(5 * time.Millisecond)
+
+	if w := ws.Weight("ttl"); w != 9 {
+		t.Errorf("expired weight = %d, want 9", w)
+	}
+}
+
 func TestWeight_RefreshInvalidatesCache(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

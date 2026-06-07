@@ -13,7 +13,27 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/scheduler"
 )
 
-const defaultQueryTimeout = 2 * time.Second
+const (
+	defaultQueryTimeout = 2 * time.Second
+	defaultCacheTTL     = 5 * time.Minute
+)
+
+type cachedEntry struct {
+	value     uint32
+	fetchedAt time.Time
+}
+
+// Option customizes a DBWeightSource.
+type Option func(*DBWeightSource)
+
+// WithCacheTTL sets how long a loaded Customer weight remains fresh.
+func WithCacheTTL(ttl time.Duration) Option {
+	return func(s *DBWeightSource) {
+		if ttl > 0 {
+			s.ttl = ttl
+		}
+	}
+}
 
 // DBWeightSource resolves Customer fairness weights from the customers table,
 // caching results in memory to avoid per-Pick DB queries. Unknown customers
@@ -21,16 +41,22 @@ const defaultQueryTimeout = 2 * time.Second
 type DBWeightSource struct {
 	db     *sql.DB
 	mu     sync.RWMutex
-	cache  map[scheduler.CustomerID]uint32
+	cache  map[scheduler.CustomerID]cachedEntry
 	flight singleflight.Group
+	ttl    time.Duration
 }
 
 // New returns a DBWeightSource backed by db.
-func New(db *sql.DB) *DBWeightSource {
-	return &DBWeightSource{
+func New(db *sql.DB, opts ...Option) *DBWeightSource {
+	s := &DBWeightSource{
 		db:    db,
-		cache: make(map[scheduler.CustomerID]uint32),
+		cache: make(map[scheduler.CustomerID]cachedEntry),
+		ttl:   defaultCacheTTL,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Weight returns the cached or freshly loaded class value for customerID.
@@ -40,20 +66,20 @@ func (s *DBWeightSource) Weight(customerID scheduler.CustomerID) uint32 {
 	}
 
 	s.mu.RLock()
-	w, ok := s.cache[customerID]
+	entry, ok := s.cache[customerID]
 	s.mu.RUnlock()
-	if ok {
-		return w
+	if ok && time.Since(entry.fetchedAt) < s.ttl {
+		return entry.value
 	}
 
-	// Cache miss: use singleflight to coalesce concurrent loads for the same
-	// customer into a single DB query. The exclusive write lock is acquired only
-	// after the query returns, so other Weight callers are not blocked for the
-	// duration of the round trip.
+	// Cache miss or stale: use singleflight to coalesce concurrent loads for
+	// the same customer into a single DB query. The exclusive write lock is
+	// acquired only after the query returns, so other Weight callers are not
+	// blocked for the duration of the round trip.
 	v, _, _ := s.flight.Do(customerID, func() (any, error) {
 		w := s.loadWeight(customerID)
 		s.mu.Lock()
-		s.cache[customerID] = w
+		s.cache[customerID] = cachedEntry{value: w, fetchedAt: time.Now()}
 		s.mu.Unlock()
 		return w, nil
 	})
@@ -69,7 +95,7 @@ func (s *DBWeightSource) Refresh(customerID scheduler.CustomerID) {
 	w := s.loadWeight(customerID)
 
 	s.mu.Lock()
-	s.cache[customerID] = w
+	s.cache[customerID] = cachedEntry{value: w, fetchedAt: time.Now()}
 	s.mu.Unlock()
 }
 

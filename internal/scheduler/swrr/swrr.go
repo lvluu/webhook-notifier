@@ -29,8 +29,10 @@ import (
 // map[CustomerID]*list.Element index. This gives O(1) Notify and Remove
 // (previously O(n) for Remove) and eliminates all per-Pick slice allocations
 // (previously two: candidates and newList). The SWRR weight state is kept in
-// a separate entries map that is never evicted, preserving the invariant that
-// entry.order is assigned once and never changes.
+// a separate entries map; entries are evicted on Remove to bound memory under
+// high Customer churn. Evicted Customers re-enter with order=nextOrder when
+// re-added via Notify, which is correct — tie-breaking order only matters
+// within a single Pick traversal.
 type swrr struct {
 	mu        sync.Mutex
 	weights   scheduler.WeightSource
@@ -127,7 +129,8 @@ func (s *swrr) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bool, er
 	return winnerID, winnerW, true, nil
 }
 
-// Remove removes the Customer from rotation. O(1). No-op if not present.
+// Remove removes the Customer from rotation and evicts its weight state.
+// O(1). No-op if not present.
 func (s *swrr) Remove(customerID scheduler.CustomerID) {
 	if customerID == "" {
 		return
@@ -138,6 +141,10 @@ func (s *swrr) Remove(customerID scheduler.CustomerID) {
 		s.active.Remove(elem)
 		delete(s.activeIdx, customerID)
 	}
+	// Evict entry so the entries map doesn't grow unboundedly under high
+	// Customer churn. The order and currentWeight will be re-initialised
+	// if the Customer is re-added via Notify.
+	delete(s.entries, customerID)
 }
 
 // Notify registers the Customer for weighted rotation if not already present

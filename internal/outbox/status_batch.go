@@ -37,6 +37,7 @@ type BatchMarkItem struct {
 	// Observation-only fields (not used in batch SQL).
 	Lifetime      time.Duration
 	AttemptNumber int
+	CustomerClass uint32
 }
 
 // MarkSucceededBatch marks multiple deliveries as succeeded in one round trip.

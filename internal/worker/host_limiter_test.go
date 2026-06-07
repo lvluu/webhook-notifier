@@ -320,6 +320,137 @@ func TestHostLimiter_TryAcquireFailsImmediatelyAtCapacity(t *testing.T) {
 	}
 }
 
+func TestHostLimiter_CleanupRemovesStaleEntries(t *testing.T) {
+	t.Parallel()
+
+	hl := worker.NewHostLimiter(worker.HostLimiterConfig{
+		MaxPerHost:     1,
+		AcquireTimeout: time.Second,
+		RequeueDelay:   10 * time.Millisecond,
+	})
+
+	// Exhaust capacity on a host so the semaphore state is verifiable.
+	release1, err := hl.Acquire(context.Background(), "stale.example.com")
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	// Confirm capacity is exhausted.
+	_, err = hl.TryAcquire("stale.example.com")
+	if err == nil {
+		t.Fatal("expected capacity error before cleanup")
+	}
+
+	// Release and wait for the entry to become stale.
+	release1()
+	time.Sleep(60 * time.Millisecond)
+
+	// Cleanup with 50ms maxAge should remove the stale entry.
+	hl.Cleanup(50 * time.Millisecond)
+
+	// After cleanup a new entry is created on demand with fresh capacity.
+	release2, err := hl.TryAcquire("stale.example.com")
+	if err != nil {
+		t.Fatalf("TryAcquire after cleanup should succeed: %v", err)
+	}
+	release2()
+}
+
+func TestHostLimiter_CleanupPreservesRecentEntries(t *testing.T) {
+	t.Parallel()
+
+	hl := worker.NewHostLimiter(worker.HostLimiterConfig{
+		MaxPerHost:     1,
+		AcquireTimeout: time.Second,
+		RequeueDelay:   10 * time.Millisecond,
+	})
+
+	// Exhaust capacity — after this, the semaphore has 0 permits left.
+	release1, err := hl.Acquire(context.Background(), "active.example.com")
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer release1()
+
+	// Cleanup with a maxAge well beyond the entry's age — the entry survives.
+	hl.Cleanup(time.Hour)
+
+	// The original entry is still present; capacity remains exhausted.
+	_, err = hl.TryAcquire("active.example.com")
+	if err == nil {
+		t.Fatal("expected capacity error; entry should still be present after cleanup with long maxAge")
+	}
+}
+
+func TestHostLimiter_CleanupStaleEntriesDontAffectOtherHosts(t *testing.T) {
+	t.Parallel()
+
+	hl := worker.NewHostLimiter(worker.HostLimiterConfig{
+		MaxPerHost:     1,
+		AcquireTimeout: time.Second,
+		RequeueDelay:   10 * time.Millisecond,
+	})
+
+	// Exhaust capacity on stale host.
+	releaseStale, err := hl.Acquire(context.Background(), "stale.example.com")
+	if err != nil {
+		t.Fatalf("Acquire stale: %v", err)
+	}
+	// Keep stale capacity held so lastUsed does not refresh.
+
+	// Exhaust capacity on active host, then release for later refresh.
+	releaseActive, err := hl.Acquire(context.Background(), "active.example.com")
+	if err != nil {
+		t.Fatalf("Acquire active: %v", err)
+	}
+	releaseActive()
+
+	// Wait so stale becomes idle.
+	time.Sleep(60 * time.Millisecond)
+
+	// Refresh active entry's lastUsed AFTER the sleep.
+	releaseActive2, err := hl.TryAcquire("active.example.com")
+	if err != nil {
+		t.Fatalf("TryAcquire active: %v", err)
+	}
+
+	// Cleanup removes stale (lastUsed ~60ms+ old), preserves active (just touched).
+	hl.Cleanup(50 * time.Millisecond)
+
+	// Stale host: entry was removed, new entry gets fresh capacity.
+	_, err = hl.TryAcquire("stale.example.com")
+	if err != nil {
+		t.Fatal("TryAcquire stale after cleanup should succeed (new entry with fresh capacity)")
+	}
+
+	// Active host: entry survived cleanup, capacity still exhausted.
+	_, err = hl.TryAcquire("active.example.com")
+	if err == nil {
+		t.Fatal("expected capacity error; active entry should survive cleanup")
+	}
+
+	releaseActive2()
+	releaseStale()
+}
+
+func TestHostLimiter_RunCleanupExitsOnCancellation(t *testing.T) {
+	t.Parallel()
+
+	hl := worker.NewHostLimiter(worker.HostLimiterConfig{
+		MaxPerHost:     1,
+		AcquireTimeout: time.Second,
+		RequeueDelay:   10 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := hl.RunCleanup(ctx, time.Hour, time.Hour)
+	if err != context.Canceled {
+		t.Fatalf("RunCleanup: got %v, want context.Canceled", err)
+	}
+}
+
 func TestHostLimiter_TryAcquireDoesNotConsumeSlotOnFailure(t *testing.T) {
 	t.Parallel()
 

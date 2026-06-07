@@ -79,12 +79,9 @@ func (b *pgNotifyBroadcaster) Notify(customerID string) {
 		return
 	}
 
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if _, ok := b.pending[customerID]; ok {
-		observe.IncPgNotifyBroadcast("coalesced")
-		return
-	}
+	// Check the cooldown window before acquiring the mutex: lastBroadcastByCustomer
+	// is a sync.Map so this load is lock-free. This avoids holding b.mu during a
+	// sync.Map lookup on the hot ingest path under high concurrency.
 	now := b.now()
 	if last, ok := b.lastBroadcastByCustomer.Load(customerID); ok {
 		if now.Sub(last.(time.Time)) < b.cooldown {
@@ -93,11 +90,24 @@ func (b *pgNotifyBroadcaster) Notify(customerID string) {
 		}
 	}
 
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.pending[customerID]; ok {
+		observe.IncPgNotifyBroadcast("coalesced")
+		return
+	}
+
 	select {
 	case b.queue <- customerID:
 		b.pending[customerID] = struct{}{}
 	default:
 		observe.IncPgNotifyBroadcast("dropped")
+		if b.logger != nil {
+			b.logger.Warn("pg_notify queue full; wakeup notification dropped",
+				"customer_id", customerID,
+				"queue_cap", cap(b.queue),
+			)
+		}
 	}
 }
 

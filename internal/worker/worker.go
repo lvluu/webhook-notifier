@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/lvluu/webhook-notifier/internal/breaker"
@@ -68,6 +69,10 @@ type Worker struct {
 	HostLimiter *HostLimiter
 	Logger      *slog.Logger
 	Config      Config
+
+	// urlHostCache caches URL -> hostname mappings so the fallback parse path
+	// in classifyDelivery does not re-parse the same URL on every attempt.
+	urlHostCache sync.Map
 }
 
 // Config contains the worker settings whose values interact at runtime.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	circuitbreaker "github.com/lvluu/webhook-notifier/internal/breaker"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
@@ -152,7 +153,7 @@ func startDeliveryRuntimeWithDeps(
 		return nil, nil, fmt.Errorf("worker config: %w", err)
 	}
 
-	group := newRuntimeGroup(parent, logger, cfg.WorkerCount+2)
+	group := newRuntimeGroup(parent, logger, cfg.WorkerCount+5)
 
 	sched := deps.newScheduler(db, cfg)
 	notify := schedulerNotifier{
@@ -169,8 +170,12 @@ func startDeliveryRuntimeWithDeps(
 			return nil, nil, fmt.Errorf("load breaker state: %w", err)
 		}
 		persister := circuitbreaker.NewAsyncPersister(db, logger.With("component", "breaker-persister"), 1024)
-		webhookBreaker = circuitbreaker.NewMemory(cfg.Breaker, snapshots, persister.Sink())
+		memoryBreaker := circuitbreaker.NewMemory(cfg.Breaker, snapshots, persister.Sink())
+		webhookBreaker = memoryBreaker
 		group.Go("breaker persister", persister.Run)
+		group.Go("breaker cleanup", func(ctx context.Context) error {
+			return memoryBreaker.RunCleanup(ctx, 10*time.Minute)
+		})
 	}
 
 	var broadcastDB *sql.DB
@@ -226,6 +231,10 @@ func startDeliveryRuntimeWithDeps(
 			return w.Run(ctx, outboxStore)
 		})
 	}
+
+	group.Go("host limiter cleanup", func(ctx context.Context) error {
+		return limiter.RunCleanup(ctx, 10*time.Minute, 30*time.Minute)
+	})
 
 	group.Go("discovery", func(ctx context.Context) error {
 		return deps.runDiscovery(ctx, outboxStore, sched, cfg.Discovery)

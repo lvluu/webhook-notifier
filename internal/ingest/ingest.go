@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/lvluu/webhook-notifier/internal/observe"
 	"github.com/lvluu/webhook-notifier/internal/registry"
@@ -118,21 +117,19 @@ func (s *Store) Submit(ctx context.Context, event Event) (SubmittedEvent, error)
 }
 
 func insertDeliveries(ctx context.Context, tx *sql.Tx, eventID string, hooks []Webhook) ([]string, error) {
-	var sb strings.Builder
-	sb.WriteString(`INSERT INTO deliveries (event_id, webhook_id, customer_id, status, attempt_count, next_attempt_at) VALUES `)
-
-	args := make([]interface{}, 0, len(hooks)*3)
+	webhookIDs := make([]string, len(hooks))
+	customerIDs := make([]string, len(hooks))
 	for i, h := range hooks {
-		if i > 0 {
-			sb.WriteString(", ")
-		}
-		base := i * 3
-		fmt.Fprintf(&sb, "($%d, $%d, $%d, 'pending', 0, now())", base+1, base+2, base+3)
-		args = append(args, eventID, h.ID, h.CustomerID)
+		webhookIDs[i] = h.ID
+		customerIDs[i] = h.CustomerID
 	}
-	sb.WriteString(" RETURNING id")
 
-	rows, err := tx.QueryContext(ctx, sb.String(), args...)
+	rows, err := tx.QueryContext(ctx, `
+		INSERT INTO deliveries (event_id, webhook_id, customer_id, status, attempt_count, next_attempt_at)
+		SELECT $1, w.webhook_id, w.customer_id, 'pending', 0, now()
+		FROM unnest($2::uuid[], $3::text[]) AS w(webhook_id, customer_id)
+		RETURNING id
+	`, eventID, webhookIDs, customerIDs)
 	if err != nil {
 		return nil, fmt.Errorf("insert deliveries: %w", err)
 	}
@@ -150,6 +147,5 @@ func insertDeliveries(ctx context.Context, tx *sql.Tx, eventID string, hooks []W
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("scan delivery ids: %w", err)
 	}
-
 	return ids, nil
 }

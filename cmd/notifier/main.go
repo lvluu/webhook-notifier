@@ -66,8 +66,15 @@ func main() {
 		dbConn.SetMaxOpenConns(cliCfg.MaxConns)
 		dbConn.SetMaxIdleConns(cliCfg.MaxConns)
 	} else {
-		dbConn.SetMaxOpenConns(runtimeCfg.WorkerCount + 10)
-		dbConn.SetMaxIdleConns(runtimeCfg.WorkerCount + 5)
+		// The pool serves workers (claim + mark), ingest HTTP goroutines, discovery,
+		// backlog sampler, breaker persister, and archive — so WorkerCount+10 is
+		// too small under load. Use max(25, WorkerCount*3) as a safer default.
+		maxConns := runtimeCfg.WorkerCount * 3
+		if maxConns < 25 {
+			maxConns = 25
+		}
+		dbConn.SetMaxOpenConns(maxConns)
+		dbConn.SetMaxIdleConns(maxConns / 2)
 	}
 	dbConn.SetConnMaxLifetime(30 * time.Minute)
 

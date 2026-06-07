@@ -39,6 +39,10 @@ func (s *Store) ArchiveTerminalDeliveriesWithMode(ctx context.Context, retention
 	return s.deleteTerminalCandidates(ctx, ids, mode)
 }
 
+// Lock ordering note: this function locks only deliveries (via FOR UPDATE OF d),
+// never delivery_claims. Both the claim and archive paths acquire deliveries first,
+// consistent with the ordering documented in DESIGN.md:290-291. No lock-order
+// deadlock (40P01) risk exists between archive and concurrent claim operations.
 func (s *Store) scanTerminalCandidates(ctx context.Context, retention time.Duration, limit int) ([]string, error) {
 	const query = `
 		SELECT d.id
