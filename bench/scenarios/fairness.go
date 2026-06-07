@@ -199,6 +199,12 @@ func runFairnessOnce(ctx context.Context, db *sql.DB, profile fairnessProfile, w
 	if err := bulkSeedFairnessDeliveries(ctx, db, profile); err != nil {
 		return fairnessRunResult{}, err
 	}
+	// TRUNCATE resets pg_class.reltuples to zero. Without ANALYZE the planner
+	// may skip index scans for the recursive CTE in DiscoverClaimableCustomers,
+	// causing context deadline exceeded on stress profiles.
+	if _, err := db.ExecContext(ctx, "ANALYZE deliveries, webhooks, delivery_claims"); err != nil {
+		return fairnessRunResult{}, fmt.Errorf("analyze after seed: %w", err)
+	}
 	if err := waitFairnessDrain(ctx, db, outboxStore, sched); err != nil {
 		return fairnessRunResult{}, err
 	}
