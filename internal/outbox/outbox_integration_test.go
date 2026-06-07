@@ -1405,6 +1405,122 @@ func TestArchiveTerminalDeliveriesOrdersByUpdatedAt(t *testing.T) {
 	}
 }
 
+func TestMarkOutcomesBatchPersistsMixedOutcomes(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	store := outbox.New(db)
+
+	type claimedDelivery struct {
+		id            string
+		attemptNumber int
+	}
+	claim := func(customerID string) claimedDelivery {
+		t.Helper()
+		deliveryID := submitOneDelivery(t, ctx, db, customerID)
+		delivery, ok, err := store.ClaimNext(ctx, customerID)
+		if err != nil {
+			t.Fatalf("ClaimNext %s: %v", customerID, err)
+		}
+		if !ok {
+			t.Fatalf("ClaimNext %s: got no delivery", customerID)
+		}
+		if delivery.ID != deliveryID {
+			t.Fatalf("ClaimNext %s: got %s, want %s", customerID, delivery.ID, deliveryID)
+		}
+		return claimedDelivery{id: delivery.ID, attemptNumber: delivery.AttemptNumber}
+	}
+
+	succeeded := claim("cus_outcomes_succeeded")
+	retried := claim("cus_outcomes_retried")
+	dead := claim("cus_outcomes_dead")
+	retryDelay := 2 * time.Second
+	markedAt := time.Now()
+
+	err := store.MarkOutcomesBatch(ctx,
+		[]outbox.BatchMarkItem{{DeliveryID: succeeded.id, StatusCode: http.StatusNoContent, Duration: 10 * time.Millisecond}},
+		[]outbox.BatchMarkItem{{DeliveryID: retried.id, StatusCode: http.StatusServiceUnavailable, Duration: 20 * time.Millisecond, ErrorClass: retry.ReasonRetryable5xx, Delay: retryDelay}},
+		[]outbox.BatchMarkItem{{DeliveryID: dead.id, StatusCode: http.StatusNotFound, Duration: 30 * time.Millisecond, ErrorClass: retry.ReasonTerminal4xx, Reason: retry.ReasonTerminal4xx}},
+	)
+	if err != nil {
+		t.Fatalf("MarkOutcomesBatch: %v", err)
+	}
+
+	tests := []struct {
+		name           string
+		delivery       claimedDelivery
+		wantStatus     outbox.DeliveryStatus
+		wantCode       int
+		wantError      string
+		wantDuration   int64
+		wantDeadLetter bool
+	}{
+		{name: "succeeded", delivery: succeeded, wantStatus: outbox.StatusSucceeded, wantCode: http.StatusNoContent, wantDuration: 10},
+		{name: "retried", delivery: retried, wantStatus: outbox.StatusFailedRetry, wantCode: http.StatusServiceUnavailable, wantError: retry.ReasonRetryable5xx, wantDuration: 20},
+		{name: "dead", delivery: dead, wantStatus: outbox.StatusDead, wantCode: http.StatusNotFound, wantError: retry.ReasonTerminal4xx, wantDuration: 30, wantDeadLetter: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var status string
+			var attemptCount int
+			var nextAttemptAt time.Time
+			var lastError sql.NullString
+			if err := db.QueryRowContext(ctx, `
+				SELECT status, attempt_count, next_attempt_at, last_error
+				FROM deliveries WHERE id = $1
+			`, tt.delivery.id).Scan(&status, &attemptCount, &nextAttemptAt, &lastError); err != nil {
+				t.Fatalf("load delivery: %v", err)
+			}
+			if status != string(tt.wantStatus) {
+				t.Errorf("status: got %s, want %s", status, tt.wantStatus)
+			}
+			if attemptCount != tt.delivery.attemptNumber {
+				t.Errorf("attempt_count: got %d, want %d", attemptCount, tt.delivery.attemptNumber)
+			}
+			if lastError.String != tt.wantError || lastError.Valid != (tt.wantError != "") {
+				t.Errorf("last_error: got %#v, want %q", lastError, tt.wantError)
+			}
+			if tt.wantStatus == outbox.StatusFailedRetry && nextAttemptAt.Before(markedAt.Add(retryDelay-time.Second)) {
+				t.Errorf("next_attempt_at: got %s, want retry delay near %s", nextAttemptAt, retryDelay)
+			}
+
+			var statusCode, durationMs int64
+			var attemptError sql.NullString
+			if err := db.QueryRowContext(ctx, `
+				SELECT status_code, duration_ms, error_class
+				FROM delivery_attempts
+				WHERE delivery_id = $1 AND attempt_number = $2
+			`, tt.delivery.id, tt.delivery.attemptNumber).Scan(&statusCode, &durationMs, &attemptError); err != nil {
+				t.Fatalf("load attempt: %v", err)
+			}
+			if statusCode != int64(tt.wantCode) || durationMs != tt.wantDuration {
+				t.Errorf("attempt: got status=%d duration=%d, want status=%d duration=%d", statusCode, durationMs, tt.wantCode, tt.wantDuration)
+			}
+			if attemptError.String != tt.wantError || attemptError.Valid != (tt.wantError != "") {
+				t.Errorf("attempt error_class: got %#v, want %q", attemptError, tt.wantError)
+			}
+
+			var claimCount, deadLetterCount int
+			if err := db.QueryRowContext(ctx, `SELECT count(*) FROM delivery_claims WHERE delivery_id = $1`, tt.delivery.id).Scan(&claimCount); err != nil {
+				t.Fatalf("count claims: %v", err)
+			}
+			if err := db.QueryRowContext(ctx, `SELECT count(*) FROM dead_letters WHERE delivery_id = $1`, tt.delivery.id).Scan(&deadLetterCount); err != nil {
+				t.Fatalf("count dead letters: %v", err)
+			}
+			if claimCount != 0 {
+				t.Errorf("claim count: got %d, want 0", claimCount)
+			}
+			wantDeadLetters := 0
+			if tt.wantDeadLetter {
+				wantDeadLetters = 1
+			}
+			if deadLetterCount != wantDeadLetters {
+				t.Errorf("dead letter count: got %d, want %d", deadLetterCount, wantDeadLetters)
+			}
+		})
+	}
+}
+
 func TestBatchMarkErrorsWhenDeliveryIsNotInFlight(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)
@@ -1436,6 +1552,12 @@ func TestBatchMarkErrorsWhenDeliveryIsNotInFlight(t *testing.T) {
 				return store.MarkDeadBatch(ctx, []outbox.BatchMarkItem{item})
 			},
 		},
+		{
+			name: "outcomes",
+			run: func(item outbox.BatchMarkItem) error {
+				return store.MarkOutcomesBatch(ctx, []outbox.BatchMarkItem{item}, nil, nil)
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1464,7 +1586,8 @@ func TestBatchMarkErrorsWhenDeliveryIsNotInFlight(t *testing.T) {
 				t.Fatal("expected batch mark error, got nil")
 			}
 			if !strings.Contains(err.Error(), "marked 0 of 1") &&
-				!strings.Contains(err.Error(), "marked 0 attempts and 0 dead letters of 1") {
+				!strings.Contains(err.Error(), "marked 0 attempts and 0 dead letters of 1") &&
+				!strings.Contains(err.Error(), "inserted 0 attempts for 1 deliveries") {
 				t.Fatalf("error: got %q, want partial batch mark error", err.Error())
 			}
 		})
