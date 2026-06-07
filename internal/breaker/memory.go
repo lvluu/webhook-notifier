@@ -1,9 +1,12 @@
 package breaker
 
 import (
+	"context"
 	"sync"
 	"time"
 )
+
+const defaultCleanupInterval = 10 * time.Minute
 
 // Memory is a process-local Webhook Circuit Breaker implementation.
 type Memory struct {
@@ -19,6 +22,8 @@ type webhookBreaker struct {
 	cooldown        time.Duration
 	nextProbeAt     time.Time
 	probeDeliveryID string
+	active          int
+	deleted         bool
 }
 
 // NewMemory creates a process-local breaker seeded with persisted snapshots.
@@ -59,7 +64,7 @@ func (m *Memory) RecordSuccess(webhookID string) {
 	if webhookID == "" {
 		return
 	}
-	b := m.get(webhookID)
+	b := m.acquire(webhookID)
 	var transition *Transition
 	b.mu.Lock()
 	b.advanceLocked(m.now())
@@ -78,6 +83,7 @@ func (m *Memory) RecordSuccess(webhookID string) {
 		}
 	}
 	b.mu.Unlock()
+	b.release()
 	m.emit(transition)
 }
 
@@ -86,7 +92,7 @@ func (m *Memory) RecordFailure(webhookID string, reason string) {
 	if webhookID == "" || m.config.FailureThreshold == 0 {
 		return
 	}
-	b := m.get(webhookID)
+	b := m.acquire(webhookID)
 	var transition *Transition
 	b.mu.Lock()
 	b.advanceLocked(m.now())
@@ -105,6 +111,7 @@ func (m *Memory) RecordFailure(webhookID string, reason string) {
 		// partner outages produce unbounded persistence work.
 	}
 	b.mu.Unlock()
+	b.release()
 	m.emit(transition)
 }
 
@@ -113,11 +120,12 @@ func (m *Memory) State(webhookID string) State {
 	if webhookID == "" || m.config.FailureThreshold == 0 {
 		return Closed
 	}
-	b := m.get(webhookID)
+	b := m.acquire(webhookID)
 	b.mu.Lock()
 	b.advanceLocked(m.now())
 	state := b.state
 	b.mu.Unlock()
+	b.release()
 	return state
 }
 
@@ -132,7 +140,7 @@ func (m *Memory) SetProbeDelivery(webhookID, deliveryID string) {
 	if webhookID == "" || deliveryID == "" || m.config.FailureThreshold == 0 {
 		return
 	}
-	b := m.get(webhookID)
+	b := m.acquire(webhookID)
 	var transition *Transition
 	b.mu.Lock()
 	b.advanceLocked(m.now())
@@ -151,19 +159,50 @@ func (m *Memory) SetProbeDelivery(webhookID, deliveryID string) {
 		}
 	}
 	b.mu.Unlock()
+	b.release()
 	m.emit(transition)
 }
 
-func (m *Memory) get(webhookID string) *webhookBreaker {
-	if existing, ok := m.items.Load(webhookID); ok {
-		return existing.(*webhookBreaker)
+func (m *Memory) acquire(webhookID string) *webhookBreaker {
+	for {
+		if existing, ok := m.items.Load(webhookID); ok {
+			b := existing.(*webhookBreaker)
+			b.mu.Lock()
+			if b.deleted {
+				b.mu.Unlock()
+				m.items.CompareAndDelete(webhookID, b)
+				continue
+			}
+			b.active++
+			b.mu.Unlock()
+			return b
+		}
+		created := &webhookBreaker{
+			state:    Closed,
+			cooldown: m.config.InitialCooldown,
+			active:   1,
+		}
+		actual, loaded := m.items.LoadOrStore(webhookID, created)
+		if !loaded {
+			return created
+		}
+		b := actual.(*webhookBreaker)
+		b.mu.Lock()
+		if b.deleted {
+			b.mu.Unlock()
+			m.items.CompareAndDelete(webhookID, b)
+			continue
+		}
+		b.active++
+		b.mu.Unlock()
+		return b
 	}
-	created := &webhookBreaker{
-		state:    Closed,
-		cooldown: m.config.InitialCooldown,
-	}
-	actual, _ := m.items.LoadOrStore(webhookID, created)
-	return actual.(*webhookBreaker)
+}
+
+func (b *webhookBreaker) release() {
+	b.mu.Lock()
+	b.active--
+	b.mu.Unlock()
 }
 
 func (m *Memory) emit(transition *Transition) {
@@ -175,6 +214,46 @@ func (m *Memory) emit(transition *Transition) {
 
 func (m *Memory) now() time.Time {
 	return time.Now()
+}
+
+// Cleanup removes breaker entries that are Closed with no pending state and no
+// active caller. acquire recreates entries on demand, so this is safe to call
+// periodically to prevent unbounded growth in the items map.
+func (m *Memory) Cleanup() {
+	m.items.Range(func(key, value any) bool {
+		b := value.(*webhookBreaker)
+		b.mu.Lock()
+		// Any idle closed breaker can be evicted safely. Failure history is only
+		// needed while the entry is live; once a webhook has gone idle, recreating
+		// the entry on demand is preferable to keeping the map unbounded.
+		closed := b.state == Closed && b.active == 0
+		if closed {
+			b.deleted = true
+		}
+		b.mu.Unlock()
+		if closed {
+			m.items.CompareAndDelete(key, value)
+		}
+		return true
+	})
+}
+
+// RunCleanup periodically removes idle Closed entries until ctx is canceled.
+func (m *Memory) RunCleanup(ctx context.Context, interval time.Duration) error {
+	if interval <= 0 {
+		interval = defaultCleanupInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			m.Cleanup()
+		}
+	}
 }
 
 func (b *webhookBreaker) advanceLocked(now time.Time) {

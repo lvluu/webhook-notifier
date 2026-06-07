@@ -263,10 +263,6 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 
 	var succeeded, retries, dead []outbox.BatchMarkItem
 	var requeued []string
-	deliveryByID := make(map[string]outbox.Delivery, len(deliveries))
-	for _, delivery := range deliveries {
-		deliveryByID[delivery.ID] = delivery
-	}
 
 	for _, r := range results {
 		delivery, outcome := r.delivery, r.outcome
@@ -294,6 +290,7 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 				Duration:      outcome.duration,
 				Lifetime:      outcome.lifetime,
 				AttemptNumber: delivery.AttemptNumber,
+				CustomerClass: delivery.CustomerClass,
 			})
 			log.Debug("delivery succeeded",
 				"status_code", outcome.statusCode,
@@ -308,6 +305,7 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 				Reason:        outcome.reason,
 				Lifetime:      outcome.lifetime,
 				AttemptNumber: delivery.AttemptNumber,
+				CustomerClass: delivery.CustomerClass,
 			})
 			log.Warn("delivery dead",
 				"reason", outcome.reason,
@@ -322,6 +320,7 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 				ErrorClass:    outcome.errorClass,
 				Delay:         outcome.delay,
 				AttemptNumber: delivery.AttemptNumber,
+				CustomerClass: delivery.CustomerClass,
 			})
 			log.Warn("delivery scheduled for retry",
 				"reason", outcome.errorClass,
@@ -329,18 +328,6 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 				"status_code", outcome.statusCode,
 				"duration_ms", outcome.duration.Milliseconds(),
 			)
-		}
-	}
-
-	// Customer class by delivery ID, built once so the per-outcome metric
-	// loops below are O(1) lookups rather than O(n) scans of the batch. Only
-	// built when an outcome that records metrics is present (a retry-only batch
-	// reads it nowhere).
-	var classByID map[string]uint32
-	if len(succeeded) > 0 || len(dead) > 0 {
-		classByID = make(map[string]uint32, len(deliveries))
-		for _, d := range deliveries {
-			classByID[d.ID] = d.CustomerClass
 		}
 	}
 
@@ -353,18 +340,22 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 		if err := store.MarkOutcomesBatch(ctx, succeeded, retries, dead); err != nil {
 			return fmt.Errorf("batch mark outcomes: %w", err)
 		}
-		for _, item := range succeeded {
-			w.recordBreakerSuccess(deliveryByID[item.DeliveryID])
-			customerClass := observe.CustomerClassFromValue(classByID[item.DeliveryID])
-			recordSucceededMetrics(customerClass, item.Lifetime.Seconds(), item.AttemptNumber)
-		}
-		for _, item := range retries {
-			w.recordBreakerFailure(deliveryByID[item.DeliveryID], item.ErrorClass)
-		}
-		for _, item := range dead {
-			w.recordBreakerFailure(deliveryByID[item.DeliveryID], item.Reason)
-			customerClass := observe.CustomerClassFromValue(classByID[item.DeliveryID])
-			recordDeadMetrics(customerClass, item.Lifetime.Seconds(), item.AttemptNumber, item.Reason)
+		for _, r := range results {
+			delivery, outcome := r.delivery, r.outcome
+			if outcome.requeued {
+				continue
+			}
+			customerClass := observe.CustomerClassFromValue(delivery.CustomerClass)
+			switch {
+			case outcome.reason == retry.ReasonSucceeded || (outcome.reason == "" && outcome.errorClass == ""):
+				w.recordBreakerSuccess(delivery)
+				recordSucceededMetrics(customerClass, outcome.lifetime.Seconds(), delivery.AttemptNumber)
+			case outcome.reason != "":
+				w.recordBreakerFailure(delivery, outcome.reason)
+				recordDeadMetrics(customerClass, outcome.lifetime.Seconds(), delivery.AttemptNumber, outcome.reason)
+			default:
+				w.recordBreakerFailure(delivery, outcome.errorClass)
+			}
 		}
 	}
 

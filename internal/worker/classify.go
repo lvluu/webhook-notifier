@@ -38,13 +38,20 @@ func (w *Worker) classifyDelivery(ctx context.Context, d outbox.Delivery) delive
 		// issue #115) so the limiter avoids re-parsing the URL on every Attempt.
 		// Fall back to url.Parse for rows where the host could not be extracted
 		// (malformed scheme, IPv6 literal) so behaviour never regresses.
+		// The parsed result is cached in urlHostCache to avoid re-parsing the
+		// same URL on subsequent attempts.
 		host := d.URLHost
 		if host == "" {
-			u, parseErr := url.Parse(d.URL)
-			if parseErr != nil {
-				return deliveryOutcome{err: fmt.Errorf("parse delivery URL: %w", parseErr)}
+			if cached, ok := w.urlHostCache.Load(d.URL); ok {
+				host = cached.(string)
+			} else {
+				u, parseErr := url.Parse(d.URL)
+				if parseErr != nil {
+					return deliveryOutcome{err: fmt.Errorf("parse delivery URL: %w", parseErr)}
+				}
+				host = u.Hostname()
+				w.urlHostCache.Store(d.URL, host)
 			}
-			host = u.Hostname()
 		}
 
 		release, acquireErr := w.HostLimiter.TryAcquire(host)

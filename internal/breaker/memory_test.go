@@ -141,3 +141,44 @@ func TestMemoryBreakerConcurrentAccess(t *testing.T) {
 		t.Fatalf("state after concurrent failures: got %s, want %s", got, Open)
 	}
 }
+
+func TestMemoryBreakerCleanupRemovesOnlyIdleClosedEntries(t *testing.T) {
+	t.Parallel()
+
+	br := NewMemory(Config{
+		FailureThreshold: 1,
+		InitialCooldown:  time.Minute,
+		MaxCooldown:      time.Minute,
+	}, nil, nil)
+
+	br.RecordSuccess("closed")
+	br.RecordFailure("open", "timeout")
+	br.Cleanup()
+
+	if _, ok := br.items.Load("closed"); ok {
+		t.Fatal("closed idle breaker entry was not cleaned up")
+	}
+	if _, ok := br.items.Load("open"); !ok {
+		t.Fatal("open breaker entry was cleaned up")
+	}
+	if got := br.State("open"); got != Open {
+		t.Fatalf("open state after cleanup: got %s, want %s", got, Open)
+	}
+}
+
+func TestMemoryBreakerCleanupRemovesIdleClosedEntryWithFailureHistory(t *testing.T) {
+	t.Parallel()
+
+	br := NewMemory(Config{
+		FailureThreshold: 3,
+		InitialCooldown:  time.Minute,
+		MaxCooldown:      time.Minute,
+	}, nil, nil)
+
+	br.RecordFailure("historical", "timeout")
+	br.Cleanup()
+
+	if _, ok := br.items.Load("historical"); ok {
+		t.Fatal("idle closed breaker entry with failure history was not cleaned up")
+	}
+}

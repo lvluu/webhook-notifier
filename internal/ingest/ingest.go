@@ -127,7 +127,7 @@ func insertDeliveries(ctx context.Context, tx *sql.Tx, eventID string, hooks []W
 	rows, err := tx.QueryContext(ctx, `
 		INSERT INTO deliveries (event_id, webhook_id, customer_id, status, attempt_count, next_attempt_at)
 		SELECT $1, w.webhook_id, w.customer_id, 'pending', 0, now()
-		FROM unnest($2::text[], $3::text[]) AS w(webhook_id, customer_id)
+		FROM unnest($2::uuid[], $3::text[]) AS w(webhook_id, customer_id)
 		RETURNING id
 	`, eventID, webhookIDs, customerIDs)
 	if err != nil {

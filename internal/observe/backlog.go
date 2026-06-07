@@ -46,16 +46,29 @@ func StartPendingDeliveriesSampler(ctx context.Context, db *sql.DB, interval tim
 	}()
 }
 
+// backlogSampleLimit bounds the metric query so observability cannot compete
+// with claim scans across an unbounded pending backlog.
+//
+// This makes the backlog gauge approximate once the pending queue exceeds the
+// limit, which is acceptable for observability because the sampler is a trend
+// signal rather than a correctness mechanism.
+const backlogSampleLimit = 100000
+
 func samplePendingDeliveries(ctx context.Context, db *sql.DB) (err error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT COALESCE(c.class, 1),
 		       COUNT(*),
 		       COALESCE(MAX(EXTRACT(EPOCH FROM now() - d.created_at)), 0)
-		FROM deliveries d
+		FROM (
+			SELECT d.customer_id, d.created_at
+			FROM deliveries d
+			WHERE d.status IN ('pending', 'failed_retry')
+			ORDER BY d.id
+			LIMIT $1
+		) d
 		LEFT JOIN customers c ON c.id = d.customer_id
-		WHERE d.status IN ('pending', 'failed_retry')
 		GROUP BY COALESCE(c.class, 1)
-	`)
+	`, backlogSampleLimit)
 	if err != nil {
 		return fmt.Errorf("query pending deliveries: %w", err)
 	}
