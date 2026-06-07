@@ -15,7 +15,7 @@ one-line summaries and pass/fail status.
 
 | # | Report | Summary | Verdict |
 |---|---|---|---|
-| 7 | [scenario-7.md](results/scenario-7.md) | 10 Customers, all webhooks 5xx, 200 deliveries each. Proves O(1) batch breaker bookkeeping (`batchRecordBreakerFailure`), all breakers open, stable goroutine count. | **PASS** |
+| 7 | [scenario-7.md](results/scenario-7.md) | 10 Customers, all webhooks 5xx, 200 deliveries each. Proves post-commit in-memory breaker recording, all breakers open, stable goroutine count. | **PASS** |
 
 ## Legacy / Internal Reference
 

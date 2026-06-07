@@ -20,6 +20,7 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/lvluu/webhook-notifier/internal/breaker"
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/registry"
@@ -47,6 +48,50 @@ func newIntegrationWorker(opts ...worker.Option) *worker.Worker {
 
 func newIngestStore(db *sql.DB) *ingest.Store {
 	return ingest.New(db, registry.New(db), retention.NoopNotifier{})
+}
+
+func newPersistedBreaker(t *testing.T, ctx context.Context, db *sql.DB, config breaker.Config) breaker.Breaker {
+	t.Helper()
+	snapshots, err := breaker.LoadFromDB(ctx, db)
+	if err != nil {
+		t.Fatalf("load breaker state: %v", err)
+	}
+	return breaker.NewMemory(config, snapshots, func(transition breaker.Transition) {
+		if err := breaker.PersistTransition(ctx, db, transition); err != nil {
+			t.Fatalf("persist breaker transition: %v", err)
+		}
+	})
+}
+
+func webhookIDForDelivery(t *testing.T, ctx context.Context, db *sql.DB, deliveryID string) string {
+	t.Helper()
+	var webhookID string
+	if err := db.QueryRowContext(ctx, `SELECT webhook_id::text FROM deliveries WHERE id = $1`, deliveryID).Scan(&webhookID); err != nil {
+		t.Fatalf("load delivery webhook_id: %v", err)
+	}
+	return webhookID
+}
+
+func persistBreakerTransition(t *testing.T, ctx context.Context, db *sql.DB, transition breaker.Transition) {
+	t.Helper()
+	if transition.WebhookID == "" && transition.ProbeDeliveryID != "" {
+		transition.WebhookID = webhookIDForDelivery(t, ctx, db, transition.ProbeDeliveryID)
+	}
+	if err := breaker.PersistTransition(ctx, db, transition); err != nil {
+		t.Fatalf("persist breaker transition: %v", err)
+	}
+}
+
+func persistBreakerOpenForDelivery(t *testing.T, ctx context.Context, db *sql.DB, deliveryID string, failures int, cooldown time.Duration) {
+	t.Helper()
+	persistBreakerTransition(t, ctx, db, breaker.Transition{
+		WebhookID:    webhookIDForDelivery(t, ctx, db, deliveryID),
+		State:        breaker.Open,
+		FailureCount: failures,
+		Cooldown:     cooldown,
+		NextProbeAt:  time.Now().Add(cooldown),
+		Reason:       retry.ReasonRetryable5xx,
+	})
 }
 
 func TestIngestClaimDeliverHappyPath(t *testing.T) {
@@ -332,11 +377,7 @@ func TestClaimNextBatchAndRequeueConcurrentNoDeadlock(t *testing.T) {
 		}
 	}
 
-	store := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: 3,
-		InitialCooldown:  time.Second,
-		MaxCooldown:      time.Second,
-	}), outbox.WithClaimLease(50*time.Millisecond))
+	store := outbox.New(db, outbox.WithBreakerFiltering(true), outbox.WithClaimLease(50*time.Millisecond))
 
 	deadline := time.Now().Add(2 * time.Second)
 	var deadlocks atomic.Int64
@@ -634,12 +675,12 @@ func TestProcessRetryableFailuresOpenWebhookBreaker(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	store := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
+	store := outbox.New(db, outbox.WithBreakerFiltering(true))
+	w := newIntegrationWorker(worker.WithBreaker(newPersistedBreaker(t, ctx, db, breaker.Config{
 		FailureThreshold: 2,
 		InitialCooldown:  time.Hour,
 		MaxCooldown:      time.Hour,
-	}))
-	w := newIntegrationWorker()
+	})))
 	w.RetryPolicy = retry.New(retry.Config{BaseDelay: time.Millisecond, CapDelay: time.Millisecond})
 	for i := 0; i < 2; i++ {
 		claimed := waitForClaim(t, ctx, store, "cus_breaker", time.Second)
@@ -651,7 +692,7 @@ func TestProcessRetryableFailuresOpenWebhookBreaker(t *testing.T) {
 	assertWebhookBreaker(t, ctx, db, submitted.DeliveryIDs[0], "open", 2)
 }
 
-func TestBatchRetryOpensBreakerWithMultipleDeliveries(t *testing.T) {
+func TestBatchRetryDoesNotUpdateWebhookBreaker(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)
 
@@ -669,11 +710,7 @@ func TestBatchRetryOpensBreakerWithMultipleDeliveries(t *testing.T) {
 		t.Fatalf("append delivery 4: %v", err)
 	}
 
-	store := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: 3,
-		InitialCooldown:  time.Hour,
-		MaxCooldown:      time.Hour,
-	}))
+	store := outbox.New(db, outbox.WithBreakerFiltering(true))
 
 	_ = claimDelivery(t, ctx, store, "cus_batch_breaker", deliveryID)
 	_ = claimDelivery(t, ctx, store, "cus_batch_breaker", delivery2)
@@ -690,7 +727,7 @@ func TestBatchRetryOpensBreakerWithMultipleDeliveries(t *testing.T) {
 		t.Fatalf("MarkRetryBatch: %v", err)
 	}
 
-	assertWebhookBreaker(t, ctx, db, deliveryID, "open", 4)
+	assertWebhookBreaker(t, ctx, db, deliveryID, "closed", 0)
 }
 
 func claimDelivery(t *testing.T, ctx context.Context, store *outbox.Store, customerID, deliveryID string) outbox.Delivery {
@@ -728,9 +765,7 @@ func TestProcessRetryableFailuresCanDisableWebhookBreaker(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	store := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: 0,
-	}))
+	store := outbox.New(db, outbox.WithBreakerFiltering(false))
 	w := newIntegrationWorker()
 	w.RetryPolicy = retry.New(retry.Config{BaseDelay: time.Millisecond, CapDelay: time.Millisecond})
 
@@ -820,7 +855,7 @@ func TestHasClaimableWorkIgnoresBreakerWhenBreakerDisabled(t *testing.T) {
 	customerID := "cus_breaker_disabled"
 	deliveryID := submitOneDelivery(t, ctx, db, customerID)
 	store := outbox.New(db,
-		outbox.WithBreakerConfig(outbox.BreakerConfig{FailureThreshold: 0}),
+		outbox.WithBreakerFiltering(false),
 	)
 
 	_, err := db.ExecContext(ctx, `
@@ -874,7 +909,7 @@ func TestClaimNextBatchIgnoresBreakerWhenBreakerDisabled(t *testing.T) {
 	}
 
 	store := outbox.New(db,
-		outbox.WithBreakerConfig(outbox.BreakerConfig{FailureThreshold: 0}),
+		outbox.WithBreakerFiltering(false),
 	)
 
 	_, err = db.ExecContext(ctx, `
@@ -934,7 +969,11 @@ func TestHalfOpenProbeSuccessClosesWebhookBreaker(t *testing.T) {
 	if !ok {
 		t.Fatal("ClaimNext: got no delivery, want probe")
 	}
-	if result := newIntegrationWorker().Process(ctx, store, claimed); result.Err != nil {
+	if result := newIntegrationWorker(worker.WithBreaker(newPersistedBreaker(t, ctx, db, breaker.Config{
+		FailureThreshold: 2,
+		InitialCooldown:  time.Hour,
+		MaxCooldown:      2 * time.Hour,
+	}))).Process(ctx, store, claimed); result.Err != nil {
 		t.Fatalf("Process: %v", result.Err)
 	}
 
@@ -977,11 +1016,7 @@ func TestHalfOpenProbeFailureReopensWebhookBreaker(t *testing.T) {
 	defer srv.Close()
 
 	deliveryID := submitOneDeliveryToURL(t, ctx, db, "cus_probe_failure", srv.URL)
-	store := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: 2,
-		InitialCooldown:  time.Hour,
-		MaxCooldown:      2 * time.Hour,
-	}))
+	store := outbox.New(db, outbox.WithBreakerFiltering(true))
 	makeWebhookHalfOpen(t, ctx, db, deliveryID)
 
 	claimed, ok, err := store.ClaimNext(ctx, "cus_probe_failure")
@@ -992,6 +1027,11 @@ func TestHalfOpenProbeFailureReopensWebhookBreaker(t *testing.T) {
 		t.Fatal("ClaimNext: got no delivery, want probe")
 	}
 	w := newIntegrationWorker()
+	w.Breaker = newPersistedBreaker(t, ctx, db, breaker.Config{
+		FailureThreshold: 2,
+		InitialCooldown:  time.Hour,
+		MaxCooldown:      2 * time.Hour,
+	})
 	w.RetryPolicy = retry.New(retry.Config{BaseDelay: time.Millisecond, CapDelay: time.Millisecond})
 	if result := w.Process(ctx, store, claimed); result.Err != nil {
 		t.Fatalf("Process: %v", result.Err)
@@ -1706,11 +1746,7 @@ func TestRequeue_ReturnsInFlightToFailedRetryWithoutAttemptRow(t *testing.T) {
 func TestHasClaimableWorkBatchExcludesOpenBreaker(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)
-	store := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: 2,
-		InitialCooldown:  time.Hour,
-		MaxCooldown:      time.Hour,
-	}))
+	store := outbox.New(db, outbox.WithBreakerFiltering(true))
 
 	openBreaker := submitOneDelivery(t, ctx, db, "cus_open_breaker")
 	eligible := submitOneDelivery(t, ctx, db, "cus_eligible")

@@ -9,8 +9,8 @@ compose_prod := "docker compose -f compose/docker-compose.yml -f compose/docker-
 stack_base_services := "postgres pgbouncer notifier caddy webhook-receiver"
 stack_observe_services := "prometheus grafana"
 stack_chaos_services := "chaos-whales chaos-small"
-stack_all_profiles := "--profile observe --profile chaos --profile retention"
-stack_prod_profiles := "--profile observe --profile chaos --profile retention --profile production"
+stack_all_profiles := "--profile observe --profile chaos"
+stack_prod_profiles := "--profile observe --profile chaos --profile production"
 
 # list available recipes
 default:
@@ -87,7 +87,7 @@ stack-up-host n="3":
 stack-observe:
     {{compose}} --profile observe up -d {{stack_observe_services}}
 
-# start the full local demo stack, including observability, chaos, and retention
+# start the full local demo stack, including observability and chaos
 stack-all n="1":
     {{compose}} {{stack_all_profiles}} up -d --scale notifier={{n}}
 
@@ -136,7 +136,8 @@ stack-status:
         count(*) FILTER (WHERE status IN ('pending', 'failed_retry') AND next_attempt_at > now()) AS delayed,
         COALESCE(EXTRACT(EPOCH FROM max(now() - created_at) FILTER (WHERE status IN ('pending', 'failed_retry'))), 0)::bigint AS oldest_ready_s,
         count(*) FILTER (WHERE created_at >= now() - interval '1 minute') AS ingested_1m,
-        count(*) FILTER (WHERE status = 'succeeded' AND updated_at >= now() - interval '1 minute') AS succeeded_1m
+        count(*) FILTER (WHERE status = 'succeeded' AND updated_at >= now() - interval '1 minute') AS succeeded_1m,
+        count(*) FILTER (WHERE status = 'dead' AND updated_at >= now() - interval '1 minute') AS dead_1m
       FROM deliveries
     ),
     claims AS (
@@ -172,7 +173,10 @@ stack-status:
         CASE
           WHEN q.ready = 0 AND c.active_claims = 0 THEN 'CAUGHT UP'
           WHEN q.oldest_ready_s >= 300 THEN 'FAR BEHIND'
-          WHEN q.ready > 0 AND a.attempts_1m < q.ingested_1m THEN 'FALLING BEHIND'
+          WHEN q.ready > 0
+            AND q.oldest_ready_s >= 30
+            AND (q.ingested_1m - (q.succeeded_1m + q.dead_1m)) > GREATEST(1000, q.ingested_1m / 20)
+            THEN 'FALLING BEHIND'
           WHEN q.ready > 0 THEN 'CATCHING UP'
           ELSE 'ACTIVE'
         END AS verdict
@@ -191,6 +195,8 @@ stack-status:
       oldest_ready_s,
       ingested_1m,
       succeeded_1m,
+      dead_1m,
+      succeeded_1m + dead_1m AS drained_1m,
       attempts_1m,
       attempts_per_s AS \"att/s\",
       succeeded,
@@ -201,7 +207,52 @@ stack-status:
     "
 
     echo "Receiver:"
-    curl -fsS http://localhost:9092/metrics 2>/dev/null | grep '^webhook_requests_received_total' || echo "  unavailable"
+    curl -fsS http://localhost:9092/metrics 2>/dev/null | grep '^webhook_requests_received_total' || echo "unavailable"
+
+    echo
+    echo "Notifier breaker/retry metrics:"
+    metrics="$(curl -fsS http://localhost:9090/metrics 2>/dev/null || true)"
+    if [[ -z "$metrics" ]]; then
+      echo "  notifier metrics unavailable"
+    else
+      awk '
+        /^webhook_breaker_state\{/ ||
+        /^webhook_breaker_trips_total\{/ ||
+        /^webhook_attempt_total\{/ ||
+        /^webhook_deliveries_total\{/ ||
+        /^webhook_dlq_total\{/ ||
+        /^webhook_pending_deliveries\{/ ||
+        /^webhook_pending_oldest_age_seconds / ||
+        /^webhook_claim_empty_total / ||
+        /^webhook_worker_transient_db_errors_total\{/ {
+          print
+        }
+      ' <<<"$metrics"
+    fi
+
+    echo
+    echo "Retry DB snapshot:"
+    {{compose}} exec -T postgres psql -U notifier -d notifier -P pager=off -P border=2 -c "
+    SELECT
+      COALESCE(last_error, 'unknown') AS reason,
+      count(*) AS retry_deliveries,
+      min(next_attempt_at) AS next_due_at,
+      max(updated_at) AS last_updated_at
+    FROM deliveries
+    WHERE status = 'failed_retry'
+    GROUP BY COALESCE(last_error, 'unknown')
+    ORDER BY retry_deliveries DESC
+    LIMIT 10;
+
+    SELECT
+      breaker_state,
+      count(*) AS webhooks,
+      max(breaker_failure_count) AS max_failures,
+      min(breaker_next_probe_at) FILTER (WHERE breaker_next_probe_at IS NOT NULL) AS next_probe_at
+    FROM webhooks
+    GROUP BY breaker_state
+    ORDER BY breaker_state;
+    "
 
 # stop and remove the full stack, including volumes and orphan containers
 stack-down:
@@ -220,7 +271,7 @@ stack-rebuild n="3":
 stack-production:
     {{compose_prod}} --profile production up -d
 
-# start full production stack with observe, chaos, and retention
+# start full production stack with observe and chaos
 stack-production-all:
     {{compose_prod}} {{stack_prod_profiles}} up -d --scale notifier=3
 

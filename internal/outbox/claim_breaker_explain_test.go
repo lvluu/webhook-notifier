@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/lvluu/webhook-notifier/internal/outbox"
-	"github.com/lvluu/webhook-notifier/internal/retry"
 )
 
 // TestBreakerOpenDefersBlockedDeliveries is the behavior + evidence test for
@@ -34,21 +33,9 @@ func TestBreakerOpenDefersBlockedDeliveries(t *testing.T) {
 		}
 	}
 
-	store := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: 2,
-		InitialCooldown:  cooldown,
-		MaxCooldown:      cooldown,
-	}))
+	store := outbox.New(db, outbox.WithBreakerFiltering(true))
 
-	// Claim two deliveries and fail them to trip the breaker (threshold 2).
-	c1 := claimDelivery(t, ctx, store, customerID, firstID)
-	c2 := waitForClaim(t, ctx, store, customerID, time.Second)
-	if err := store.MarkRetryBatch(ctx, []outbox.BatchMarkItem{
-		{DeliveryID: c1.ID, StatusCode: 500, ErrorClass: retry.ReasonRetryable5xx, Delay: time.Millisecond},
-		{DeliveryID: c2.ID, StatusCode: 500, ErrorClass: retry.ReasonRetryable5xx, Delay: time.Millisecond},
-	}); err != nil {
-		t.Fatalf("MarkRetryBatch: %v", err)
-	}
+	persistBreakerOpenForDelivery(t, ctx, db, firstID, 2, cooldown)
 
 	assertWebhookBreaker(t, ctx, db, firstID, "open", 2)
 

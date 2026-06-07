@@ -77,7 +77,8 @@ const sqlClaimedDeliveryProjection = `
 	    'in_flight' AS status,
 	    dc.attempt_number, d.next_attempt_at, dc.claimed_at,
 	    d.last_error, d.created_at, d.updated_at,
-	    d.last_delay_millis AS previous_delay_millis
+	    d.last_delay_millis AS previous_delay_millis,
+	    (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = d.id) AS breaker_probe
 	FROM claimed dc
 	JOIN deliveries d ON d.id = dc.delivery_id
 	JOIN events e ON e.id = d.event_id

@@ -6,8 +6,8 @@ Profile **dev**: 10 Customers each own one Webhook. All webhooks point at a
 500-ing Integration Partner endpoint, simulating a downstream outage.
 Workers claim batches of up to **32** deliveries per customer and mark
 them concurrently. Each batch of failures exercises the O(1) batch breaker
-bookkeeping path (`batchRecordBreakerFailure`), which replaces the
-N+1 per-item query pattern with set-based SQL.
+in-memory breaker path after mark commits, which removes breaker bookkeeping
+from mark SQL.
 
 The breaker opens after **2** consecutive 5xx responses.
 

@@ -25,7 +25,7 @@ func (s *Store) ClaimNextBatch(ctx context.Context, customerIDs []string, limit 
 	if limit < 1 {
 		return nil, fmt.Errorf("limit must be >= 1")
 	}
-	if s.breakerConfig.FailureThreshold == 0 {
+	if !s.breakerFiltering {
 		return s.claimNextBatchWithoutBreaker(ctx, customerIDs, limit)
 	}
 	return s.claimNextBatchWithBreaker(ctx, customerIDs, limit)
@@ -250,7 +250,7 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 	if limit < 1 {
 		return nil, fmt.Errorf("limit must be >= 1")
 	}
-	if s.breakerConfig.FailureThreshold == 0 {
+	if !s.breakerFiltering {
 		return s.claimNextNWithoutBreaker(ctx, customerID, limit)
 	}
 
@@ -399,7 +399,7 @@ func scanClaimedDeliveries(rows *sql.Rows) ([]Delivery, error) {
 			&d.EventType, &d.Payload, &d.URL, &d.URLHost, &d.Secret,
 			&d.Status, &d.AttemptNumber, &d.NextAttemptAt, &d.ClaimedAt,
 			&d.LastError, &d.CreatedAt, &d.UpdatedAt,
-			&previousDelayMillis,
+			&previousDelayMillis, &d.BreakerProbe,
 		); err != nil {
 			return nil, fmt.Errorf("scan claimed delivery: %w", err)
 		}
@@ -517,7 +517,7 @@ func (s *Store) HasClaimableWorkBatch(ctx context.Context, customerIDs []string)
 	if len(customerIDs) == 0 {
 		return nil, nil
 	}
-	if s.breakerConfig.FailureThreshold == 0 {
+	if !s.breakerFiltering {
 		return s.hasClaimableWorkBatchWithoutBreaker(ctx, customerIDs)
 	}
 	return s.hasClaimableWorkBatchWithBreaker(ctx, customerIDs)
@@ -599,7 +599,7 @@ func scanClaimableWorkBatch(rows *sql.Rows, capacity int) (map[string]bool, erro
 func (s *Store) hasClaimableWorkSplit(ctx context.Context, customerID string) (bool, error) {
 	var exists bool
 	claimSelection := sqlClaimSelectionFor("d", "dc")
-	if s.breakerConfig.FailureThreshold == 0 {
+	if !s.breakerFiltering {
 		err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 			SELECT EXISTS (
 				SELECT 1

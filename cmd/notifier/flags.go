@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"time"
+
+	"github.com/lvluu/webhook-notifier/internal/breaker"
 )
 
 // cliConfig holds everything parsed from the notifier command line: the
@@ -40,6 +42,9 @@ func parseCLIConfig(fs *flag.FlagSet, args []string) (cliConfig, error) {
 	pgNotifyDSN := fs.String("pg-notify-db", "", "optional direct DATABASE_URL for LISTEN/NOTIFY connections")
 	pgNotifyChannel := fs.String("pg-notify-channel", "webhook_customer_ready", "LISTEN/NOTIFY channel for customer wakeups")
 	maxConns := fs.Int("max-conns", 0, "max DB connections (0 = workerCount + 10)")
+	breakerThreshold := fs.Int("breaker-threshold", 20, "consecutive Webhook failures before opening the circuit breaker; 0 disables breaker filtering")
+	breakerInitialCooldown := fs.Duration("breaker-initial-cooldown", 5*time.Minute, "initial Webhook circuit breaker cooldown before probe")
+	breakerMaxCooldown := fs.Duration("breaker-max-cooldown", 15*time.Minute, "maximum Webhook circuit breaker cooldown after failed probes")
 
 	if err := fs.Parse(args); err != nil {
 		return cliConfig{}, err
@@ -59,6 +64,11 @@ func parseCLIConfig(fs *flag.FlagSet, args []string) (cliConfig, error) {
 	runtimeCfg.PgNotifyDSN = *pgNotifyDSN
 	runtimeCfg.PgNotifyChannel = *pgNotifyChannel
 	runtimeCfg.Discovery.Interval = *discoveryInterval
+	runtimeCfg.Breaker = breaker.NormalizeConfig(breaker.Config{
+		FailureThreshold: *breakerThreshold,
+		InitialCooldown:  *breakerInitialCooldown,
+		MaxCooldown:      *breakerMaxCooldown,
+	})
 
 	return cliConfig{
 		DBDSN:       *db,

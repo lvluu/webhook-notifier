@@ -36,6 +36,15 @@ func TestParseCLIConfig_Defaults(t *testing.T) {
 	if cfg.Runtime.HostConcurrencyCap != 20 {
 		t.Errorf("HostConcurrencyCap: got %d, want 20", cfg.Runtime.HostConcurrencyCap)
 	}
+	if cfg.Runtime.Breaker.FailureThreshold != 20 {
+		t.Errorf("Breaker.FailureThreshold: got %d, want 20", cfg.Runtime.Breaker.FailureThreshold)
+	}
+	if cfg.Runtime.Breaker.InitialCooldown != 5*time.Minute {
+		t.Errorf("Breaker.InitialCooldown: got %s, want 5m", cfg.Runtime.Breaker.InitialCooldown)
+	}
+	if cfg.Runtime.Breaker.MaxCooldown != 15*time.Minute {
+		t.Errorf("Breaker.MaxCooldown: got %s, want 15m", cfg.Runtime.Breaker.MaxCooldown)
+	}
 	// The two flags this change adds — defaults must match worker.DefaultConfig
 	// so out-of-the-box behavior is unchanged.
 	if cfg.Runtime.Worker.RequestTimeout != 30*time.Second {
@@ -54,6 +63,9 @@ func TestParseCLIConfig_OverridesNewDeliveryFlags(t *testing.T) {
 		"--delivery-concurrency=4",
 		"--workers=8",
 		"--host-cap=2",
+		"--breaker-threshold=3",
+		"--breaker-initial-cooldown=2s",
+		"--breaker-max-cooldown=9s",
 	})
 
 	if got := cfg.Runtime.Worker.RequestTimeout; got != 5*time.Second {
@@ -67,6 +79,15 @@ func TestParseCLIConfig_OverridesNewDeliveryFlags(t *testing.T) {
 	}
 	if got := cfg.Runtime.HostConcurrencyCap; got != 2 {
 		t.Errorf("HostConcurrencyCap: got %d, want 2", got)
+	}
+	if got := cfg.Runtime.Breaker.FailureThreshold; got != 3 {
+		t.Errorf("Breaker.FailureThreshold: got %d, want 3", got)
+	}
+	if got := cfg.Runtime.Breaker.InitialCooldown; got != 2*time.Second {
+		t.Errorf("Breaker.InitialCooldown: got %s, want 2s", got)
+	}
+	if got := cfg.Runtime.Breaker.MaxCooldown; got != 9*time.Second {
+		t.Errorf("Breaker.MaxCooldown: got %s, want 9s", got)
 	}
 }
 

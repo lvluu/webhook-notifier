@@ -205,11 +205,11 @@ func runScenario5Phase(ctx context.Context, db *sql.DB, profile scenario5Profile
 	baselineGoroutines := runtime.NumGoroutine()
 
 	sched := roundrobin.New()
-	outboxStore := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: profile.BreakerFailureThreshold,
-		InitialCooldown:  profile.BreakerInitialCooldown,
-		MaxCooldown:      profile.BreakerMaxCooldown,
-	}))
+	outboxStore := outbox.New(db, outbox.WithBreakerFiltering(profile.BreakerFailureThreshold > 0))
+	webhookBreaker, err := newBenchBreaker(ctx, db, profile.BreakerFailureThreshold, profile.BreakerInitialCooldown, profile.BreakerMaxCooldown)
+	if err != nil {
+		return scenario5RunResult{}, err
+	}
 	httpClient := worker.NewHTTPClient(worker.DefaultHTTPConfig())
 	workerLog := slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -234,6 +234,7 @@ func runScenario5Phase(ctx context.Context, db *sql.DB, profile scenario5Profile
 					BaseDelay:   50 * time.Millisecond,
 					CapDelay:    50 * time.Millisecond,
 				})),
+				worker.WithBreaker(webhookBreaker),
 				worker.WithLogger(workerLog),
 			)
 			if err := w.Run(workerCtx, outboxStore); err != nil && workerCtx.Err() == nil {

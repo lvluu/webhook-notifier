@@ -14,10 +14,7 @@ func (s *Store) MarkSucceeded(ctx context.Context, deliveryID string, statusCode
 		return fmt.Errorf("delivery_id is required")
 	}
 
-	var webhookID string
-	var breakerClosed bool
 	err := s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int, wid string) error {
-		webhookID = wid
 		if _, err := tx.ExecContext(ctx, `DELETE FROM delivery_claims WHERE delivery_id = $1`, deliveryID); err != nil {
 			return fmt.Errorf("delete claim: %w", err)
 		}
@@ -42,17 +39,10 @@ func (s *Store) MarkSucceeded(ctx context.Context, deliveryID string, statusCode
 			return fmt.Errorf("mark delivery succeeded: %w", err)
 		}
 
-		closed, err := s.recordBreakerSuccess(ctx, tx, wid, deliveryID)
-		if closed {
-			breakerClosed = true
-		}
-		return err
+		return nil
 	})
 	if err != nil {
 		return err
-	}
-	if breakerClosed {
-		emitBreakerClosed(webhookID)
 	}
 	return nil
 }
@@ -66,12 +56,7 @@ func (s *Store) MarkRetry(ctx context.Context, deliveryID string, statusCode int
 		return fmt.Errorf("delay must be non-negative")
 	}
 
-	var webhookID string
-	var breakerTripped bool
-	var tripReason string
 	err := s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int, wid string) error {
-		webhookID = wid
-		tripReason = errorClass
 		if _, err := tx.ExecContext(ctx, `DELETE FROM delivery_claims WHERE delivery_id = $1`, deliveryID); err != nil {
 			return fmt.Errorf("delete claim: %w", err)
 		}
@@ -94,17 +79,10 @@ func (s *Store) MarkRetry(ctx context.Context, deliveryID string, statusCode int
 			return fmt.Errorf("mark delivery failed retry: %w", err)
 		}
 
-		tripped, err := s.recordBreakerFailure(ctx, tx, wid, errorClass)
-		if tripped {
-			breakerTripped = true
-		}
-		return err
+		return nil
 	})
 	if err != nil {
 		return err
-	}
-	if breakerTripped {
-		emitBreakerOpened(webhookID, tripReason)
 	}
 	return nil
 }
@@ -119,12 +97,7 @@ func (s *Store) MarkDead(ctx context.Context, deliveryID string, statusCode int,
 		return fmt.Errorf("reason is required")
 	}
 
-	var webhookID string
-	var breakerTripped bool
-	var tripReason string
 	err := s.withInFlightDelivery(ctx, deliveryID, func(tx *sql.Tx, attemptNumber int, wid string) error {
-		webhookID = wid
-		tripReason = reason
 		if _, err := tx.ExecContext(ctx, `DELETE FROM delivery_claims WHERE delivery_id = $1`, deliveryID); err != nil {
 			return fmt.Errorf("delete claim: %w", err)
 		}
@@ -158,17 +131,10 @@ func (s *Store) MarkDead(ctx context.Context, deliveryID string, statusCode int,
 			return fmt.Errorf("insert dead letter: %w", err)
 		}
 
-		tripped, err := s.recordBreakerFailure(ctx, tx, wid, reason)
-		if tripped {
-			breakerTripped = true
-		}
-		return err
+		return nil
 	})
 	if err != nil {
 		return err
-	}
-	if breakerTripped {
-		emitBreakerOpened(webhookID, tripReason)
 	}
 	return nil
 }

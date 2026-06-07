@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/lvluu/webhook-notifier/internal/breaker"
 	"github.com/lvluu/webhook-notifier/internal/observe"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/retry"
@@ -60,6 +61,7 @@ type DeliveryStore interface {
 // Worker sends webhook Deliveries and records retry outcomes.
 type Worker struct {
 	HTTP        *http.Client
+	Breaker     breaker.Breaker
 	RetryPolicy retry.RetryPolicy
 	Scheduler   scheduler.Scheduler
 	HostLimiter *HostLimiter
@@ -168,6 +170,12 @@ func WithRetryPolicy(rp retry.RetryPolicy) Option {
 // WithHostLimiter sets the optional per-host concurrency limiter.
 func WithHostLimiter(hl *HostLimiter) Option {
 	return func(w *Worker) { w.HostLimiter = hl }
+}
+
+// WithBreaker sets the Webhook circuit breaker updated after delivery marks
+// commit. Nil disables in-memory breaker recording.
+func WithBreaker(b breaker.Breaker) Option {
+	return func(w *Worker) { w.Breaker = b }
 }
 
 // WithLogger sets the base structured logger used by the Worker.

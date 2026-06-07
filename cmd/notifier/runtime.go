@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sync"
 
+	circuitbreaker "github.com/lvluu/webhook-notifier/internal/breaker"
 	"github.com/lvluu/webhook-notifier/internal/outbox"
 	"github.com/lvluu/webhook-notifier/internal/scheduler/dbweights"
 	"github.com/lvluu/webhook-notifier/internal/scheduler/roundrobin"
@@ -113,7 +114,7 @@ func defaultRuntimeDeps() runtimeDeps {
 			return roundrobin.New()
 		},
 		newStore: func(db *sql.DB, cfg workerRuntimeConfig) *outbox.Store {
-			return outbox.New(db)
+			return outbox.New(db, outbox.WithBreakerFiltering(cfg.Breaker.FailureThreshold > 0))
 		},
 		newLimiter: func(maxPerHost int) *worker.HostLimiter {
 			return worker.NewHostLimiter(worker.HostLimiterConfig{MaxPerHost: maxPerHost})
@@ -153,7 +154,7 @@ func startDeliveryRuntimeWithDeps(
 		return nil, nil, fmt.Errorf("worker config: %w", err)
 	}
 
-	group := newRuntimeGroup(parent, logger, cfg.WorkerCount+1)
+	group := newRuntimeGroup(parent, logger, cfg.WorkerCount+2)
 
 	sched := deps.newScheduler(db, cfg)
 	notify := schedulerNotifier{
@@ -162,6 +163,19 @@ func startDeliveryRuntimeWithDeps(
 	outboxStore := deps.newStore(db, cfg)
 	limiter := deps.newLimiter(cfg.HostConcurrencyCap)
 	httpClient := worker.NewHTTPClient(worker.DefaultHTTPConfig())
+	var webhookBreaker circuitbreaker.Breaker
+	if cfg.Breaker.FailureThreshold > 0 {
+		snapshots, err := circuitbreaker.LoadFromDB(parent, db)
+		if err != nil {
+			group.cancel()
+			return nil, nil, fmt.Errorf("load breaker state: %w", err)
+		}
+		persister := circuitbreaker.NewAsyncPersister(db, logger.With("component", "breaker-persister"), 1024)
+		webhookBreaker = circuitbreaker.NewMemory(cfg.Breaker, snapshots, persister.Sink())
+		group.Go("breaker persister", persister.Run)
+	} else {
+		webhookBreaker = circuitbreaker.NewMemory(cfg.Breaker, nil, nil)
+	}
 
 	var broadcastDB *sql.DB
 	pgNotifyDSN := cfg.PgNotifyDSN
@@ -200,6 +214,7 @@ func startDeliveryRuntimeWithDeps(
 				cfg.Worker,
 				worker.WithHTTPClient(httpClient),
 				worker.WithHostLimiter(limiter),
+				worker.WithBreaker(webhookBreaker),
 				worker.WithLogger(logger.With("component", "worker", "worker_id", workerID)),
 			)
 			if err != nil {
