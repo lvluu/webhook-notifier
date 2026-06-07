@@ -57,26 +57,12 @@ func (s *Store) MarkSucceededBatch(ctx context.Context, items []BatchMarkItem) e
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var marked int
+	var attemptsMarked, claimsDeleted int
 	err = tx.QueryRowContext(ctx, `
 		WITH batch AS (
 			SELECT * FROM unnest(
 				$1::text[], $2::int[], $3::bigint[]
 			) AS t(id, status_code, duration_ms)
-		),
-		locked_deliveries AS (
-			SELECT d.id
-			FROM deliveries d
-			JOIN batch b ON d.id = b.id::uuid
-			ORDER BY d.id
-			FOR UPDATE OF d
-		),
-		deleted_claims AS (
-			DELETE FROM delivery_claims dc
-			USING batch b
-			JOIN locked_deliveries ld ON ld.id = b.id::uuid
-			WHERE dc.delivery_id = ld.id
-			RETURNING dc.delivery_id, dc.attempt_number, b.status_code, b.duration_ms
 		),
 		updated AS (
 			UPDATE deliveries d
@@ -84,22 +70,31 @@ func (s *Store) MarkSucceededBatch(ctx context.Context, items []BatchMarkItem) e
 			    attempt_count = dc.attempt_number,
 			    updated_at = now(),
 			    last_error = NULL
-			FROM deleted_claims dc
-			WHERE d.id = dc.delivery_id
-			RETURNING d.id, dc.attempt_number, dc.status_code, dc.duration_ms
+			FROM batch b
+			JOIN delivery_claims dc ON dc.delivery_id = b.id::uuid
+			WHERE d.id = b.id::uuid
+			RETURNING d.id, dc.attempt_number, b.status_code, b.duration_ms
+		),
+		deleted_claims AS (
+			DELETE FROM delivery_claims dc
+			USING updated u
+			WHERE dc.delivery_id = u.id
+			RETURNING dc.delivery_id
 		),
 		inserted AS (
 			INSERT INTO delivery_attempts (delivery_id, attempt_number, status_code, duration_ms, sent_at)
 			SELECT id, attempt_number, status_code, duration_ms, now() FROM updated
 			RETURNING delivery_id
 		)
-		SELECT COUNT(*) FROM inserted
-	`, base.ids, base.statusCodes, base.durationsMs).Scan(&marked)
+		SELECT
+			(SELECT COUNT(*) FROM inserted),
+			(SELECT COUNT(*) FROM deleted_claims)
+	`, base.ids, base.statusCodes, base.durationsMs).Scan(&attemptsMarked, &claimsDeleted)
 	if err != nil {
 		return fmt.Errorf("batch mark succeeded: %w", err)
 	}
-	if marked != len(items) {
-		return fmt.Errorf("batch mark succeeded: marked %d of %d deliveries", marked, len(items))
+	if attemptsMarked != len(items) || claimsDeleted != len(items) {
+		return fmt.Errorf("batch mark succeeded: marked %d of %d attempts and deleted %d claims", attemptsMarked, len(items), claimsDeleted)
 	}
 	if s.breakerConfig.FailureThreshold == 0 || s.deferBreaker {
 		return s.commitBatchTx(tx, "success")

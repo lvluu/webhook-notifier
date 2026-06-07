@@ -20,14 +20,20 @@ Fairness metric note:
 
 | Workers | Total Deliveries | Duration | Throughput (Deliveries/sec) | Avg Claim Batch | Claim Calls | Empty Claims | Retry Rate | Dead Rate | Duplicate (delivery_id, attempt_number) tuples | Small P95 First-Attempt Latency (ms) | Whale P95 First-Attempt Latency (ms) | Reliability | Fairness |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 16 | 135000 | 32.848s | 4109.87 | 88.69 | 1538 | 109 | 1.03% | 0.00% | 0 | 18521.04 | 29947.65 | **PASS** | **PASS** |
-| 32 | 135000 | 17.306s | 7800.85 | 88.20 | 1546 | 131 | 1.00% | 0.00% | 0 | 9495.59 | 14804.06 | **PASS** | **PASS** |
-| 64 | 135000 | 13.738s | 9826.43 | 83.74 | 1629 | 232 | 1.04% | 0.00% | 0 | 5592.34 | 11136.48 | **PASS** | **PASS** |
+| 16 | 135000 | 28.868s | 4676.52 | 89.44 | 1525 | 100 | 1.02% | 0.00% | 0 | 18430.26 | 27153.58 | **PASS** | **PASS** |
+| 32 | 135000 | 18.972s | 7115.89 | 88.47 | 1541 | 129 | 0.98% | 0.00% | 0 | 9642.37 | 15154.39 | **PASS** | **PASS** |
+| 64 | 135000 | 16.65s | 8108.13 | 83.27 | 1637 | 345 | 0.97% | 0.00% | 0 | 6019.15 | 12036.24 | **PASS** | **PASS** |
 
 ## DB Hotspot Note
 
 This stress run uses breaker-aware discovery (`breaker_failure_threshold: 1000`)
-without intentionally opening breakers. `pg_stat_statements` moved
-claimable-Customer discovery from the former rank-1 hotspot (~134-153s total DB
-time in prior stress runs) to rank 3 at ~9.2s total / ~50.5ms mean. The top
-remaining query costs are now multi-Customer claim SQL and batch mark SQL.
+without intentionally opening breakers. The follow-up claim/mark optimization
+moved `ClaimNextBatch` from ~74.7s to ~36.9s total DB time and
+`MarkSucceededBatch` from ~48.7s to ~36.3s total DB time in
+`pg_stat_statements`. `HasClaimableWorkBatch` dropped from ~6.9s to ~0.9s after
+using the same stale-claim guard as the claim path.
+
+The remaining top query costs are still multi-Customer claim SQL and batch mark
+SQL. The new visible coordination cost is the stale-claim existence probe
+(~15.0s total / ~2.2ms mean in this run); optimizing that further would require
+accepting bounded stale-recovery latency or adding a low-frequency cache.

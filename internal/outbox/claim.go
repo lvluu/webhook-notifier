@@ -131,8 +131,80 @@ func (s *Store) claimNextBatchWithBreaker(ctx context.Context, customerIDs []str
 	claimStarted := time.Now()
 	perCustomerLimit := perCustomerClaimLimit(limit, len(customerIDs))
 
+	hasStale, err := s.hasStaleDeliveryClaims(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	claimSelection := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
 	breakerEligible := claimSelection.BreakerEligible()
+	if !hasStale {
+		rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+			WITH input_customers AS (
+				SELECT DISTINCT customer_id
+				FROM unnest($1::text[]) AS input(customer_id)
+			),
+			candidate AS (
+				SELECT picked.id, picked.webhook_id, picked.attempt_count
+				FROM input_customers ic
+				CROSS JOIN LATERAL (
+					SELECT d.id, d.webhook_id, d.attempt_count, d.next_attempt_at, d.created_at
+					FROM deliveries d
+					JOIN webhooks w ON w.id = d.webhook_id
+					LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
+					WHERE d.customer_id = ic.customer_id
+					  AND %s
+					  AND %s
+					ORDER BY d.next_attempt_at, d.created_at, d.id
+					LIMIT $4
+					FOR UPDATE OF d SKIP LOCKED
+				) picked
+				ORDER BY picked.next_attempt_at, picked.created_at, picked.id
+				LIMIT $3
+			),
+			probe AS (
+				UPDATE webhooks w
+				SET breaker_state = 'half_open',
+				    breaker_probe_delivery_id = c.id
+				FROM candidate c
+				WHERE w.id = c.webhook_id
+				  AND w.breaker_state = 'open'
+				  AND w.breaker_next_probe_at <= now()
+				RETURNING c.id
+			),
+			claimed AS (
+				INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
+				SELECT c.id, c.attempt_count + 1, now()
+				FROM candidate c
+				JOIN webhooks w ON w.id = c.webhook_id
+				WHERE w.breaker_state = 'closed'
+				   OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = c.id)
+				   OR c.id IN (SELECT id FROM probe)
+				ON CONFLICT (delivery_id) DO UPDATE
+				    SET attempt_number = EXCLUDED.attempt_number,
+				        claimed_at = now()
+				    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
+				RETURNING delivery_id, attempt_number, claimed_at
+			)
+			%s`, claimSelection.Ready(), breakerEligible, sqlClaimedDeliveryProjection), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
+		if err != nil {
+			return nil, fmt.Errorf("cte claim batch with breaker: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+
+		deliveries, err := scanClaimedDeliveries(rows)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(deliveries) == 0 {
+			observe.IncClaimEmpty()
+		}
+		observe.ObserveClaimDuration(time.Since(claimStarted).Seconds())
+		observe.ObserveClaimBatchSize(float64(len(deliveries)))
+		return deliveries, nil
+	}
+
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		WITH input_customers AS (
 			SELECT DISTINCT customer_id
@@ -224,6 +296,22 @@ func (s *Store) claimNextBatchWithBreaker(ctx context.Context, customerIDs []str
 	observe.ObserveClaimDuration(time.Since(claimStarted).Seconds())
 	observe.ObserveClaimBatchSize(float64(len(deliveries)))
 	return deliveries, nil
+}
+
+func (s *Store) hasStaleDeliveryClaims(ctx context.Context) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM delivery_claims
+			WHERE claimed_at < now() - ($1 * interval '1 millisecond')
+			LIMIT 1
+		)
+	`, s.claimLease.Milliseconds()).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check stale delivery claims: %w", err)
+	}
+	return exists, nil
 }
 
 // ClaimNext claims one ready Delivery for customerID using SELECT FOR UPDATE
@@ -589,6 +677,29 @@ func (s *Store) hasClaimableWorkBatchWithoutBreaker(ctx context.Context, custome
 func (s *Store) hasClaimableWorkBatchWithBreaker(ctx context.Context, customerIDs []string) (map[string]bool, error) {
 	claimSelection := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
 	breakerEligible := claimSelection.BreakerEligible()
+
+	hasStale, err := s.hasStaleDeliveryClaims(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !hasStale {
+		rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+			SELECT DISTINCT d.customer_id
+			FROM deliveries d
+			JOIN webhooks w ON w.id = d.webhook_id
+			LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
+			WHERE d.customer_id = ANY($1)
+			  AND %s
+			  AND %s
+		`, claimSelection.Ready(), breakerEligible), customerIDs)
+		if err != nil {
+			return nil, fmt.Errorf("has claimable work batch with breaker: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+
+		return scanClaimableWorkBatch(rows, len(customerIDs))
+	}
+
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		WITH claimable AS (
 			SELECT DISTINCT d.customer_id

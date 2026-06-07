@@ -107,8 +107,11 @@ to flatten:
 
 - `production_workload`: breaker-aware claimable-Customer discovery was reduced
   from the dominant DB hotspot to a secondary cost under 20k sparse Small
-  Customers. The remaining ceiling is multi-Customer claim SQL plus batch mark
-  SQL; 64 workers still improves throughput but adds more empty-claim churn.
+  Customers. The follow-up outbox hot-path change halves the measured
+  `ClaimNextBatch` DB time, reduces `MarkSucceededBatch`, and makes
+  `HasClaimableWorkBatch` cheap when no stale leases exist. The remaining
+  ceiling is still multi-Customer claim SQL plus batch mark SQL; the
+  stale-claim existence probe is now the next visible coordination cost.
 - `horizontal_scale`: after tuning the benchmark child notifiers to avoid
   artificial host-cap requeue churn, dense throughput scales from 1 to 2
   replicas and then knees at 4 replicas. The remaining hotspots are
