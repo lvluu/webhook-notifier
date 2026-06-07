@@ -113,19 +113,18 @@ stack-smoke:
       -c "SELECT status, count(*) FROM deliveries GROUP BY status ORDER BY status; SELECT count(*) AS attempts FROM delivery_attempts;"
     curl -fsS http://localhost:9092/metrics
 
-# show stack containers plus queue/backlog health
+# compact queue/backlog dashboard for watch -n
 stack-status:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    {{compose}} ps
-
-    echo
-    echo "Queue health"
-    if ! {{compose}} ps --status running --services | grep -qx postgres; then
-      echo "unavailable: postgres is not running"
+    if ! {{compose}} ps --status running --services 2>/dev/null | grep -qx postgres; then
+      echo "postgres not running"
       exit 0
     fi
+
+    echo "$(date '+%H:%M:%S') ─── Stack Status ───"
+    echo
 
     {{compose}} exec -T postgres psql -U notifier -d notifier -P pager=off -P border=2 -c "
     WITH queue AS (
@@ -135,8 +134,9 @@ stack-status:
         count(*) FILTER (WHERE status = 'dead') AS dead,
         count(*) FILTER (WHERE status IN ('pending', 'failed_retry') AND next_attempt_at <= now()) AS due_now,
         count(*) FILTER (WHERE status IN ('pending', 'failed_retry') AND next_attempt_at > now()) AS delayed,
-        COALESCE(EXTRACT(EPOCH FROM max(now() - created_at) FILTER (WHERE status IN ('pending', 'failed_retry'))), 0)::bigint AS oldest_ready_seconds,
-        count(*) FILTER (WHERE created_at >= now() - interval '1 minute') AS created_last_minute
+        COALESCE(EXTRACT(EPOCH FROM max(now() - created_at) FILTER (WHERE status IN ('pending', 'failed_retry'))), 0)::bigint AS oldest_ready_s,
+        count(*) FILTER (WHERE created_at >= now() - interval '1 minute') AS ingested_1m,
+        count(*) FILTER (WHERE status = 'succeeded' AND updated_at >= now() - interval '1 minute') AS succeeded_1m
       FROM deliveries
     ),
     claims AS (
@@ -144,57 +144,64 @@ stack-status:
       FROM delivery_claims
     ),
     attempts AS (
-      SELECT count(*) AS attempts_last_minute
+      SELECT
+        count(*) FILTER (WHERE sent_at >= now() - interval '1 minute') AS attempts_1m,
+        round(count(*) FILTER (WHERE sent_at >= now() - interval '10 seconds') / 10.0, 1) AS attempts_per_s
       FROM delivery_attempts
-      WHERE sent_at >= now() - interval '1 minute'
     ),
     customers AS (
       SELECT count(DISTINCT customer_id) AS ready_customers
       FROM deliveries
       WHERE status IN ('pending', 'failed_retry')
     ),
+    breakers AS (
+      SELECT
+        count(*) FILTER (WHERE breaker_state = 'open') AS open_breakers,
+        count(*) FILTER (WHERE breaker_state = 'half_open') AS half_open_breakers
+      FROM webhooks
+    ),
     health AS (
       SELECT
-        q.ready,
-        q.due_now,
-        q.delayed,
+        q.*,
         c.active_claims,
-        q.oldest_ready_seconds,
-        q.created_last_minute,
-        a.attempts_last_minute,
+        a.attempts_1m,
+        a.attempts_per_s,
         customers.ready_customers,
-        q.succeeded,
-        q.dead,
+        b.open_breakers,
+        b.half_open_breakers,
         CASE
-          WHEN q.ready = 0 AND c.active_claims = 0 THEN 'caught up'
-          WHEN q.oldest_ready_seconds >= 300 THEN 'far behind'
-          WHEN q.ready > 0 AND a.attempts_last_minute < q.created_last_minute THEN 'falling behind'
-          WHEN q.ready > 0 THEN 'catching up'
-          ELSE 'active'
+          WHEN q.ready = 0 AND c.active_claims = 0 THEN 'CAUGHT UP'
+          WHEN q.oldest_ready_s >= 300 THEN 'FAR BEHIND'
+          WHEN q.ready > 0 AND a.attempts_1m < q.ingested_1m THEN 'FALLING BEHIND'
+          WHEN q.ready > 0 THEN 'CATCHING UP'
+          ELSE 'ACTIVE'
         END AS verdict
       FROM queue q
       CROSS JOIN claims c
       CROSS JOIN attempts a
       CROSS JOIN customers
+      CROSS JOIN breakers b
     )
     SELECT
       verdict,
-      ready,
+      ready AS backlog,
       due_now,
-      delayed,
-      active_claims,
-      ready_customers,
-      oldest_ready_seconds,
-      created_last_minute,
-      attempts_last_minute,
+      active_claims AS claims,
+      ready_customers AS customers,
+      oldest_ready_s,
+      ingested_1m,
+      succeeded_1m,
+      attempts_1m,
+      attempts_per_s AS \"att/s\",
       succeeded,
-      dead
+      dead,
+      open_breakers AS open_brk,
+      half_open_breakers AS ho_brk
     FROM health;
     "
 
-    echo
-    echo "Receiver traffic"
-    curl -fsS http://localhost:9092/metrics 2>/dev/null | grep '^webhook_requests_received_total' || echo "unavailable: receiver metrics are not reachable on localhost:9092"
+    echo "Receiver:"
+    curl -fsS http://localhost:9092/metrics 2>/dev/null | grep '^webhook_requests_received_total' || echo "  unavailable"
 
 # stop and remove the full stack, including volumes and orphan containers
 stack-down:
