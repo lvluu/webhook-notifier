@@ -67,48 +67,6 @@ func TestSqlFragmentsAnyComposesReadyAndStale(t *testing.T) {
 	}
 }
 
-func TestSqlFragmentsBreakerEligibleViaSelection(t *testing.T) {
-	sel := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
-	got := sel.BreakerEligible()
-	if got != sqlBreakerEligible {
-		t.Errorf("BreakerEligible() = %q, want %q", got, sqlBreakerEligible)
-	}
-}
-
-func TestSqlFragmentsReadyWithCustomAliases(t *testing.T) {
-	// sqlClaimSelection is a compatibility shim; Ready() always returns
-	// the hardcoded sqlReady constant regardless of constructor args.
-	sel := sqlClaimSelectionFor("del", "clm")
-	got := sel.Ready()
-
-	if !strings.Contains(got, "d.status IN") {
-		t.Error("Ready() should contain d.status even with custom aliases")
-	}
-	if !strings.Contains(got, "dc.delivery_id") {
-		t.Error("Ready() should contain dc.delivery_id even with custom aliases")
-	}
-}
-
-func TestSqlFragmentsStaleRejectsDynamicInput(t *testing.T) {
-	sel := sqlClaimSelectionFor("d", "dc")
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("Stale() should panic when called with dynamic lease value")
-		}
-	}()
-	sel.Stale(5000)
-}
-
-func TestSqlFragmentsAnyRejectsDynamicInput(t *testing.T) {
-	sel := sqlClaimSelectionFor("d", "dc")
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("Any() should panic when called with dynamic lease value")
-		}
-	}()
-	sel.Any(5000)
-}
-
 func TestStoreFragmentsWithCustomClaimLease(t *testing.T) {
 	s := New(nil, WithClaimLease(30*time.Second))
 	if !strings.Contains(s.staleSQL, "30000") {

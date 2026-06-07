@@ -9,21 +9,6 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/observe"
 )
 
-// sqlClaimSelectionFor exists only for backward-compatible test access.
-// Production code uses the pre-computed Store fields directly.
-func sqlClaimSelectionFor(_, _ string) sqlClaimSelection {
-	return sqlClaimSelection{}
-}
-
-type sqlClaimSelection struct{}
-
-func (s sqlClaimSelection) WithWebhookAlias(_ string) sqlClaimSelection { return s }
-func (s sqlClaimSelection) Ready() string                               { return sqlReady }
-func (s sqlClaimSelection) ReadyWithoutClaim() string                   { return sqlReadyWithoutClaim }
-func (s sqlClaimSelection) Stale(_ int64) string                        { panic("use store.staleSQL") }
-func (s sqlClaimSelection) Any(_ int64) string                          { panic("use store.anySQL") }
-func (s sqlClaimSelection) BreakerEligible() string                     { return sqlBreakerEligible }
-
 // claimCtx returns a child context with s.claimTimeout applied, plus a cancel
 // func. When claimTimeout is zero the original ctx and a no-op cancel are
 // returned so callers can unconditionally defer cancel().
