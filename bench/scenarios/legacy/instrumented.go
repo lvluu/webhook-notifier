@@ -8,7 +8,7 @@ import (
 )
 
 // instrumentedScheduler wraps a Scheduler and counts Pick invocations.
-// Used by Scenario 1 to measure the round-robin cycle bound for the
+// Used by Late Arrival Fairness to measure the round-robin cycle bound for the
 // late-arrival acceptance criterion.
 //
 // It also supports per-customer pick tracking: call BeginTracking(customerID)

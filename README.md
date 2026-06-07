@@ -6,7 +6,8 @@ Design: [docs/DESIGN.md](docs/DESIGN.md) · Requirements: [REQUIREMENTS.md](REQU
 
 ## Status
 
-PoC complete. All 8 benchmark scenarios pass. Ready for submission and pair-session review.
+PoC complete. The assignment-facing benchmark scenarios pass, with legacy
+issue-scoped scenarios retained under `cmd/bench-legacy` for reference.
 
 ```bash
 gh issue list --label ready-for-agent --state open
@@ -72,7 +73,7 @@ just bench-7                  # internal breaker hardening
 Direct runner form:
 
 ```bash
-BENCH_PROFILE=stress go run ./cmd/bench scenario6
+BENCH_PROFILE=stress go run ./cmd/bench production_workload
 ```
 
 See [bench/README.md](bench/README.md) for all scenarios and
@@ -89,7 +90,7 @@ just stack-up
 This starts:
 
 - Postgres 17 with migrations applied during first container initialization.
-- PgBouncer in session-pooling mode between notifier replicas and Postgres.
+- PgBouncer in transaction-pooling mode between notifier replicas and Postgres.
 - One scaled `notifier` replica by default.
 - Caddy on `localhost:8080` as the host-facing ingress for `POST /api/customers` and `POST /api/events`.
 - A webhook receiver fixture on `localhost:8081`, with receiver metrics on `localhost:9092`.
@@ -133,7 +134,7 @@ just stack-chaos 3         # opt-in aggressive subscriber.created whale/small lo
 just stack-down            # remove containers and volumes
 ```
 
-Prometheus discovers scaled notifier replicas through Docker DNS and scrapes each replica's `:9090` metrics endpoint directly when you start the optional observability profile. Caddy only fronts the business ingest API; it is not another notifier process and does not change worker scale. Notifier replicas keep transactional traffic behind PgBouncer, while advisory `LISTEN/NOTIFY` connections use direct Postgres connections so wake hints do not compete for pooled sessions. The opt-in chaos load emits `subscriber.created` Events from Whale Customers (`weight=3`) and Small Customers (`weight=1`) so fairness and queue-depth metrics map directly to the assignment scenario.
+Prometheus discovers scaled notifier replicas through Docker DNS and scrapes each replica's `:9090` metrics endpoint directly when you start the optional observability profile. Caddy only fronts the business ingest API; it is not another notifier process and does not change worker scale. Notifier replicas keep transactional traffic behind PgBouncer, while advisory `LISTEN/NOTIFY` connections use direct Postgres connections so wake hints do not compete for pooled sessions. The opt-in chaos load emits `subscriber.created` Events from Whale Customers (`class=3`) and Small Customers (`class=1`) so fairness and queue-depth metrics map directly to the assignment scenario.
 
 ## Configuration
 
@@ -165,7 +166,8 @@ DATABASE_URL=postgres://notifier:notifier@localhost:5432/notifier?sslmode=disabl
 │   └── adr/               # numbered architectural decisions
 ├── cmd/
 │   ├── notifier/          # service entrypoint
-│   └── bench/             # benchmark scenario runner
+│   ├── bench/             # assignment-facing benchmark scenario runner
+│   └── bench-legacy/      # legacy issue-scoped benchmark runner
 ├── internal/
 │   ├── ingest/            # Event ingest + fan-out to Deliveries
 │   ├── scheduler/         # Scheduler interface + round-robin impl (ADR-0001)

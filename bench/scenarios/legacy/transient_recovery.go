@@ -464,8 +464,6 @@ Profile **%s**: %d Customers, %d Events per Customer, 3 Webhooks per Customer. E
 	return f.Close()
 }
 
-
-
 func queryPartnerLatency(ctx context.Context, db *sql.DB, host string) (scenarios.PartnerLatencyStats, error) {
 	var stats scenarios.PartnerLatencyStats
 	err := db.QueryRowContext(ctx, `
@@ -485,8 +483,6 @@ func queryPartnerLatency(ctx context.Context, db *sql.DB, host string) (scenario
 	return stats, nil
 }
 
-
-
 func queryPartnerRecovery(ctx context.Context, db *sql.DB, host string, outageStart time.Time, outageEnd time.Time) (scenarios.PartnerRecoveryStats, error) {
 	var stats scenarios.PartnerRecoveryStats
 	err := db.QueryRowContext(ctx, `
@@ -504,8 +500,6 @@ func queryPartnerRecovery(ctx context.Context, db *sql.DB, host string, outageSt
 	}
 	return stats, nil
 }
-
-
 
 func queryPartnerRetryBuckets(ctx context.Context, db *sql.DB, host string, recoveryAt time.Time) (scenarios.RetryBucketStats, error) {
 	var stats scenarios.RetryBucketStats
@@ -528,5 +522,3 @@ func queryPartnerRetryBuckets(ctx context.Context, db *sql.DB, host string, reco
 	}
 	return stats, nil
 }
-
-

@@ -15,19 +15,19 @@ Each scenario is launched through the benchmark command:
 
 ```bash
 # Assignment-facing proof scenarios
-BENCH_PROFILE=stress go run ./cmd/bench scenario6
-BENCH_PROFILE=stress go run ./cmd/bench scenario8
+BENCH_PROFILE=stress go run ./cmd/bench production_workload
+BENCH_PROFILE=stress go run ./cmd/bench horizontal_scale
 BENCH_PROFILE=stress go run ./cmd/bench partner_resilience
 
 # Internal hardening
-BENCH_PROFILE=stress go run ./cmd/bench scenario7
+BENCH_PROFILE=stress go run ./cmd/bench-legacy breaker_storm
 
-# Legacy scenarios (proof points folded into scenario6/scenario8/partner_resilience)
-BENCH_PROFILE=stress go run ./cmd/bench scenario1
-BENCH_PROFILE=stress go run ./cmd/bench scenario2
-BENCH_PROFILE=stress go run ./cmd/bench scenario3
-BENCH_PROFILE=stress go run ./cmd/bench scenario4
-BENCH_PROFILE=stress go run ./cmd/bench scenario5
+# Legacy scenarios (proof points folded into production_workload/horizontal_scale/partner_resilience)
+BENCH_PROFILE=stress go run ./cmd/bench-legacy late_arrival_fairness
+BENCH_PROFILE=stress go run ./cmd/bench-legacy transient_recovery
+BENCH_PROFILE=stress go run ./cmd/bench-legacy terminal_fast_fail
+BENCH_PROFILE=stress go run ./cmd/bench-legacy scale_idempotency
+BENCH_PROFILE=stress go run ./cmd/bench-legacy breaker_isolation
 ```
 
 Use `BENCH_PROFILE=dev` for the smaller, faster tuning profile while iterating locally.
@@ -45,8 +45,8 @@ The shared schema keeps the run shape consistent across scenarios while still al
 
 Breaker handling:
 
-- Scenarios 1, 2, 3, 4, 6, and 8 use `breaker_failure_threshold: 0`, which disables breaker tripping entirely.
-- Scenario 7 (internal) and Partner Resilience (Phase C) use real thresholds for breaker-protection benchmarks.
+- Scenarios 1, 2, 3, 4, production_workload, and horizontal_scale use `breaker_failure_threshold: 0`, which disables breaker tripping entirely.
+- Breaker Storm (internal) and Partner Resilience (Phase C) use real thresholds for breaker-protection benchmarks.
 
 ## Database Isolation
 
@@ -63,30 +63,30 @@ When no path is provided, the benchmark writes the connection string to `/tmp/be
 ## Scenario Map
 
 ### Assignment-facing proofs
-- `scenario6` - assignment-aligned production-like mixed ingest and delivery workload (headline proof).
-- `scenario8` - true multi-replica horizontal scalability with sparse + dense phases.
+- `production_workload` - assignment-aligned production-like mixed ingest and delivery workload (headline proof).
+- `horizontal_scale` - true multi-replica horizontal scalability with sparse + dense phases.
 - `partner_resilience` - reliability drill-down: transient recovery, terminal 4xx fast-fail, dead-partner breaker isolation.
 
-`scenario8` launches real `go run ./cmd/notifier` replica process groups and tears down each process group after the phase completes. `partner_resilience` disables breaker tripping in Phase A/B so retry and terminal-classification behavior are isolated, then enables the configured breaker threshold in Phase C. Phase C uses distinct Integration Partner hostnames so the host limiter can isolate the dead partner while healthy partners continue. Its dead-partner attempt cap requires fewer Attempts than the seeded dead backlog, with pending/skipped Deliveries still present, proving the breaker stopped the dead partner before exhausting its queue. It runs DB-backed claimable Customer discovery alongside workers so delayed retries are rediscovered from Postgres, not only from ingest-time scheduler notifications.
+`horizontal_scale` launches real `go run ./cmd/notifier` replica process groups and tears down each process group after the phase completes. `partner_resilience` disables breaker tripping in Phase A/B so retry and terminal-classification behavior are isolated, then enables the configured breaker threshold in Phase C. Phase C uses distinct Integration Partner hostnames so the host limiter can isolate the dead partner while healthy partners continue. Its dead-partner attempt cap requires fewer Attempts than the seeded dead backlog, with pending/skipped Deliveries still present, proving the breaker stopped the dead partner before exhausting its queue. It runs DB-backed claimable Customer discovery alongside workers so delayed retries are rediscovered from Postgres, not only from ingest-time scheduler notifications.
 
 ### Internal hardening
-- `scenario7` - mass breaker tripping under batch mark (not part of the assignment-facing proof map).
+- `breaker_storm` - mass breaker tripping under batch mark (not part of the assignment-facing proof map; run through `cmd/bench-legacy`).
 
 ### Legacy/internal reference commands
-- `scenario1` - fairness proof folded into Scenario 6 reporting.
-- `scenario2` - transient/recovering partner proof folded into Partner Resilience Phase A.
-- `scenario3` - terminal 4xx fast-fail proof folded into Partner Resilience Phase B.
-- `scenario4` - horizontal scale, duplicate tuple, and idempotency proof folded into Scenario 8 dense phase.
-- `scenario5` - dead-partner breaker isolation proof folded into Partner Resilience Phase C.
+- `late_arrival_fairness` - fairness proof folded into Production Workload reporting; run through `cmd/bench-legacy`.
+- `transient_recovery` - transient/recovering partner proof folded into Partner Resilience Phase A; run through `cmd/bench-legacy`.
+- `terminal_fast_fail` - terminal 4xx fast-fail proof folded into Partner Resilience Phase B; run through `cmd/bench-legacy`.
+- `scale_idempotency` - horizontal scale, duplicate tuple, and idempotency proof folded into horizontal_scale dense phase; run through `cmd/bench-legacy`.
+- `breaker_isolation` - dead-partner breaker isolation proof folded into Partner Resilience Phase C; run through `cmd/bench-legacy`.
 
 ## What The Bench Suite Proves
 
 The assignment-facing scenarios provide targeted proofs:
 
-- Fairness + Mixed Workload: `scenario6`
-- Horizontal Scalability: `scenario8`
+- Fairness + Mixed Workload: `production_workload`
+- Horizontal Scalability: `horizontal_scale`
 - Reliability (retry + fast-fail + breaker): `partner_resilience`
-- Internal Breaker Hardening: `scenario7`
+- Internal Breaker Hardening: `breaker_storm`
 
 **First-Attempt Queue Latency** is the canonical fairness metric: P95 of (`delivery_attempts.sent_at` for `attempt_number = 1`) minus (`deliveries.created_at`). See CONTEXT.md for the glossary definition.
 
@@ -95,10 +95,25 @@ Claim batch tuning (`MinBatchHint`):
 - Higher values (for example `32`) usually improve raw throughput by reducing claim SQL round trips.
 - Lower values (for example `1` to `8`) usually improve fairness by yielding back to scheduler more often.
 - Use scenario intent to choose value:
-  - Throughput-focused (`scenario4`): start higher (`32`), then tune up/down with DB pool matrix.
-  - Fairness-sensitive mixed load (`scenario6`): start low (`1` to `8`), then increase only if fairness SLO still holds.
+  - Throughput-focused (`scale_idempotency`): start higher (`32`), then tune up/down with DB pool matrix.
+  - Fairness-sensitive mixed load (`production_workload`): start low (`1` to `8`), then increase only if fairness SLO still holds.
 
 No single scenario proves every requirement. The suite is meant to be read together, with each run covering a different failure mode or load shape.
+
+## Current Bottlenecks
+
+The raised stress profile intentionally exposes where local throughput starts
+to flatten:
+
+- `production_workload`: claimable-Customer discovery dominates DB time with
+  20k sparse Small Customers. The 32-worker run is the main throughput jump;
+  64 workers adds only a smaller gain while empty claims increase.
+- `horizontal_scale`: after tuning the benchmark child notifiers to avoid
+  artificial host-cap requeue churn, dense throughput scales from 1 to 2
+  replicas and then knees at 4 replicas. The remaining hotspots are
+  multi-Customer claim SQL and batch mark SQL.
+- Sharding is not part of the retained solution; the benchmark evidence did
+  not show a sharding-specific gain.
 
 ## Reports
 
@@ -106,15 +121,15 @@ Each run rewrites a markdown report under `bench/results/`.
 
 Current reports:
 
-- `bench/results/scenario-6.md`
-- `bench/results/scenario-8.md`
+- `bench/results/production-workload.md`
+- `bench/results/horizontal-scale.md`
 - `bench/results/partner-resilience.md`
-- `bench/results/scenario-7.md` (internal hardening)
-- `bench/results/scenario-1.md` (legacy)
-- `bench/results/scenario-2.md` (legacy)
-- `bench/results/scenario-3.md` (legacy)
-- `bench/results/scenario-4.md` (legacy)
-- `bench/results/scenario-5.md` (legacy)
+- `bench/results/breaker-storm.md` (internal hardening)
+- `bench/results/late-arrival-fairness.md` (legacy)
+- `bench/results/transient-recovery.md` (legacy)
+- `bench/results/terminal-fast-fail.md` (legacy)
+- `bench/results/scale-idempotency.md` (legacy)
+- `bench/results/breaker-isolation.md` (legacy)
 
 These reports are intended to be committed so the benchmark results stay reviewable and comparable across revisions.
 
@@ -133,7 +148,7 @@ Key differences from a production deployment:
 | Postgres durability | `synchronous_commit=off` | DB is opaque to benchmarks; scenarios measure delivery outcomes regardless |
 | Postgres tuning | `shared_buffers=128MB` (laptop) | Testcontainer inherits host; scenario profiles tune worker/breaker params |
 | Partner diversity | Single `webhook-receiver` with uniform latency (5-15ms) | Per-route fast/slow/flaky/dead receivers via `bench/receiver` |
-| Multi-replica | Scaled via `--scale notifier=N` | `scenario8` launches real OS process groups with programmatic control |
+| Multi-replica | Scaled via `--scale notifier=N` | `horizontal_scale` launches real OS process groups with programmatic control |
 | Resource limits | None | Not applicable (benchmarks measure code, not infra caps) |
 | TLS | Plain HTTP | Not required for assignment proofs; TLS receiver available in production compose profile |
 | Retention | 1-minute window (demo) | Not exercised by benchmark scenarios |

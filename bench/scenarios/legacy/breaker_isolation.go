@@ -1,3 +1,4 @@
+// Package legacy contains issue-scoped benchmark scenarios kept for reference.
 package legacy
 
 import (
@@ -587,8 +588,6 @@ func waitForBreakerIsolationBreakerTransitions(ctx context.Context, db *sql.DB, 
 		}
 	}
 }
-
-
 
 func writeBreakerIsolationReport(path, profileName string, customerCount, deliveriesPerCustomer, breakerThreshold int, control, dead breakerIsolationRunResult) error {
 	comparisons, withinLimit, err := compareBreakerIsolationLatencies(control.HealthyLatencies, dead.HealthyLatencies)

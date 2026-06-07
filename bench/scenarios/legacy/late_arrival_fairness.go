@@ -469,7 +469,3 @@ func cycleVerdict(picks, active int64) string {
 	}
 	return fmt.Sprintf("**FAIL**: %d Picks > %d active Customers — the late-arriving Small was not served within one round-robin cycle.", picks, active)
 }
-
-
-
-

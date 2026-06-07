@@ -31,15 +31,20 @@ func ResetBenchData(ctx context.Context, db *sql.DB) error {
 }
 
 const (
+	// WhaleCustomerID is the default high-volume benchmark Customer.
 	WhaleCustomerID = "whale"
-	LateSmallID     = "small-late"
-	EventType       = "bench.test"
+	// LateSmallID is the Customer injected after the initial fairness backlog.
+	LateSmallID = "small-late"
+	// EventType is the event name used by shared benchmark fixtures.
+	EventType = "bench.test"
 )
 
+// SmallCustomerID returns the deterministic ID for a small benchmark Customer.
 func SmallCustomerID(i int) string {
 	return fmt.Sprintf("small-%03d", i)
 }
 
+// SeedCustomers inserts the shared Whale, late Small, and Small Customers.
 func SeedCustomers(ctx context.Context, db *sql.DB, smallCount int) error {
 	all := []struct {
 		id    string
@@ -74,6 +79,7 @@ func SeedCustomers(ctx context.Context, db *sql.DB, smallCount int) error {
 	return nil
 }
 
+// SeedWebhooks inserts one active Webhook for every shared benchmark Customer.
 func SeedWebhooks(ctx context.Context, db *sql.DB, receiverBaseURL string, smallCount int) error {
 	customerIDs := []string{WhaleCustomerID, LateSmallID}
 	for i := 0; i < smallCount; i++ {
@@ -100,6 +106,7 @@ func SeedWebhooks(ctx context.Context, db *sql.DB, receiverBaseURL string, small
 	return nil
 }
 
+// SeedWhaleDeliveries inserts a pending backlog for the Whale Customer.
 func SeedWhaleDeliveries(ctx context.Context, db *sql.DB, whaleDeliveries int) (string, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -163,6 +170,7 @@ func lookupCustomerWebhookIDs(ctx context.Context, tx *sql.Tx, customerID string
 	return ids, nil
 }
 
+// IngestSmallDeliveries submits small-Customer Events through the ingest path.
 func IngestSmallDeliveries(ctx context.Context, store *ingest.Store, customerID string, count int) error {
 	for range count {
 		_, err := store.Submit(ctx, ingest.Event{
@@ -177,6 +185,7 @@ func IngestSmallDeliveries(ctx context.Context, store *ingest.Store, customerID 
 	return nil
 }
 
+// CountPendingDeliveries counts Deliveries that have not reached a terminal state.
 func CountPendingDeliveries(ctx context.Context, db *sql.DB) (int, error) {
 	var n int
 	err := db.QueryRowContext(ctx, `

@@ -29,17 +29,17 @@ func main() {
 	var err error
 	switch scenario {
 	case "late_arrival_fairness", "late-arrival-fairness", "scenario1":
-		err = 	legacy.RunLateArrivalFairness(ctx)
+		err = legacy.RunLateArrivalFairness(ctx)
 	case "transient_recovery", "transient-recovery", "scenario2":
-		err = 	legacy.RunTransientRecovery(ctx)
+		err = legacy.RunTransientRecovery(ctx)
 	case "terminal_fast_fail", "terminal-fast-fail", "scenario3":
-		err = 	legacy.RunTerminalFastFail(ctx)
+		err = legacy.RunTerminalFastFail(ctx)
 	case "scale_idempotency", "scale-idempotency", "scenario4":
-		err = 	legacy.RunScaleIdempotency(ctx)
+		err = legacy.RunScaleIdempotency(ctx)
 	case "breaker_isolation", "breaker-isolation", "scenario5":
-		err = 	legacy.RunBreakerIsolation(ctx)
+		err = legacy.RunBreakerIsolation(ctx)
 	case "breaker_storm", "breaker-storm", "scenario7":
-		err = 	legacy.RunBreakerStorm(ctx)
+		err = legacy.RunBreakerStorm(ctx)
 	default:
 		err = fmt.Errorf("unknown or non-legacy scenario: %s", scenario)
 	}
