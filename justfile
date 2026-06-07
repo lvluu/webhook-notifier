@@ -389,52 +389,23 @@ demo:
     echo ""
     echo "Set DEMO_KEEP_STACK=1 to leave containers running for inspection."
 
-# fairness under load + late-arrival reactivity (issue #12)
-bench-1:
-    BENCH_PROFILE=stress go run ./cmd/bench scenario1
+# ── Dashboard-aligned benchmarks ──────────────────────────────────────────
 
-# transient + recovering partners (issue #13)
-bench-2:
-    BENCH_PROFILE=stress go run ./cmd/bench scenario2
+# retry recovery, terminal classification, and DLQ behavior
+bench-reliability:
+    BENCH_PROFILE=stress go run ./cmd/bench reliability
 
-# terminal classification fast-fail (issue #14)
-bench-3:
-    BENCH_PROFILE=stress go run ./cmd/bench scenario3
+# Whale/Small scheduling fairness and queue latency
+bench-fairness:
+    BENCH_PROFILE=stress go run ./cmd/bench fairness
 
-# horizontal scale + atomicity + idempotency (issue #15)
-bench-4:
-    BENCH_PROFILE=stress go run ./cmd/bench scenario4
+# multi-replica throughput and coordination
+bench-scalability:
+    BENCH_PROFILE=stress go run ./cmd/bench scalability
 
-# scenario4 throughput matrix: workers x DB pool size
-bench-4-matrix:
-    BENCH_PROFILE=stress \
-    BENCH_SCENARIO4_MATRIX_WORKERS=8,16,32,48,64 \
-    BENCH_SCENARIO4_MATRIX_DB_CONNS=16,32,48,64,96 \
-    go run ./cmd/bench scenario4
-
-# summarize scenario4 matrix files and recommend a throughput knee
-bench-4-knee:
-    bash ./bench/scripts/scenario4_knee.sh
-
-# dead partner circuit breaker + pool protection (issue #27)
-bench-5:
-    BENCH_PROFILE=stress go run ./cmd/bench scenario5
-
-# assignment-aligned production-like mixed workload
-bench-6:
-    BENCH_PROFILE=stress go run ./cmd/bench scenario6
-
-# horizontal scalability across real notifier replicas
-bench-8:
-    BENCH_PROFILE=stress go run ./cmd/bench scenario8
-
-# partner resilience: transient recovery + 4xx fast-fail + breaker isolation
-bench-partner-resilience:
-    BENCH_PROFILE=stress go run ./cmd/bench partner_resilience
-
-# internal breaker hardening (not assignment-facing)
-bench-7:
-    BENCH_PROFILE=stress go run ./cmd/bench scenario7
+# dead-partner host limiting, breaker transitions, and healthy-Customer isolation
+bench-partner-protection:
+    BENCH_PROFILE=stress go run ./cmd/bench partner-protection
 
 # retain terminal deliveries into delivery_history
 delivery-history-retention:

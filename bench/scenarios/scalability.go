@@ -20,9 +20,15 @@ import (
 	"github.com/lvluu/webhook-notifier/bench/receiver"
 )
 
-const scenario8ReportPath = "bench/results/scenario-8.md"
+const scalabilityReportPath = "bench/results/scalability.md"
 
-type scenario8Profile struct {
+const (
+	scalabilityWorkersPerReplica     = 8
+	scalabilityDeliveryConcurrency   = 16
+	scalabilityBenchmarkHostCapacity = scalabilityWorkersPerReplica * scalabilityDeliveryConcurrency
+)
+
+type scalabilityProfile struct {
 	Name                       string
 	ReplicaCounts              []int
 	SparseCustomers            int
@@ -36,9 +42,10 @@ type scenario8Profile struct {
 	RetryBaseDelay             time.Duration
 	RetryCapDelay              time.Duration
 	FairnessRatioLimit         float64
+	BreakerFailureThreshold    int
 }
 
-type scenario8Replica struct {
+type scalabilityReplica struct {
 	id          string
 	businessURL string
 	metricsURL  string
@@ -47,7 +54,7 @@ type scenario8Replica struct {
 	stderr      bytes.Buffer
 }
 
-type scenario8SparseResult struct {
+type scalabilitySparseResult struct {
 	ReplicaCount                  int
 	ExpectedDeliveries            int
 	TerminalDeliveries            int
@@ -62,10 +69,10 @@ type scenario8SparseResult struct {
 	FairnessGateOK                bool
 	AllTerminalOK                 bool
 	DuplicateOK                   bool
-	Distribution                  scenario8DistributionVerdict
+	Distribution                  scalabilityDistributionVerdict
 }
 
-type scenario8DenseRun struct {
+type scalabilityDenseRun struct {
 	ReplicaCount        int
 	Duration            time.Duration
 	Throughput          float64
@@ -76,48 +83,48 @@ type scenario8DenseRun struct {
 	AllTerminalOK       bool
 	DuplicateOK         bool
 	ReplicaGateOK       bool
-	Distribution        scenario8DistributionVerdict
+	Distribution        scalabilityDistributionVerdict
 }
 
-type scenario8ScalingVerdict struct {
+type scalabilityScalingVerdict struct {
 	Mode       string
 	Message    string
 	Pass       bool
 	Bottleneck string
 }
 
-type scenario8DistributionVerdict struct {
+type scalabilityDistributionVerdict struct {
 	MissingReplicaIDs []string
 	ImbalanceRatio    float64
 	Diagnostic        string
 	HardFail          bool
 }
 
-func scenario8ProfileFromEnv() (scenario8Profile, error) {
-	raw, name, err := loadBenchProfileConfig("scenario8")
+func scalabilityProfileFromEnv() (scalabilityProfile, error) {
+	raw, name, err := loadBenchProfileConfig("scalability")
 	if err != nil {
-		return scenario8Profile{}, err
+		return scalabilityProfile{}, err
 	}
 	if len(raw.ReplicaCounts) == 0 {
-		return scenario8Profile{}, fmt.Errorf("scenario8 profile %q requires replica_counts", name)
+		return scalabilityProfile{}, fmt.Errorf("scalability profile %q requires replica_counts", name)
 	}
 	if raw.SparseCustomers < 1 || raw.SparseEventsPerCustomer < 1 || raw.DenseCustomers < 1 || raw.DenseDeliveriesPerCustomer < 1 {
-		return scenario8Profile{}, fmt.Errorf("scenario8 profile %q has invalid customer/delivery counts", name)
+		return scalabilityProfile{}, fmt.Errorf("scalability profile %q has invalid customer/delivery counts", name)
 	}
 	if raw.RequestTimeout.Duration() <= 0 {
-		return scenario8Profile{}, fmt.Errorf("scenario8 profile %q requires request_timeout > 0", name)
+		return scalabilityProfile{}, fmt.Errorf("scalability profile %q requires request_timeout > 0", name)
 	}
 	if raw.MinBatchHint < 1 || raw.MultiPickCount < 1 {
-		return scenario8Profile{}, fmt.Errorf("scenario8 profile %q requires min_batch_hint >=1 and multi_pick_count >=1", name)
+		return scalabilityProfile{}, fmt.Errorf("scalability profile %q requires min_batch_hint >=1 and multi_pick_count >=1", name)
 	}
 	if raw.RetryMaxAttempts < 1 || raw.RetryBaseDelay.Duration() < 0 || raw.RetryCapDelay.Duration() < 0 {
-		return scenario8Profile{}, fmt.Errorf("scenario8 profile %q has invalid retry config", name)
+		return scalabilityProfile{}, fmt.Errorf("scalability profile %q has invalid retry config", name)
 	}
 	if raw.FairnessRatioLimit <= 0 {
-		return scenario8Profile{}, fmt.Errorf("scenario8 profile %q requires fairness_ratio_limit > 0", name)
+		return scalabilityProfile{}, fmt.Errorf("scalability profile %q requires fairness_ratio_limit > 0", name)
 	}
 
-	return scenario8Profile{
+	return scalabilityProfile{
 		Name:                       name,
 		ReplicaCounts:              raw.ReplicaCounts,
 		SparseCustomers:            raw.SparseCustomers,
@@ -131,15 +138,16 @@ func scenario8ProfileFromEnv() (scenario8Profile, error) {
 		RetryBaseDelay:             raw.RetryBaseDelay.Duration(),
 		RetryCapDelay:              raw.RetryCapDelay.Duration(),
 		FairnessRatioLimit:         raw.FairnessRatioLimit,
+		BreakerFailureThreshold:    raw.BreakerFailureThreshold,
 	}, nil
 }
 
-// RunScenario8 executes Scenario 8: horizontal scalability across real notifier
+// RunScalability executes Scalability: horizontal scalability across real notifier
 // OS processes sharing one Postgres outbox.
-func RunScenario8(ctx context.Context) error {
-	profile, err := scenario8ProfileFromEnv()
+func RunScalability(ctx context.Context) error {
+	profile, err := scalabilityProfileFromEnv()
 	if err != nil {
-		return fmt.Errorf("load scenario8 profile: %w", err)
+		return fmt.Errorf("load scalability profile: %w", err)
 	}
 
 	db, cleanup, err := openBenchDatabase(ctx)
@@ -153,35 +161,35 @@ func RunScenario8(ctx context.Context) error {
 	}
 
 	maxReplicas := profile.ReplicaCounts[len(profile.ReplicaCounts)-1]
-	sparse, err := runScenario8SparsePhase(ctx, db, profile, maxReplicas)
+	sparse, err := runScalabilitySparsePhase(ctx, db, profile, maxReplicas)
 	if err != nil {
 		return fmt.Errorf("run sparse phase: %w", err)
 	}
 
-	denseRuns := make([]scenario8DenseRun, 0, len(profile.ReplicaCounts))
+	denseRuns := make([]scalabilityDenseRun, 0, len(profile.ReplicaCounts))
 	for _, replicas := range profile.ReplicaCounts {
-		run, runErr := runScenario8DensePhase(ctx, db, profile, replicas)
+		run, runErr := runScalabilityDensePhase(ctx, db, profile, replicas)
 		if runErr != nil {
 			return fmt.Errorf("run dense phase (replicas=%d): %w", replicas, runErr)
 		}
 		denseRuns = append(denseRuns, run)
 	}
 
-	scaling := scenario8ComputeScalingVerdict(denseRuns)
-	if err := writeScenario8Report(scenario8ReportPath, profile, sparse, denseRuns, scaling); err != nil {
-		return fmt.Errorf("write scenario8 report: %w", err)
+	scaling := scalabilityComputeScalingVerdict(denseRuns)
+	if err := writeScalabilityReport(scalabilityReportPath, profile, sparse, denseRuns, scaling); err != nil {
+		return fmt.Errorf("write scalability report: %w", err)
 	}
 
 	if !sparse.AllTerminalOK || !sparse.DuplicateOK || !sparse.FairnessGateOK || !sparse.ReplicaGateOK {
-		return fmt.Errorf("scenario8 sparse hard gate failed")
+		return fmt.Errorf("scalability sparse hard gate failed")
 	}
 	for _, run := range denseRuns {
 		if !run.AllTerminalOK || !run.DuplicateOK || !run.ReplicaGateOK {
-			return fmt.Errorf("scenario8 dense hard gate failed for replicas=%d", run.ReplicaCount)
+			return fmt.Errorf("scalability dense hard gate failed for replicas=%d", run.ReplicaCount)
 		}
 	}
 	// Scaling verdict is diagnostic — a regression or flat throughput is reported
-	// in the markdown output but does not fail the scenario. Horizontal scalability
+	// in the markdown output but does not fail the scenario. Scalability
 	// proof is established through the dense-phase replica gates (all terminal,
 	// zero duplicates, no zero-work replica) rather than a strict throughput slope.
 	_ = scaling
@@ -189,41 +197,41 @@ func RunScenario8(ctx context.Context) error {
 	return nil
 }
 
-func runScenario8SparsePhase(ctx context.Context, db *sql.DB, profile scenario8Profile, replicaCount int) (scenario8SparseResult, error) {
+func runScalabilitySparsePhase(ctx context.Context, db *sql.DB, profile scalabilityProfile, replicaCount int) (scalabilitySparseResult, error) {
 	if err := resetBenchData(ctx, db); err != nil {
-		return scenario8SparseResult{}, fmt.Errorf("reset bench data: %w", err)
+		return scalabilitySparseResult{}, fmt.Errorf("reset bench data: %w", err)
 	}
 
 	rs := receiver.NewServer(
-		receiver.WithStableDecisions(fmt.Sprintf("scenario8-sparse-%d", replicaCount)),
+		receiver.WithStableDecisions(fmt.Sprintf("hs-sparse-%d", replicaCount)),
 		receiver.WithRouteLatency("/hooks/fast", 1.0, 15*time.Millisecond),
 		receiver.WithRouteLatency("/hooks/slow", 0.25, 250*time.Millisecond),
 		receiver.WithRouteStatus("/hooks/flaky", 0.03, http.StatusServiceUnavailable),
 	)
 	defer rs.Close()
 
-	if err := seedScenario8Customers(ctx, db, "scenario8-sparse-small-", profile.SparseCustomers); err != nil {
-		return scenario8SparseResult{}, err
+	if err := seedScalabilityCustomers(ctx, db, "hs-sparse-small-", profile.SparseCustomers); err != nil {
+		return scalabilitySparseResult{}, err
 	}
-	if err := seedScenario8Webhooks(ctx, db, "scenario8-sparse-small-", profile.SparseCustomers, rs.URL(), []string{"/hooks/fast", "/hooks/slow", "/hooks/flaky"}); err != nil {
-		return scenario8SparseResult{}, err
+	if err := seedScalabilityWebhooks(ctx, db, "hs-sparse-small-", profile.SparseCustomers, rs.URL(), []string{"/hooks/fast", "/hooks/slow", "/hooks/flaky"}); err != nil {
+		return scalabilitySparseResult{}, err
 	}
 
-	replicas, err := startScenario8Replicas(ctx, db, profile, replicaCount)
+	replicas, err := startScalabilityReplicas(ctx, db, profile, replicaCount)
 	if err != nil {
-		return scenario8SparseResult{}, err
+		return scalabilitySparseResult{}, err
 	}
-	defer stopScenario8Replicas(replicas)
+	defer stopScalabilityReplicas(replicas)
 
-	if err := submitScenario8SparseEvents(ctx, profile, replicas); err != nil {
-		return scenario8SparseResult{}, err
-	}
-
-	if err := waitForScenario8Drain(ctx, db, 8*time.Minute); err != nil {
-		return scenario8SparseResult{}, err
+	if err := submitScalabilitySparseEvents(ctx, profile, replicas); err != nil {
+		return scalabilitySparseResult{}, err
 	}
 
-	claimSum, claimCount, emptyClaims := collectScenario8ClaimMetrics(replicas)
+	if err := waitForScalabilityDrain(ctx, db, 8*time.Minute); err != nil {
+		return scalabilitySparseResult{}, err
+	}
+
+	claimSum, claimCount, emptyClaims := collectScalabilityClaimMetrics(replicas)
 	avgClaim := 0.0
 	avgPerCustomerClaim := 0.0
 	emptyRate := 0.0
@@ -237,20 +245,20 @@ func runScenario8SparsePhase(ctx context.Context, db *sql.DB, profile scenario8P
 	expected := profile.SparseCustomers * profile.SparseEventsPerCustomer * 3
 	terminal, err := queryTerminalDeliveries(ctx, db)
 	if err != nil {
-		return scenario8SparseResult{}, fmt.Errorf("query terminal deliveries: %w", err)
+		return scalabilitySparseResult{}, fmt.Errorf("query terminal deliveries: %w", err)
 	}
-	firstP95, err := queryScenario6FirstAttemptP95(ctx, db, "scenario8-sparse-small-%")
+	firstP95, err := queryFairnessFirstAttemptP95(ctx, db, "hs-sparse-small-%")
 	if err != nil {
-		return scenario8SparseResult{}, fmt.Errorf("query sparse first-attempt p95: %w", err)
+		return scalabilitySparseResult{}, fmt.Errorf("query sparse first-attempt p95: %w", err)
 	}
 
-	expectedReplicaIDs := scenario8ReplicaIDs(replicaCount)
-	perReplica := scenario8CountByReplica(recordings)
-	distribution := scenario8PerReplicaDistributionVerdict(perReplica, expectedReplicaIDs)
-	thresholdMs := scenario8SparseFairnessThreshold(profile.Name)
+	expectedReplicaIDs := scalabilityReplicaIDs(replicaCount)
+	perReplica := scalabilityCountByReplica(recordings)
+	distribution := scalabilityPerReplicaDistributionVerdict(perReplica, expectedReplicaIDs)
+	thresholdMs := scalabilitySparseFairnessThreshold(profile.Name)
 
 	duplicates := countDuplicateAttemptTuples(recordings)
-	return scenario8SparseResult{
+	return scalabilitySparseResult{
 		ReplicaCount:                  replicaCount,
 		ExpectedDeliveries:            expected,
 		TerminalDeliveries:            terminal,
@@ -269,36 +277,36 @@ func runScenario8SparsePhase(ctx context.Context, db *sql.DB, profile scenario8P
 	}, nil
 }
 
-func runScenario8DensePhase(ctx context.Context, db *sql.DB, profile scenario8Profile, replicaCount int) (scenario8DenseRun, error) {
+func runScalabilityDensePhase(ctx context.Context, db *sql.DB, profile scalabilityProfile, replicaCount int) (scalabilityDenseRun, error) {
 	if err := resetBenchData(ctx, db); err != nil {
-		return scenario8DenseRun{}, fmt.Errorf("reset bench data: %w", err)
+		return scalabilityDenseRun{}, fmt.Errorf("reset bench data: %w", err)
 	}
 
 	rs := receiver.NewServer(
-		receiver.WithStableDecisions(fmt.Sprintf("scenario8-dense-%d", replicaCount)),
+		receiver.WithStableDecisions(fmt.Sprintf("hs-dense-%d", replicaCount)),
 		receiver.WithRouteLatency("/hooks/dense-fast", 1.0, 5*time.Millisecond),
 	)
 	defer rs.Close()
 
-	if err := seedScenario8Customers(ctx, db, "scenario8-dense-customer-", profile.DenseCustomers); err != nil {
-		return scenario8DenseRun{}, err
+	if err := seedScalabilityCustomers(ctx, db, "hs-dense-customer-", profile.DenseCustomers); err != nil {
+		return scalabilityDenseRun{}, err
 	}
-	if err := seedScenario8Webhooks(ctx, db, "scenario8-dense-customer-", profile.DenseCustomers, rs.URL(), []string{"/hooks/dense-fast"}); err != nil {
-		return scenario8DenseRun{}, err
+	if err := seedScalabilityWebhooks(ctx, db, "hs-dense-customer-", profile.DenseCustomers, rs.URL(), []string{"/hooks/dense-fast"}); err != nil {
+		return scalabilityDenseRun{}, err
 	}
-	if err := seedScenario8DenseDeliveries(ctx, db, profile.DenseCustomers, profile.DenseDeliveriesPerCustomer); err != nil {
-		return scenario8DenseRun{}, err
+	if err := seedScalabilityDenseDeliveries(ctx, db, profile.DenseCustomers, profile.DenseDeliveriesPerCustomer); err != nil {
+		return scalabilityDenseRun{}, err
 	}
 
-	replicas, err := startScenario8Replicas(ctx, db, profile, replicaCount)
+	replicas, err := startScalabilityReplicas(ctx, db, profile, replicaCount)
 	if err != nil {
-		return scenario8DenseRun{}, err
+		return scalabilityDenseRun{}, err
 	}
-	defer stopScenario8Replicas(replicas)
+	defer stopScalabilityReplicas(replicas)
 
 	start := time.Now()
-	if err := waitForScenario8Drain(ctx, db, 12*time.Minute); err != nil {
-		return scenario8DenseRun{}, err
+	if err := waitForScalabilityDrain(ctx, db, 12*time.Minute); err != nil {
+		return scalabilityDenseRun{}, err
 	}
 	duration := time.Since(start)
 
@@ -306,17 +314,17 @@ func runScenario8DensePhase(ctx context.Context, db *sql.DB, profile scenario8Pr
 	expected := profile.DenseCustomers * profile.DenseDeliveriesPerCustomer
 	terminal, err := queryTerminalDeliveries(ctx, db)
 	if err != nil {
-		return scenario8DenseRun{}, fmt.Errorf("query terminal deliveries: %w", err)
+		return scalabilityDenseRun{}, fmt.Errorf("query terminal deliveries: %w", err)
 	}
-	perReplica := scenario8CountByReplica(recordings)
-	distribution := scenario8PerReplicaDistributionVerdict(perReplica, scenario8ReplicaIDs(replicaCount))
+	perReplica := scalabilityCountByReplica(recordings)
+	distribution := scalabilityPerReplicaDistributionVerdict(perReplica, scalabilityReplicaIDs(replicaCount))
 	throughput := float64(expected)
 	if duration > 0 {
 		throughput /= duration.Seconds()
 	}
 
 	duplicates := countDuplicateAttemptTuples(recordings)
-	return scenario8DenseRun{
+	return scalabilityDenseRun{
 		ReplicaCount:        replicaCount,
 		Duration:            duration,
 		Throughput:          throughput,
@@ -331,7 +339,7 @@ func runScenario8DensePhase(ctx context.Context, db *sql.DB, profile scenario8Pr
 	}, nil
 }
 
-func startScenario8Replicas(ctx context.Context, db *sql.DB, profile scenario8Profile, count int) ([]*scenario8Replica, error) {
+func startScalabilityReplicas(ctx context.Context, db *sql.DB, profile scalabilityProfile, count int) ([]*scalabilityReplica, error) {
 	var dsn string
 	if err := db.QueryRowContext(ctx, "SELECT current_setting('transaction_read_only')").Scan(new(string)); err != nil {
 		return nil, fmt.Errorf("validate bench database connection: %w", err)
@@ -356,42 +364,46 @@ func startScenario8Replicas(ctx context.Context, db *sql.DB, profile scenario8Pr
 		return nil, fmt.Errorf("empty benchmark database dsn")
 	}
 
-	receiverAddr := strings.TrimSpace(os.Getenv("SCENARIO8_RECEIVER_ADDR"))
+	receiverAddr := strings.TrimSpace(os.Getenv("HORIZONTAL_SCALE_RECEIVER_ADDR"))
 
-	replicas := make([]*scenario8Replica, 0, count)
+	replicas := make([]*scalabilityReplica, 0, count)
 	for i := 1; i <= count; i++ {
 		replicaID := fmt.Sprintf("replica-%d", i)
-		businessAddr, err := scenario8ReserveAddr()
+		businessAddr, err := scalabilityReserveAddr()
 		if err != nil {
-			stopScenario8Replicas(replicas)
+			stopScalabilityReplicas(replicas)
 			return nil, err
 		}
-		metricsAddr, err := scenario8ReserveAddr()
+		metricsAddr, err := scalabilityReserveAddr()
 		if err != nil {
-			stopScenario8Replicas(replicas)
+			stopScalabilityReplicas(replicas)
 			return nil, err
 		}
 
-		//nolint:gosec // Scenario 8 intentionally launches local notifier OS processes with benchmark-controlled args.
+		//nolint:gosec // Scalability intentionally launches local notifier OS processes with benchmark-controlled args.
 		cmd := exec.CommandContext(ctx,
 			"go", "run", "./cmd/notifier",
 			"-db", dsn,
 			"-addr", businessAddr,
 			"-metrics-addr", metricsAddr,
-			"-workers", "8",
+			"-workers", strconv.Itoa(scalabilityWorkersPerReplica),
+			"-delivery-concurrency", strconv.Itoa(scalabilityDeliveryConcurrency),
+			"-host-cap", strconv.Itoa(scalabilityBenchmarkHostCapacity),
+			"-request-timeout", profile.RequestTimeout.String(),
 			"-min-batch", strconv.Itoa(profile.MinBatchHint),
 			"-multi-pick", strconv.Itoa(profile.MultiPickCount),
+			"-breaker-threshold", strconv.Itoa(profile.BreakerFailureThreshold),
 			"-discovery-interval", "50ms",
 			"-replica-id", replicaID,
 		)
 		cmd.Dir = repoRoot()
 		cmd.Env = append(os.Environ(),
 			"NOTIFIER_REPLICA_ID="+replicaID,
-			"SCENARIO8_RECEIVER_ADDR="+receiverAddr,
+			"HORIZONTAL_SCALE_RECEIVER_ADDR="+receiverAddr,
 		)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-		replica := &scenario8Replica{
+		replica := &scalabilityReplica{
 			id:          replicaID,
 			businessURL: "http://" + businessAddr,
 			metricsURL:  "http://" + metricsAddr,
@@ -401,12 +413,12 @@ func startScenario8Replicas(ctx context.Context, db *sql.DB, profile scenario8Pr
 		cmd.Stderr = &replica.stderr
 
 		if err := cmd.Start(); err != nil {
-			stopScenario8Replicas(replicas)
+			stopScalabilityReplicas(replicas)
 			return nil, fmt.Errorf("start %s: %w", replicaID, err)
 		}
 
-		if err := scenario8WaitReady(replica.businessURL+"/", 12*time.Second); err != nil {
-			stopScenario8Replicas(append(replicas, replica))
+		if err := scalabilityWaitReady(replica.businessURL+"/", 12*time.Second); err != nil {
+			stopScalabilityReplicas(append(replicas, replica))
 			return nil, fmt.Errorf("wait ready %s: %w; stderr=%s", replicaID, err, replica.stderr.String())
 		}
 		replicas = append(replicas, replica)
@@ -415,7 +427,7 @@ func startScenario8Replicas(ctx context.Context, db *sql.DB, profile scenario8Pr
 	return replicas, nil
 }
 
-func stopScenario8Replicas(replicas []*scenario8Replica) {
+func stopScalabilityReplicas(replicas []*scalabilityReplica) {
 	for _, replica := range replicas {
 		if replica == nil || replica.cmd == nil || replica.cmd.Process == nil {
 			continue
@@ -444,7 +456,7 @@ func stopScenario8Replicas(replicas []*scenario8Replica) {
 	}
 }
 
-func scenario8ReserveAddr() (string, error) {
+func scalabilityReserveAddr() (string, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", fmt.Errorf("reserve tcp addr: %w", err)
@@ -456,7 +468,7 @@ func scenario8ReserveAddr() (string, error) {
 	return addr, nil
 }
 
-func scenario8WaitReady(url string, timeout time.Duration) error {
+func scalabilityWaitReady(url string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -481,11 +493,11 @@ func scenario8WaitReady(url string, timeout time.Duration) error {
 	}
 }
 
-func submitScenario8SparseEvents(ctx context.Context, profile scenario8Profile, replicas []*scenario8Replica) error {
+func submitScalabilitySparseEvents(ctx context.Context, profile scalabilityProfile, replicas []*scalabilityReplica) error {
 	client := &http.Client{Timeout: 2 * time.Second}
 	idx := 0
 	for c := 0; c < profile.SparseCustomers; c++ {
-		customerID := fmt.Sprintf("scenario8-sparse-small-%05d", c)
+		customerID := fmt.Sprintf("hs-sparse-small-%05d", c)
 		for e := 0; e < profile.SparseEventsPerCustomer; e++ {
 			replica := replicas[idx%len(replicas)]
 			idx++
@@ -520,7 +532,7 @@ func submitScenario8SparseEvents(ctx context.Context, profile scenario8Profile, 
 	return nil
 }
 
-func waitForScenario8Drain(ctx context.Context, db *sql.DB, timeout time.Duration) error {
+func waitForScalabilityDrain(ctx context.Context, db *sql.DB, timeout time.Duration) error {
 	pollCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -540,9 +552,9 @@ func waitForScenario8Drain(ctx context.Context, db *sql.DB, timeout time.Duratio
 	}
 }
 
-func seedScenario8Customers(ctx context.Context, db *sql.DB, prefix string, count int) error {
-	for start := 0; start < count; start += scenario6SeedBatchRows {
-		end := min(start+scenario6SeedBatchRows, count)
+func seedScalabilityCustomers(ctx context.Context, db *sql.DB, prefix string, count int) error {
+	for start := 0; start < count; start += fairnessSeedBatchRows {
+		end := min(start+fairnessSeedBatchRows, count)
 		var sb strings.Builder
 		sb.WriteString("INSERT INTO customers (id, class) VALUES ")
 		args := make([]any, 0, end-start)
@@ -555,18 +567,34 @@ func seedScenario8Customers(ctx context.Context, db *sql.DB, prefix string, coun
 		}
 		sb.WriteString(" ON CONFLICT (id) DO NOTHING")
 		if _, err := db.ExecContext(ctx, sb.String(), args...); err != nil {
-			return fmt.Errorf("seed scenario8 customers: %w", err)
+			return fmt.Errorf("seed scalability customers: %w", err)
 		}
 	}
 	return nil
 }
 
-func seedScenario8Webhooks(ctx context.Context, db *sql.DB, prefix string, count int, receiverURL string, paths []string) error {
+func seedScalabilityWebhooks(ctx context.Context, db *sql.DB, prefix string, count int, receiverURL string, paths []string) error {
+	if count == 0 || len(paths) == 0 {
+		return nil
+	}
+	const maxWebhookInsertParams = 60000
+	rowsPerCustomer := len(paths) * 4
+	batchCustomers := max(1, maxWebhookInsertParams/rowsPerCustomer)
+	for start := 0; start < count; start += batchCustomers {
+		end := min(start+batchCustomers, count)
+		if err := seedScalabilityWebhookBatch(ctx, db, prefix, start, end, receiverURL, paths); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func seedScalabilityWebhookBatch(ctx context.Context, db *sql.DB, prefix string, start, end int, receiverURL string, paths []string) error {
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active) VALUES ")
-	args := make([]any, 0, count*len(paths)*4)
+	args := make([]any, 0, (end-start)*len(paths)*4)
 	row := 0
-	for i := 0; i < count; i++ {
+	for i := start; i < end; i++ {
 		customerID := fmt.Sprintf("%s%05d", prefix, i)
 		for _, path := range paths {
 			if row > 0 {
@@ -580,14 +608,14 @@ func seedScenario8Webhooks(ctx context.Context, db *sql.DB, prefix string, count
 	}
 	sb.WriteString(" ON CONFLICT (customer_id, url) DO UPDATE SET active = true")
 	if _, err := db.ExecContext(ctx, sb.String(), args...); err != nil {
-		return fmt.Errorf("seed scenario8 webhooks: %w", err)
+		return fmt.Errorf("seed scalability webhooks: %w", err)
 	}
 	return nil
 }
 
-func seedScenario8DenseDeliveries(ctx context.Context, db *sql.DB, customerCount, deliveriesPerCustomer int) error {
+func seedScalabilityDenseDeliveries(ctx context.Context, db *sql.DB, customerCount, deliveriesPerCustomer int) error {
 	for i := 0; i < customerCount; i++ {
-		customerID := fmt.Sprintf("scenario8-dense-customer-%05d", i)
+		customerID := fmt.Sprintf("hs-dense-customer-%05d", i)
 		var webhookID string
 		if err := db.QueryRowContext(ctx, `
 			SELECT id::text
@@ -609,7 +637,7 @@ func seedScenario8DenseDeliveries(ctx context.Context, db *sql.DB, customerCount
 			INSERT INTO events (customer_id, type, payload)
 			VALUES ($1, $2, $3)
 			RETURNING id
-		`, customerID, eventType, []byte(`{"event_name":"scenario8.dense"}`)).Scan(&eventID); err != nil {
+		`, customerID, eventType, []byte(`{"event_name":"scalability.dense"}`)).Scan(&eventID); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("insert dense event for %s: %w", customerID, err)
 		}
@@ -630,7 +658,7 @@ func seedScenario8DenseDeliveries(ctx context.Context, db *sql.DB, customerCount
 	return nil
 }
 
-func collectScenario8ClaimMetrics(replicas []*scenario8Replica) (claimSum, claimCount, emptyClaims float64) {
+func collectScalabilityClaimMetrics(replicas []*scalabilityReplica) (claimSum, claimCount, emptyClaims float64) {
 	client := &http.Client{Timeout: time.Second}
 	for _, replica := range replicas {
 		resp, err := client.Get(replica.metricsURL + "/metrics")
@@ -640,9 +668,9 @@ func collectScenario8ClaimMetrics(replicas []*scenario8Replica) (claimSum, claim
 		body, _ := ioReadAllLimit(resp.Body, 2<<20)
 		_ = resp.Body.Close()
 		text := string(body)
-		claimSum += scenario8MetricValue(text, "webhook_claim_batch_size_sum")
-		claimCount += scenario8MetricValue(text, "webhook_claim_batch_size_count")
-		emptyClaims += scenario8MetricValue(text, "webhook_claim_empty_total")
+		claimSum += scalabilityMetricValue(text, "webhook_claim_batch_size_sum")
+		claimCount += scalabilityMetricValue(text, "webhook_claim_batch_size_count")
+		emptyClaims += scalabilityMetricValue(text, "webhook_claim_empty_total")
 	}
 	return claimSum, claimCount, emptyClaims
 }
@@ -652,7 +680,7 @@ func ioReadAllLimit(rc io.ReadCloser, limit int64) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(rc, limit))
 }
 
-func scenario8MetricValue(metricsText, metric string) float64 {
+func scalabilityMetricValue(metricsText, metric string) float64 {
 	prefix := metric + " "
 	for _, line := range strings.Split(metricsText, "\n") {
 		if !strings.HasPrefix(line, prefix) {
@@ -671,14 +699,14 @@ func scenario8MetricValue(metricsText, metric string) float64 {
 	return 0
 }
 
-func scenario8SparseFairnessThreshold(profileName string) float64 {
+func scalabilitySparseFairnessThreshold(profileName string) float64 {
 	if profileName == benchProfileStress {
 		return 3000
 	}
 	return 6000
 }
 
-func scenario8ReplicaIDs(count int) []string {
+func scalabilityReplicaIDs(count int) []string {
 	ids := make([]string, 0, count)
 	for i := 1; i <= count; i++ {
 		ids = append(ids, fmt.Sprintf("replica-%d", i))
@@ -686,7 +714,7 @@ func scenario8ReplicaIDs(count int) []string {
 	return ids
 }
 
-func scenario8CountByReplica(recordings []receiver.Recording) map[string]int {
+func scalabilityCountByReplica(recordings []receiver.Recording) map[string]int {
 	counts := make(map[string]int)
 	for _, r := range recordings {
 		rid := r.Headers.Get("X-Notifier-Replica")
@@ -698,7 +726,7 @@ func scenario8CountByReplica(recordings []receiver.Recording) map[string]int {
 	return counts
 }
 
-func scenario8PerReplicaDistributionVerdict(counts map[string]int, expectedReplicaIDs []string) scenario8DistributionVerdict {
+func scalabilityPerReplicaDistributionVerdict(counts map[string]int, expectedReplicaIDs []string) scalabilityDistributionVerdict {
 	missing := make([]string, 0)
 	minCount := -1
 	maxCount := 0
@@ -722,7 +750,7 @@ func scenario8PerReplicaDistributionVerdict(counts map[string]int, expectedRepli
 	if imbalance > 1.0 {
 		diagnostic = fmt.Sprintf("imbalance ratio %.2fx (max/min)", imbalance)
 	}
-	return scenario8DistributionVerdict{
+	return scalabilityDistributionVerdict{
 		MissingReplicaIDs: missing,
 		ImbalanceRatio:    imbalance,
 		Diagnostic:        diagnostic,
@@ -730,30 +758,30 @@ func scenario8PerReplicaDistributionVerdict(counts map[string]int, expectedRepli
 	}
 }
 
-func scenario8ComputeScalingVerdict(runs []scenario8DenseRun) scenario8ScalingVerdict {
+func scalabilityComputeScalingVerdict(runs []scalabilityDenseRun) scalabilityScalingVerdict {
 	if len(runs) < 2 {
-		return scenario8ScalingVerdict{Mode: "insufficient", Message: "need at least two dense runs", Pass: false}
+		return scalabilityScalingVerdict{Mode: "insufficient", Message: "need at least two dense runs", Pass: false}
 	}
-	sorted := append([]scenario8DenseRun(nil), runs...)
+	sorted := append([]scalabilityDenseRun(nil), runs...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ReplicaCount < sorted[j].ReplicaCount })
 	base := sorted[0]
 	best := sorted[len(sorted)-1]
 	if best.Throughput > base.Throughput {
-		return scenario8ScalingVerdict{
+		return scalabilityScalingVerdict{
 			Mode:    "improvement",
 			Message: fmt.Sprintf("throughput improved %.2f -> %.2f deliveries/s", base.Throughput, best.Throughput),
 			Pass:    true,
 		}
 	}
 	if best.Throughput == base.Throughput {
-		return scenario8ScalingVerdict{
+		return scalabilityScalingVerdict{
 			Mode:       "no-improvement",
 			Message:    fmt.Sprintf("throughput flat at %.2f deliveries/s", best.Throughput),
 			Pass:       true,
 			Bottleneck: "No scaling gain observed; likely DB claim-path contention or partner latency ceiling.",
 		}
 	}
-	return scenario8ScalingVerdict{
+	return scalabilityScalingVerdict{
 		Mode:       "regression",
 		Message:    fmt.Sprintf("throughput regressed %.2f -> %.2f deliveries/s", base.Throughput, best.Throughput),
 		Pass:       true,
@@ -761,14 +789,14 @@ func scenario8ComputeScalingVerdict(runs []scenario8DenseRun) scenario8ScalingVe
 	}
 }
 
-func writeScenario8Report(path string, profile scenario8Profile, sparse scenario8SparseResult, denseRuns []scenario8DenseRun, scaling scenario8ScalingVerdict) error {
+func writeScalabilityReport(path string, profile scalabilityProfile, sparse scalabilitySparseResult, denseRuns []scalabilityDenseRun, scaling scalabilityScalingVerdict) error {
 	f, err := os.Create(path) // #nosec G304 -- scenario-owned report path
 	if err != nil {
-		return fmt.Errorf("create scenario8 report: %w", err)
+		return fmt.Errorf("create scalability report: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
-	_, _ = fmt.Fprintf(f, `# Scenario 8: Horizontal Scalability (Shared Postgres Outbox)
+	_, _ = fmt.Fprintf(f, `# Scalability
 
 ## Description
 
@@ -806,7 +834,7 @@ Outbound attempts include `+"`X-Notifier-Replica`"+` only when replica identity 
 |---|---|
 | All expected Deliveries terminal | %s |
 | Zero duplicate tuples | %s |
-| Small P95 within Scenario 6 threshold | %s |
+| Small P95 within sparse fairness threshold | %s |
 | No zero-work replica in multi-replica run | %s |
 
 ## Sparse per-replica distribution (diagnostic)
@@ -831,7 +859,7 @@ Outbound attempts include `+"`X-Notifier-Replica`"+` only when replica identity 
 		passFail(sparse.ReplicaGateOK),
 	)
 
-	for _, replicaID := range scenario8ReplicaIDs(sparse.ReplicaCount) {
+	for _, replicaID := range scalabilityReplicaIDs(sparse.ReplicaCount) {
 		_, _ = fmt.Fprintf(f, "| %s | %d |\n", replicaID, sparse.PerReplicaDelivered[replicaID])
 	}
 	_, _ = fmt.Fprintf(f, "\nSparse distribution diagnostic: %s\n\n", sparse.Distribution.Diagnostic)
@@ -864,12 +892,12 @@ Outbound attempts include `+"`X-Notifier-Replica`"+` only when replica identity 
 | Summary | %s |
 | Bottleneck (if no improvement/regression) | %s |
 | Gate | %s |
-`, scaling.Mode, scaling.Message, scenario8DefaultIfEmpty(scaling.Bottleneck, "-"), passFail(scaling.Pass))
+`, scaling.Mode, scaling.Message, scalabilityDefaultIfEmpty(scaling.Bottleneck, "-"), passFail(scaling.Pass))
 
 	return f.Close()
 }
 
-func scenario8DefaultIfEmpty(value, fallback string) string {
+func scalabilityDefaultIfEmpty(value, fallback string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback
 	}

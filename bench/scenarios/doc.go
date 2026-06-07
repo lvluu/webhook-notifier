@@ -1,4 +1,3 @@
-// Package scenarios contains the benchmark scenario drivers.
-// Each scenario is invoked from cmd/bench and writes a markdown report
-// under bench/results/.
+// Package scenarios contains the Reliability, Fairness, Scalability, and
+// Partner Protection benchmarks plus their shared infrastructure.
 package scenarios

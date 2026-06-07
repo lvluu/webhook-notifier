@@ -25,5 +25,7 @@ coverage.*
 /chaos
 /notifier
 /bench
+!/bench/
+!/bench/**
 /delivery-history-retention
 /webhook-receiver

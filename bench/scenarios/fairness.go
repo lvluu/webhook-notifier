@@ -21,13 +21,13 @@ import (
 )
 
 const (
-	scenario6WhaleCustomerID = "scenario6-whale"
-	scenario6SmallPrefix     = "scenario6-small-"
-	scenario6ReportPath      = "bench/results/scenario-6.md"
-	scenario6SeedBatchRows   = 1000
+	fairnesswhaleCustomerID = "pw-whale"
+	fairnessSmallPrefix     = "pw-small-"
+	fairnessReportPath      = "bench/results/fairness.md"
+	fairnessSeedBatchRows   = 1000
 )
 
-type scenario6Profile struct {
+type fairnessProfile struct {
 	Name                    string
 	WorkerCounts            []int
 	SmallCount              int
@@ -43,7 +43,7 @@ type scenario6Profile struct {
 	BreakerFailureThreshold int
 }
 
-type scenario6RunResult struct {
+type fairnessRunResult struct {
 	Workers       int
 	Duration      time.Duration
 	Throughput    float64
@@ -60,36 +60,36 @@ type scenario6RunResult struct {
 	FairnessOK    bool
 }
 
-func scenario6ProfileFromEnv() (scenario6Profile, error) {
-	raw, name, err := loadBenchProfileConfig("scenario6")
+func fairnessProfileFromEnv() (fairnessProfile, error) {
+	raw, name, err := loadBenchProfileConfig("fairness")
 	if err != nil {
-		return scenario6Profile{}, err
+		return fairnessProfile{}, err
 	}
 	if len(raw.WorkerCounts) == 0 || raw.SmallCount < 1 || raw.WhaleDeliveries < 1 || raw.SmallDeliveries < 1 {
-		return scenario6Profile{}, fmt.Errorf("scenario6 profile %q has invalid counts", name)
+		return fairnessProfile{}, fmt.Errorf("fairness profile %q has invalid counts", name)
 	}
 	if raw.SubmitInterval.Duration() < 0 {
-		return scenario6Profile{}, fmt.Errorf("scenario6 profile %q has invalid submit interval", name)
+		return fairnessProfile{}, fmt.Errorf("fairness profile %q has invalid submit interval", name)
 	}
 	if raw.RequestTimeout.Duration() <= 0 {
-		return scenario6Profile{}, fmt.Errorf("scenario6 profile %q requires positive request_timeout", name)
+		return fairnessProfile{}, fmt.Errorf("fairness profile %q requires positive request_timeout", name)
 	}
 	if raw.MinBatchHint < 1 {
-		return scenario6Profile{}, fmt.Errorf("scenario6 profile %q requires min_batch_hint >= 1", name)
+		return fairnessProfile{}, fmt.Errorf("fairness profile %q requires min_batch_hint >= 1", name)
 	}
 	if raw.RetryMaxAttempts < 1 {
-		return scenario6Profile{}, fmt.Errorf("scenario6 profile %q requires retry_max_attempts >= 1", name)
+		return fairnessProfile{}, fmt.Errorf("fairness profile %q requires retry_max_attempts >= 1", name)
 	}
 	if raw.RetryBaseDelay.Duration() < 0 || raw.RetryCapDelay.Duration() < 0 {
-		return scenario6Profile{}, fmt.Errorf("scenario6 profile %q has invalid retry delays", name)
+		return fairnessProfile{}, fmt.Errorf("fairness profile %q has invalid retry delays", name)
 	}
 	if raw.FairnessRatioLimit <= 0 {
-		return scenario6Profile{}, fmt.Errorf("scenario6 profile %q requires fairness_ratio_limit > 0", name)
+		return fairnessProfile{}, fmt.Errorf("fairness profile %q requires fairness_ratio_limit > 0", name)
 	}
 	if raw.BreakerFailureThreshold < 0 {
-		return scenario6Profile{}, fmt.Errorf("scenario6 profile %q has invalid breaker threshold", name)
+		return fairnessProfile{}, fmt.Errorf("fairness profile %q has invalid breaker threshold", name)
 	}
-	return scenario6Profile{
+	return fairnessProfile{
 		Name:                    name,
 		WorkerCounts:            raw.WorkerCounts,
 		SmallCount:              raw.SmallCount,
@@ -106,9 +106,9 @@ func scenario6ProfileFromEnv() (scenario6Profile, error) {
 	}, nil
 }
 
-// RunScenario6 executes an assignment-aligned production-like benchmark:
+// RunFairness executes an assignment-aligned production-like benchmark:
 // real ingest submissions, mixed partner latency/failures, whale+small load.
-func RunScenario6(ctx context.Context) error {
+func RunFairness(ctx context.Context) error {
 	db, cleanup, err := openBenchDatabase(ctx)
 	if err != nil {
 		return fmt.Errorf("open bench db: %w", err)
@@ -118,29 +118,29 @@ func RunScenario6(ctx context.Context) error {
 		return fmt.Errorf("ping db: %w", err)
 	}
 
-	profile, err := scenario6ProfileFromEnv()
+	profile, err := fairnessProfileFromEnv()
 	if err != nil {
 		return fmt.Errorf("load profile: %w", err)
 	}
 
-	results := make([]scenario6RunResult, 0, len(profile.WorkerCounts))
+	results := make([]fairnessRunResult, 0, len(profile.WorkerCounts))
 	for _, workers := range profile.WorkerCounts {
-		slog.Info("running scenario 6 production-like run", "workers", workers)
-		run, err := runScenario6Once(ctx, db, profile, workers)
+		slog.Info("running fairness production-like run", "workers", workers)
+		run, err := runFairnessOnce(ctx, db, profile, workers)
 		if err != nil {
 			return err
 		}
 		results = append(results, run)
 	}
 
-	if err := writeScenario6Report(scenario6ReportPath, profile, results); err != nil {
-		return fmt.Errorf("write scenario6 report: %w", err)
+	if err := writeFairnessReport(fairnessReportPath, profile, results); err != nil {
+		return fmt.Errorf("write fairness report: %w", err)
 	}
-	slog.Info("scenario 6 complete", "profile", profile.Name, "report", scenario6ReportPath)
+	slog.Info("fairness complete", "profile", profile.Name, "report", fairnessReportPath)
 	return nil
 }
 
-func runScenario6Once(ctx context.Context, db *sql.DB, profile scenario6Profile, workers int) (scenario6RunResult, error) {
+func runFairnessOnce(ctx context.Context, db *sql.DB, profile fairnessProfile, workers int) (fairnessRunResult, error) {
 	// Keep DB pool proportional to worker concurrency during this benchmark so
 	// higher worker counts are not artificially bottlenecked by a tiny client
 	// pool, while staying below the default test Postgres max_connections.
@@ -149,25 +149,25 @@ func runScenario6Once(ctx context.Context, db *sql.DB, profile scenario6Profile,
 	db.SetMaxIdleConns(maxConns)
 
 	if err := resetBenchData(ctx, db); err != nil {
-		return scenario6RunResult{}, fmt.Errorf("reset bench data: %w", err)
+		return fairnessRunResult{}, fmt.Errorf("reset bench data: %w", err)
 	}
-	if err := seedScenario6Customers(ctx, db, profile.SmallCount); err != nil {
-		return scenario6RunResult{}, err
+	if err := seedFairnessCustomers(ctx, db, profile.SmallCount); err != nil {
+		return fairnessRunResult{}, err
 	}
 
 	rs := receiver.NewServer(
-		receiver.WithStableDecisions(fmt.Sprintf("scenario-6-%d", workers)),
+		receiver.WithStableDecisions(fmt.Sprintf("fairness-%d", workers)),
 		receiver.WithRouteLatency("/hooks/fast", 1.0, 15*time.Millisecond),
 		receiver.WithRouteLatency("/hooks/slow", 0.25, 250*time.Millisecond),
 		receiver.WithRouteStatus("/hooks/flaky", 0.03, http.StatusServiceUnavailable),
 	)
 	defer rs.Close()
-	if err := seedScenario6Webhooks(ctx, db, rs.URL(), profile.SmallCount); err != nil {
-		return scenario6RunResult{}, err
+	if err := seedFairnessWebhooks(ctx, db, rs.URL(), profile.SmallCount); err != nil {
+		return fairnessRunResult{}, err
 	}
 
 	sched := roundrobin.New()
-	outboxStore := newScenario6InstrumentedStore(outbox.New(db, outbox.WithBreakerFiltering(profile.BreakerFailureThreshold > 0)))
+	outboxStore := newFairnessInstrumentedStore(outbox.New(db, outbox.WithBreakerFiltering(profile.BreakerFailureThreshold > 0)))
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()
@@ -190,17 +190,17 @@ func runScenario6Once(ctx context.Context, db *sql.DB, profile scenario6Profile,
 				})),
 			)
 			if err := w.Run(workerCtx, outboxStore); err != nil && workerCtx.Err() == nil {
-				slog.Error("scenario6 worker failed", "worker_id", id, "error", err)
+				slog.Error("fairness worker failed", "worker_id", id, "error", err)
 			}
 		}(i)
 	}
 
 	start := time.Now()
-	if err := bulkSeedScenario6Deliveries(ctx, db, profile); err != nil {
-		return scenario6RunResult{}, err
+	if err := bulkSeedFairnessDeliveries(ctx, db, profile); err != nil {
+		return fairnessRunResult{}, err
 	}
-	if err := waitScenario6Drain(ctx, db, outboxStore, sched); err != nil {
-		return scenario6RunResult{}, err
+	if err := waitFairnessDrain(ctx, db, outboxStore, sched); err != nil {
+		return fairnessRunResult{}, err
 	}
 	duration := time.Since(start)
 	cancelWorkers()
@@ -208,23 +208,23 @@ func runScenario6Once(ctx context.Context, db *sql.DB, profile scenario6Profile,
 
 	total, err := queryTotalDeliveries(ctx, db)
 	if err != nil {
-		return scenario6RunResult{}, fmt.Errorf("query total deliveries: %w", err)
+		return fairnessRunResult{}, fmt.Errorf("query total deliveries: %w", err)
 	}
-	dead, err := queryScenario6DeadDeliveries(ctx, db)
+	dead, err := queryFairnessDeadDeliveries(ctx, db)
 	if err != nil {
-		return scenario6RunResult{}, err
+		return fairnessRunResult{}, err
 	}
-	attempts, err := queryScenario6Attempts(ctx, db)
+	attempts, err := queryFairnessAttempts(ctx, db)
 	if err != nil {
-		return scenario6RunResult{}, err
+		return fairnessRunResult{}, err
 	}
-	smallP95, err := queryScenario6FirstAttemptP95(ctx, db, scenario6SmallPrefix+"%")
+	smallP95, err := queryFairnessFirstAttemptP95(ctx, db, fairnessSmallPrefix+"%")
 	if err != nil {
-		return scenario6RunResult{}, err
+		return fairnessRunResult{}, err
 	}
-	whaleP95, err := queryScenario6FirstAttemptP95(ctx, db, scenario6WhaleCustomerID)
+	whaleP95, err := queryFairnessFirstAttemptP95(ctx, db, fairnesswhaleCustomerID)
 	if err != nil {
-		return scenario6RunResult{}, err
+		return fairnessRunResult{}, err
 	}
 
 	retryAttempts := attempts - total
@@ -243,7 +243,7 @@ func runScenario6Once(ctx context.Context, db *sql.DB, profile scenario6Profile,
 	throughput := float64(total) / duration.Seconds()
 	claimStats := outboxStore.ClaimStats()
 
-	return scenario6RunResult{
+	return fairnessRunResult{
 		Workers:       workers,
 		Duration:      duration,
 		Throughput:    throughput,
@@ -261,24 +261,24 @@ func runScenario6Once(ctx context.Context, db *sql.DB, profile scenario6Profile,
 	}, nil
 }
 
-type scenario6InstrumentedStore struct {
+type fairnessInstrumentedStore struct {
 	*outbox.Store
 	claimCalls  atomic.Int64
 	claimRows   atomic.Int64
 	emptyClaims atomic.Int64
 }
 
-type scenario6ClaimStats struct {
+type fairnessClaimStats struct {
 	Calls    int64
 	Empty    int64
 	AvgBatch float64
 }
 
-func newScenario6InstrumentedStore(store *outbox.Store) *scenario6InstrumentedStore {
-	return &scenario6InstrumentedStore{Store: store}
+func newFairnessInstrumentedStore(store *outbox.Store) *fairnessInstrumentedStore {
+	return &fairnessInstrumentedStore{Store: store}
 }
 
-func (s *scenario6InstrumentedStore) ClaimNextN(ctx context.Context, customerID string, limit int) ([]outbox.Delivery, error) {
+func (s *fairnessInstrumentedStore) ClaimNextN(ctx context.Context, customerID string, limit int) ([]outbox.Delivery, error) {
 	deliveries, err := s.Store.ClaimNextN(ctx, customerID, limit)
 	s.claimCalls.Add(1)
 	if err != nil {
@@ -291,7 +291,7 @@ func (s *scenario6InstrumentedStore) ClaimNextN(ctx context.Context, customerID 
 	return deliveries, nil
 }
 
-func (s *scenario6InstrumentedStore) ClaimNextBatch(ctx context.Context, customerIDs []string, limit int) ([]outbox.Delivery, error) {
+func (s *fairnessInstrumentedStore) ClaimNextBatch(ctx context.Context, customerIDs []string, limit int) ([]outbox.Delivery, error) {
 	deliveries, err := s.Store.ClaimNextBatch(ctx, customerIDs, limit)
 	s.claimCalls.Add(1)
 	if err != nil {
@@ -304,24 +304,24 @@ func (s *scenario6InstrumentedStore) ClaimNextBatch(ctx context.Context, custome
 	return deliveries, nil
 }
 
-func (s *scenario6InstrumentedStore) HasClaimableWorkBatch(ctx context.Context, customerIDs []string) (map[string]bool, error) {
+func (s *fairnessInstrumentedStore) HasClaimableWorkBatch(ctx context.Context, customerIDs []string) (map[string]bool, error) {
 	return s.Store.HasClaimableWorkBatch(ctx, customerIDs)
 }
 
-func (s *scenario6InstrumentedStore) ClaimStats() scenario6ClaimStats {
+func (s *fairnessInstrumentedStore) ClaimStats() fairnessClaimStats {
 	calls := s.claimCalls.Load()
 	avgBatch := 0.0
 	if calls > 0 {
 		avgBatch = float64(s.claimRows.Load()) / float64(calls)
 	}
-	return scenario6ClaimStats{
+	return fairnessClaimStats{
 		Calls:    calls,
 		Empty:    s.emptyClaims.Load(),
 		AvgBatch: avgBatch,
 	}
 }
 
-// bulkSeedScenario6Deliveries creates the whale and small-customer delivery
+// bulkSeedFairnessDeliveries creates the whale and small-customer delivery
 // backlog directly with set-based SQL instead of driving one ingest Submit
 // goroutine per customer. The per-customer Submit fan-out (10k+ concurrent
 // goroutines, each a unique registry key so the cache never warms) stampedes
@@ -332,29 +332,29 @@ func (s *scenario6InstrumentedStore) ClaimStats() scenario6ClaimStats {
 // Each seeded Event fans out to one Delivery per active matching Webhook (3 per
 // Customer), exactly as ingest would, so total delivery counts and the
 // created_at-based fairness metric are unchanged. The scheduler is fed by the
-// discovery poller in waitScenario6Drain rather than ingest-side Notify.
-func bulkSeedScenario6Deliveries(ctx context.Context, db *sql.DB, profile scenario6Profile) error {
-	if err := seedScenario6DeliveryBatch(ctx, db, []string{scenario6WhaleCustomerID}, profile.WhaleDeliveries); err != nil {
+// discovery poller in waitFairnessDrain rather than ingest-side Notify.
+func bulkSeedFairnessDeliveries(ctx context.Context, db *sql.DB, profile fairnessProfile) error {
+	if err := seedFairnessDeliveryBatch(ctx, db, []string{fairnesswhaleCustomerID}, profile.WhaleDeliveries); err != nil {
 		return fmt.Errorf("seed whale backlog: %w", err)
 	}
 
 	smallIDs := make([]string, 0, profile.SmallCount)
 	for i := 0; i < profile.SmallCount; i++ {
-		smallIDs = append(smallIDs, scenario6SmallCustomerID(i))
+		smallIDs = append(smallIDs, fairnesssmallCustomerID(i))
 	}
-	for start := 0; start < len(smallIDs); start += scenario6SeedBatchRows {
-		end := min(start+scenario6SeedBatchRows, len(smallIDs))
-		if err := seedScenario6DeliveryBatch(ctx, db, smallIDs[start:end], profile.SmallDeliveries); err != nil {
+	for start := 0; start < len(smallIDs); start += fairnessSeedBatchRows {
+		end := min(start+fairnessSeedBatchRows, len(smallIDs))
+		if err := seedFairnessDeliveryBatch(ctx, db, smallIDs[start:end], profile.SmallDeliveries); err != nil {
 			return fmt.Errorf("seed small backlog: %w", err)
 		}
 	}
 	return nil
 }
 
-// seedScenario6DeliveryBatch inserts eventsPerCustomer Events for each given
+// seedFairnessDeliveryBatch inserts eventsPerCustomer Events for each given
 // Customer and one pending Delivery per active matching Webhook, mirroring the
 // fan-out ingest.Submit would produce.
-func seedScenario6DeliveryBatch(ctx context.Context, db *sql.DB, customerIDs []string, eventsPerCustomer int) error {
+func seedFairnessDeliveryBatch(ctx context.Context, db *sql.DB, customerIDs []string, eventsPerCustomer int) error {
 	if len(customerIDs) == 0 || eventsPerCustomer < 1 {
 		return nil
 	}
@@ -375,16 +375,16 @@ func seedScenario6DeliveryBatch(ctx context.Context, db *sql.DB, customerIDs []s
 		 AND $2 = ANY(w.event_types)
 	`, customerIDs, eventType, eventsPerCustomer)
 	if err != nil {
-		return fmt.Errorf("seed scenario6 deliveries: %w", err)
+		return fmt.Errorf("seed fairness deliveries: %w", err)
 	}
 	return nil
 }
 
-type scenario6Notifier interface {
+type fairnessNotifier interface {
 	Notify(customerID string)
 }
 
-func waitScenario6Drain(ctx context.Context, db *sql.DB, store *scenario6InstrumentedStore, sched scenario6Notifier) error {
+func waitFairnessDrain(ctx context.Context, db *sql.DB, store *fairnessInstrumentedStore, sched fairnessNotifier) error {
 	pollCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	for {
@@ -411,43 +411,43 @@ func waitScenario6Drain(ctx context.Context, db *sql.DB, store *scenario6Instrum
 	}
 }
 
-func seedScenario6Customers(ctx context.Context, db *sql.DB, smallCount int) error {
+func seedFairnessCustomers(ctx context.Context, db *sql.DB, smallCount int) error {
 	customerIDs := make([]string, 0, smallCount+1)
-	customerIDs = append(customerIDs, scenario6WhaleCustomerID)
+	customerIDs = append(customerIDs, fairnesswhaleCustomerID)
 	for i := 0; i < smallCount; i++ {
-		customerIDs = append(customerIDs, scenario6SmallCustomerID(i))
+		customerIDs = append(customerIDs, fairnesssmallCustomerID(i))
 	}
 
-	for start := 0; start < len(customerIDs); start += scenario6SeedBatchRows {
-		end := min(start+scenario6SeedBatchRows, len(customerIDs))
-		if err := seedScenario6CustomerBatch(ctx, db, customerIDs[start:end]); err != nil {
+	for start := 0; start < len(customerIDs); start += fairnessSeedBatchRows {
+		end := min(start+fairnessSeedBatchRows, len(customerIDs))
+		if err := seedFairnessCustomerBatch(ctx, db, customerIDs[start:end]); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func seedScenario6Webhooks(ctx context.Context, db *sql.DB, baseURL string, smallCount int) error {
+func seedFairnessWebhooks(ctx context.Context, db *sql.DB, baseURL string, smallCount int) error {
 	customerIDs := make([]string, 0, smallCount+1)
-	customerIDs = append(customerIDs, scenario6WhaleCustomerID)
+	customerIDs = append(customerIDs, fairnesswhaleCustomerID)
 	for i := 0; i < smallCount; i++ {
-		customerIDs = append(customerIDs, scenario6SmallCustomerID(i))
+		customerIDs = append(customerIDs, fairnesssmallCustomerID(i))
 	}
 
-	for start := 0; start < len(customerIDs); start += scenario6SeedBatchRows {
-		end := min(start+scenario6SeedBatchRows, len(customerIDs))
-		if err := seedScenario6WebhookBatch(ctx, db, baseURL, customerIDs[start:end]); err != nil {
+	for start := 0; start < len(customerIDs); start += fairnessSeedBatchRows {
+		end := min(start+fairnessSeedBatchRows, len(customerIDs))
+		if err := seedFairnessWebhookBatch(ctx, db, baseURL, customerIDs[start:end]); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func scenario6SmallCustomerID(index int) string {
-	return fmt.Sprintf("%s%05d", scenario6SmallPrefix, index)
+func fairnesssmallCustomerID(index int) string {
+	return fmt.Sprintf("%s%05d", fairnessSmallPrefix, index)
 }
 
-func seedScenario6CustomerBatch(ctx context.Context, db *sql.DB, customerIDs []string) error {
+func seedFairnessCustomerBatch(ctx context.Context, db *sql.DB, customerIDs []string) error {
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO customers (id, class) VALUES ")
 	args := make([]any, 0, len(customerIDs))
@@ -460,12 +460,12 @@ func seedScenario6CustomerBatch(ctx context.Context, db *sql.DB, customerIDs []s
 	}
 	sb.WriteString(" ON CONFLICT (id) DO NOTHING")
 	if _, err := db.ExecContext(ctx, sb.String(), args...); err != nil {
-		return fmt.Errorf("seed scenario6 customers: %w", err)
+		return fmt.Errorf("seed fairness customers: %w", err)
 	}
 	return nil
 }
 
-func seedScenario6WebhookBatch(ctx context.Context, db *sql.DB, baseURL string, customerIDs []string) error {
+func seedFairnessWebhookBatch(ctx context.Context, db *sql.DB, baseURL string, customerIDs []string) error {
 	paths := []string{"/hooks/fast", "/hooks/slow", "/hooks/flaky"}
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active) VALUES ")
@@ -484,24 +484,24 @@ func seedScenario6WebhookBatch(ctx context.Context, db *sql.DB, baseURL string, 
 	}
 	sb.WriteString(" ON CONFLICT DO NOTHING")
 	if _, err := db.ExecContext(ctx, sb.String(), args...); err != nil {
-		return fmt.Errorf("seed scenario6 webhooks: %w", err)
+		return fmt.Errorf("seed fairness webhooks: %w", err)
 	}
 	return nil
 }
 
-func queryScenario6DeadDeliveries(ctx context.Context, db *sql.DB) (int, error) {
+func queryFairnessDeadDeliveries(ctx context.Context, db *sql.DB) (int, error) {
 	var n int
 	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deliveries WHERE status = 'dead'`).Scan(&n)
 	return n, err
 }
 
-func queryScenario6Attempts(ctx context.Context, db *sql.DB) (int, error) {
+func queryFairnessAttempts(ctx context.Context, db *sql.DB) (int, error) {
 	var n int
 	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM delivery_attempts`).Scan(&n)
 	return n, err
 }
 
-func queryScenario6FirstAttemptP95(ctx context.Context, db *sql.DB, customerPattern string) (float64, error) {
+func queryFairnessFirstAttemptP95(ctx context.Context, db *sql.DB, customerPattern string) (float64, error) {
 	var p95 float64
 	err := db.QueryRowContext(ctx, `
 		SELECT COALESCE(percentile_cont(0.95) WITHIN GROUP (
@@ -514,14 +514,14 @@ func queryScenario6FirstAttemptP95(ctx context.Context, db *sql.DB, customerPatt
 	return p95, err
 }
 
-func writeScenario6Report(path string, profile scenario6Profile, results []scenario6RunResult) error {
+func writeFairnessReport(path string, profile fairnessProfile, results []fairnessRunResult) error {
 	f, err := os.Create(path) // #nosec G304 -- scenario-owned report path.
 	if err != nil {
-		return fmt.Errorf("create scenario6 report: %w", err)
+		return fmt.Errorf("create fairness report: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
-	_, _ = fmt.Fprintf(f, `# Scenario 6: Assignment-Aligned Production-Like Workload
+	_, _ = fmt.Fprintf(f, `# Fairness
 
 ## Description
 
@@ -529,7 +529,7 @@ Profile **%s** seeds a Delivery backlog with set-based SQL (each Event fans out 
 Seeding directly avoids a per-Customer ingest `+"`Submit`"+` stampede that would otherwise measure DB connection contention instead of delivery throughput; ingest-path performance is covered separately.
 Each Customer has 3 Webhooks (`+"`/hooks/fast`"+`, `+"`/hooks/slow`"+`, `+"`/hooks/flaky`"+`) with mixed latency/failure behavior to approximate production HTTP variability.
 
-Assignment mapping:
+Validation coverage:
 - Reliability: retries under transient 503s, duplicate tuple protection.
 - Scalability: throughput across worker counts %v.
 - Fairness: Small-vs-Whale P95 first-attempt latency comparison under concurrent load.

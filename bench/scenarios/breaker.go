@@ -3,7 +3,9 @@ package scenarios
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/lvluu/webhook-notifier/internal/breaker"
@@ -22,11 +24,11 @@ func newBenchBreaker(ctx context.Context, db *sql.DB, threshold int, initialCool
 	if err != nil {
 		return nil, fmt.Errorf("load breaker state: %w", err)
 	}
-	// Benchmarks persist synchronously so breaker state is visible to claim
-	// queries without adding a second lifecycle goroutine to the harness.
-	return breaker.NewMemory(config, snapshots, func(transition breaker.Transition) {
-		if err := breaker.PersistTransition(ctx, db, transition); err != nil {
-			panic(fmt.Sprintf("persist breaker transition: %v", err))
+	persister := breaker.NewAsyncPersister(db, slog.Default(), 64)
+	go func() {
+		if err := persister.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("bench breaker persister stopped", "error", err)
 		}
-	}), nil
+	}()
+	return breaker.NewMemory(config, snapshots, persister.Sink()), nil
 }

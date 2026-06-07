@@ -35,16 +35,24 @@ func openBenchDatabase(ctx context.Context) (*sql.DB, func(), error) {
 
 	ctr, err := postgres.RunContainer(
 		ctx,
-		testcontainers.WithImage("postgres:16-alpine"),
+		testcontainers.WithImage("postgres:17-alpine"),
 		postgres.WithDatabase("notifier"),
 		postgres.WithUsername("notifier"),
 		postgres.WithPassword("notifier"),
-		// Preload pg_stat_statements so each bench run can dump its query
-		// hotspots (the EXPLAIN-adjacent signal agents use to find dominant
-		// queries). The extension is created and reset in openBenchDatabaseAtDSN.
-		// The postgres entrypoint prepends "postgres" when the first arg is a flag.
+		// Match the compose/local config so bench observations stay comparable.
 		testcontainers.CustomizeRequestOption(func(req *testcontainers.GenericContainerRequest) {
-			req.Cmd = append(req.Cmd, "-c", "shared_preload_libraries=pg_stat_statements")
+			req.ShmSize = 256 * 1024 * 1024
+			req.Cmd = append(req.Cmd,
+				"-c", "max_connections=200",
+				"-c", "shared_buffers=128MB",
+				"-c", "max_wal_senders=0",
+				"-c", "synchronous_commit=off",
+				"-c", "password_encryption=md5",
+				"-c", "shared_preload_libraries=pg_stat_statements",
+				"-c", "pg_stat_statements.max=10000",
+				"-c", "pg_stat_statements.track=all",
+				"-c", "statement_timeout=0",
+			)
 		}),
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
@@ -121,6 +129,7 @@ func openBenchDatabaseAtDSN(ctx context.Context, dsn string, migrate bool) (*sql
 	}, nil
 }
 
+// applyBenchMigrations applies all repo SQL migrations to a benchmark database.
 func applyBenchMigrations(ctx context.Context, db *sql.DB) error {
 	files, err := filepath.Glob(filepath.Join(repoRoot(), "migrations", "*.up.sql"))
 	if err != nil {

@@ -12,7 +12,9 @@ import (
 )
 
 const (
-	benchProfileDev    = "dev"
+	// benchProfileDev is the small, fast local benchmark profile.
+	benchProfileDev = "dev"
+	// benchProfileStress is the report-quality benchmark profile.
 	benchProfileStress = "stress"
 )
 
@@ -20,6 +22,7 @@ type benchProfilesFile struct {
 	Scenarios map[string]map[string]benchProfileConfig `yaml:"scenarios"`
 }
 
+// benchProfileConfig is the YAML-backed configuration shared by benchmark scenarios.
 type benchProfileConfig struct {
 	WorkerCount                int           `yaml:"worker_count"`
 	WorkerCounts               []int         `yaml:"worker_counts"`
@@ -31,17 +34,11 @@ type benchProfileConfig struct {
 	SparseEventsPerCustomer    int           `yaml:"sparse_events_per_customer"`
 	DenseCustomers             int           `yaml:"dense_customers"`
 	DenseDeliveriesPerCustomer int           `yaml:"dense_deliveries_per_customer"`
-	LateDeliveries             int           `yaml:"late_deliveries"`
-	SmallDripInterval          durationValue `yaml:"small_drip_interval"`
-	LateNotifyDelay            durationValue `yaml:"late_notify_delay"`
 	CustomerCount              int           `yaml:"customer_count"`
 	EventsPerCustomer          int           `yaml:"events_per_customer"`
 	SubmitInterval             durationValue `yaml:"submit_interval"`
 	OutageDelay                durationValue `yaml:"outage_delay"`
 	OutageDuration             durationValue `yaml:"outage_duration"`
-	EventCount                 int           `yaml:"event_count"`
-	ThroughputDeliveries       int           `yaml:"throughput_deliveries"`
-	RetryDeliveries            int           `yaml:"retry_deliveries"`
 	DeliveriesPerCustomer      int           `yaml:"deliveries_per_customer"`
 	RequestTimeout             durationValue `yaml:"request_timeout"`
 	DiscoveryInterval          durationValue `yaml:"discovery_interval"`
@@ -119,6 +116,7 @@ func loadBenchProfileConfig(scenario string) (benchProfileConfig, string, error)
 	return profile, name, nil
 }
 
+// benchProfileNameFromEnv returns the selected BENCH_PROFILE name.
 func benchProfileNameFromEnv() (string, error) {
 	name := os.Getenv("BENCH_PROFILE")
 	if name == "" {
@@ -132,6 +130,7 @@ func benchProfileNameFromEnv() (string, error) {
 	}
 }
 
+// readBenchProfiles parses bench/profiles.yaml once and caches the result.
 func readBenchProfiles() (benchProfilesFile, error) {
 	benchProfilesOnce.Do(func() {
 		path, err := benchProfilesPath()
