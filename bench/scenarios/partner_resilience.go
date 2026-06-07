@@ -818,8 +818,8 @@ func runPartnerResiliencePhaseCRun(ctx context.Context, db *sql.DB, profile part
 		BreakerReopened:    breakerReopened,
 	}
 
-	rows, err := db.QueryContext(ctx, `SELECT d.customer_id, COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (d.updated_at - d.created_at)) * 1000), 0)
-		FROM deliveries d WHERE d.customer_id <> $1 AND d.status = 'succeeded' GROUP BY d.customer_id ORDER BY d.customer_id`, ids[0])
+	rows, err := db.QueryContext(ctx, `SELECT d.customer_id, COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY da.duration_ms), 0)
+		FROM deliveries d JOIN delivery_attempts da ON da.delivery_id = d.id WHERE d.customer_id <> $1 AND d.status = 'succeeded' AND da.attempt_number = 1 GROUP BY d.customer_id ORDER BY d.customer_id`, ids[0])
 	if err != nil {
 		return prPhaseCRunResult{}, fmt.Errorf("query healthy latencies: %w", err)
 	}
