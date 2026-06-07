@@ -15,6 +15,7 @@ import (
 const (
 	idleBackoff              = 50 * time.Millisecond
 	defaultEmptyClaimBackoff = 20 * time.Millisecond
+	transientErrorBackoff    = 250 * time.Millisecond
 )
 
 func (w *Worker) emptyClaimDelay() time.Duration {
@@ -43,6 +44,12 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			if isTransientDBError(err) {
+				if waitErr := w.backoffTransient(ctx, "claim", err); waitErr != nil {
+					return waitErr
+				}
+				continue
+			}
 			return err
 		}
 
@@ -56,8 +63,34 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 		}
 
 		if err := w.processDeliveries(ctx, store, deliveries); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if isTransientDBError(err) {
+				if waitErr := w.backoffTransient(ctx, "mark", err); waitErr != nil {
+					return waitErr
+				}
+				continue
+			}
 			return err
 		}
+	}
+}
+
+func (w *Worker) backoffTransient(ctx context.Context, phase string, cause error) error {
+	if w.Logger != nil {
+		w.Logger.Warn("transient database error; backing off and retrying",
+			"phase", phase,
+			"backoff", transientErrorBackoff,
+			"error", cause,
+		)
+	}
+	observe.IncWorkerTransientDBError(phase)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(transientErrorBackoff):
+		return nil
 	}
 }
 

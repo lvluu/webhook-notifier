@@ -198,6 +198,15 @@ func IncBreakerTrip(reason string) {
 	WebhookBreakerTripsTotal.WithLabelValues(reason).Add(1)
 }
 
+// IncWorkerTransientDBError safely increments
+// WebhookWorkerTransientDBErrorsTotal for the given loop phase.
+func IncWorkerTransientDBError(phase string) {
+	if !metricsRegistered() {
+		return
+	}
+	WebhookWorkerTransientDBErrorsTotal.WithLabelValues(phase).Add(1)
+}
+
 // IncPgNotifyBroadcast safely increments the remote wake broadcaster outcome.
 func IncPgNotifyBroadcast(result string) {
 	if !metricsRegistered() {
