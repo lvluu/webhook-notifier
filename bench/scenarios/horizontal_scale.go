@@ -392,7 +392,7 @@ func startHorizontalScaleReplicas(ctx context.Context, db *sql.DB, profile horiz
 			"-request-timeout", profile.RequestTimeout.String(),
 			"-min-batch", strconv.Itoa(profile.MinBatchHint),
 			"-multi-pick", strconv.Itoa(profile.MultiPickCount),
-			"-breaker-failure-threshold", strconv.Itoa(profile.BreakerFailureThreshold),
+			"-breaker-threshold", strconv.Itoa(profile.BreakerFailureThreshold),
 			"-discovery-interval", "50ms",
 			"-replica-id", replicaID,
 		)

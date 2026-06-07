@@ -389,52 +389,58 @@ demo:
     echo ""
     echo "Set DEMO_KEEP_STACK=1 to leave containers running for inspection."
 
+# ── Assignment-facing benchmarks ──────────────────────────────────────────
+
+# production-like mixed ingest + delivery workload (headline proof)
+bench-production-workload:
+    BENCH_PROFILE=stress go run ./cmd/bench production_workload
+
+# multi-replica horizontal scalability with sparse + dense phases
+bench-horizontal-scale:
+    BENCH_PROFILE=stress go run ./cmd/bench horizontal_scale
+
+# partner reliability drill-down: transient retry + terminal fast-fail + breaker isolation
+bench-partner-resilience:
+    BENCH_PROFILE=stress go run ./cmd/bench partner_resilience
+
+# ── Legacy/issue-scoped benchmarks (cmd/bench-legacy) ─────────────────────
+
 # fairness under load + late-arrival reactivity (issue #12)
 bench-1:
-    BENCH_PROFILE=stress go run ./cmd/bench scenario1
+    BENCH_PROFILE=stress go run ./cmd/bench-legacy late_arrival_fairness
 
 # transient + recovering partners (issue #13)
 bench-2:
-    BENCH_PROFILE=stress go run ./cmd/bench scenario2
+    BENCH_PROFILE=stress go run ./cmd/bench-legacy transient_recovery
 
 # terminal classification fast-fail (issue #14)
 bench-3:
-    BENCH_PROFILE=stress go run ./cmd/bench scenario3
+    BENCH_PROFILE=stress go run ./cmd/bench-legacy terminal_fast_fail
 
 # horizontal scale + atomicity + idempotency (issue #15)
 bench-4:
-    BENCH_PROFILE=stress go run ./cmd/bench scenario4
+    BENCH_PROFILE=stress go run ./cmd/bench-legacy scale_idempotency
 
-# scenario4 throughput matrix: workers x DB pool size
+# dead partner circuit breaker + pool protection (issue #27)
+bench-5:
+    BENCH_PROFILE=stress go run ./cmd/bench-legacy breaker_isolation
+
+# internal breaker hardening (not assignment-facing)
+bench-7:
+    BENCH_PROFILE=stress go run ./cmd/bench-legacy breaker_storm
+
+# ── Legacy matrix / analysis helpers ──────────────────────────────────────
+
+# scale_idempotency throughput matrix: workers x DB pool size
 bench-4-matrix:
     BENCH_PROFILE=stress \
     BENCH_SCENARIO4_MATRIX_WORKERS=8,16,32,48,64 \
     BENCH_SCENARIO4_MATRIX_DB_CONNS=16,32,48,64,96 \
-    go run ./cmd/bench scenario4
+    go run ./cmd/bench-legacy scale_idempotency
 
-# summarize scenario4 matrix files and recommend a throughput knee
+# summarize scale_idempotency matrix files and recommend a throughput knee
 bench-4-knee:
-    bash ./bench/scripts/scenario4_knee.sh
-
-# dead partner circuit breaker + pool protection (issue #27)
-bench-5:
-    BENCH_PROFILE=stress go run ./cmd/bench scenario5
-
-# assignment-aligned production-like mixed workload
-bench-6:
-    BENCH_PROFILE=stress go run ./cmd/bench scenario6
-
-# horizontal scalability across real notifier replicas
-bench-8:
-    BENCH_PROFILE=stress go run ./cmd/bench scenario8
-
-# partner resilience: transient recovery + 4xx fast-fail + breaker isolation
-bench-partner-resilience:
-    BENCH_PROFILE=stress go run ./cmd/bench partner_resilience
-
-# internal breaker hardening (not assignment-facing)
-bench-7:
-    BENCH_PROFILE=stress go run ./cmd/bench scenario7
+    bash ./bench/scripts/scale_idempotency_knee.sh
 
 # retain terminal deliveries into delivery_history
 delivery-history-retention:

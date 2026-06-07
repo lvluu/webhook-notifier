@@ -20,6 +20,6 @@ Fairness metric note:
 
 | Workers | Total Deliveries | Duration | Throughput (Deliveries/sec) | Avg Claim Batch | Claim Calls | Empty Claims | Retry Rate | Dead Rate | Duplicate (delivery_id, attempt_number) tuples | Small P95 First-Attempt Latency (ms) | Whale P95 First-Attempt Latency (ms) | Reliability | Fairness |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 16 | 135000 | 2m59.138s | 753.61 | 78.57 | 1735 | 427 | 0.97% | 0.00% | 0 | 169317.73 | 178712.53 | **PASS** | **PASS** |
-| 32 | 135000 | 21.342s | 6325.41 | 48.79 | 2795 | 1590 | 1.01% | 0.00% | 0 | 13820.49 | 20755.43 | **PASS** | **PASS** |
-| 64 | 135000 | 19.42s | 6951.60 | 35.90 | 3798 | 2498 | 0.99% | 0.00% | 0 | 13062.68 | 18814.03 | **PASS** | **PASS** |
+| 16 | 135000 | 3m14.175s | 695.25 | 83.59 | 1632 | 223 | 1.04% | 0.00% | 0 | 183311.72 | 193523.48 | **PASS** | **PASS** |
+| 32 | 135000 | 1m17.082s | 1751.37 | 8.86 | 15393 | 13995 | 1.03% | 0.00% | 0 | 17591.76 | 27206.90 | **PASS** | **PASS** |
+| 64 | 135000 | 24.967s | 5407.09 | 19.76 | 6902 | 5671 | 1.03% | 0.00% | 0 | 14683.47 | 24542.07 | **PASS** | **PASS** |

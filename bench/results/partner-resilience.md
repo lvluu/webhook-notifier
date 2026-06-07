@@ -15,9 +15,9 @@ Folded from the legacy Scenarios 2, 3, and 5.
 | Expected Deliveries | 3000 |
 | Total Deliveries | 3000 |
 | Terminal Deliveries | 3000 |
-| Partner A p99 (ms) | 61.85 |
-| Recovery: Successfully recovered | 793 / 793 |
-| Jitter: max retries per second post-recovery | 129 / 794 total |
+| Partner A p99 (ms) | 86.25 |
+| Recovery: Successfully recovered | 622 / 622 |
+| Jitter: max retries per second post-recovery | 124 / 623 total |
 
 | Gate | OK |
 |---|---|
@@ -48,15 +48,15 @@ Folded from the legacy Scenarios 2, 3, and 5.
 
 | Metric | Control | Dead Partner |
 |---|---|:---:|---:|
-| Duration | 12.266s | 32.202s |
-| Goroutines (baseline → final) | 6 | 5 |
-| Dead-customer attempts | — | 124 |
+| Duration | 12.628s | 49.006s |
+| Goroutines (baseline → final) | 7 | 7 |
+| Dead-customer attempts | — | 192 |
 | Dead-customer attempt cap | — | 1000 |
 | Dead-customer pending (skipped) | — | 1000 |
 
 | Gate | OK |
 |---|---|
-| Healthy Customer p95 within 10% of control | **PASS** |
+| Healthy Customer p95 within 10% of control | **FAIL** |
 | Breaker opened | **PASS** |
 | Half-open probe observed | **PASS** |
 | Breaker re-opened after probe | **PASS** |

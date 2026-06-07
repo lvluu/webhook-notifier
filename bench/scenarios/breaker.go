@@ -22,11 +22,7 @@ func newBenchBreaker(ctx context.Context, db *sql.DB, threshold int, initialCool
 	if err != nil {
 		return nil, fmt.Errorf("load breaker state: %w", err)
 	}
-	// Benchmarks persist synchronously so breaker state is visible to claim
-	// queries without adding a second lifecycle goroutine to the harness.
-	return breaker.NewMemory(config, snapshots, func(transition breaker.Transition) {
-		if err := breaker.PersistTransition(ctx, db, transition); err != nil {
-			panic(fmt.Sprintf("persist breaker transition: %v", err))
-		}
-	}), nil
+	persister := breaker.NewAsyncPersister(db, nil, 64)
+	go persister.Run(ctx)
+	return breaker.NewMemory(config, snapshots, persister.Sink()), nil
 }
