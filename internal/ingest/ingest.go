@@ -133,7 +133,7 @@ func insertDeliveries(ctx context.Context, tx *sql.Tx, eventID string, hooks []W
 	if err != nil {
 		return nil, fmt.Errorf("insert deliveries: %w", err)
 	}
-	var ids []string
+	ids := make([]string, 0, len(hooks))
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {

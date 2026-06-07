@@ -63,7 +63,6 @@ func (s *Store) claimNextBatchWithoutBreaker(ctx context.Context, customerIDs []
 	defer cancel()
 	claimStarted := time.Now()
 	perCustomerLimit := perCustomerClaimLimit(limit, len(customerIDs))
-	claimSelection := sqlClaimSelectionFor("d", "dc")
 
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		WITH input_customers AS (
@@ -120,7 +119,7 @@ func (s *Store) claimNextBatchWithoutBreaker(ctx context.Context, customerIDs []
 			        claimed_at = now()
 			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
 			RETURNING delivery_id, attempt_number, claimed_at
-		)%s`, claimSelection.Ready(), claimSelection.Stale(s.claimLease.Milliseconds()), sqlClaimedDeliveryProjection), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
+		)%s`, sqlReady, s.staleSQL, sqlClaimedDeliveryProjection), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
 	if err != nil {
 		return nil, fmt.Errorf("cte claim batch: %w", err)
 	}
@@ -145,8 +144,7 @@ func (s *Store) claimNextBatchWithBreaker(ctx context.Context, customerIDs []str
 	claimStarted := time.Now()
 	perCustomerLimit := perCustomerClaimLimit(limit, len(customerIDs))
 
-	claimSelection := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
-	breakerEligible := claimSelection.BreakerEligible()
+	breakerEligible := sqlBreakerEligible
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		WITH input_customers AS (
 			SELECT DISTINCT customer_id
@@ -221,7 +219,7 @@ func (s *Store) claimNextBatchWithBreaker(ctx context.Context, customerIDs []str
 			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
 			RETURNING delivery_id, attempt_number, claimed_at
 		)
-		%s`, claimSelection.Ready(), breakerEligible, claimSelection.Stale(s.claimLease.Milliseconds()), breakerEligible, sqlClaimedDeliveryProjection), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
+		%s`, sqlReady, breakerEligible, s.staleSQL, breakerEligible, sqlClaimedDeliveryProjection), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
 	if err != nil {
 		return nil, fmt.Errorf("cte claim batch with breaker: %w", err)
 	}
@@ -273,8 +271,7 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 
 	claimStarted := time.Now()
 
-	claimSelection := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
-	breakerEligible := claimSelection.BreakerEligible()
+	breakerEligible := sqlBreakerEligible
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		WITH ready_candidate AS (
 			SELECT d.id, d.webhook_id, d.attempt_count
@@ -329,7 +326,7 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
 			RETURNING delivery_id, attempt_number, claimed_at
 		)
-		%s`, claimSelection.Ready(), breakerEligible, claimSelection.Stale(s.claimLease.Milliseconds()), breakerEligible, sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
+		%s`, sqlReady, breakerEligible, s.staleSQL, breakerEligible, sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("cte claim: %w", err)
 	}
@@ -352,7 +349,6 @@ func (s *Store) claimNextNWithoutBreaker(ctx context.Context, customerID string,
 	ctx, cancel := s.claimCtx(ctx)
 	defer cancel()
 	claimStarted := time.Now()
-	claimSelection := sqlClaimSelectionFor("d", "dc")
 
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		WITH ready_candidate AS (
@@ -389,7 +385,7 @@ func (s *Store) claimNextNWithoutBreaker(ctx context.Context, customerID string,
 			        claimed_at = now()
 			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
 			RETURNING delivery_id, attempt_number, claimed_at
-		)%s`, claimSelection.Ready(), claimSelection.Stale(s.claimLease.Milliseconds()), sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
+		)%s`, sqlReady, s.staleSQL, sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim without breaker: %w", err)
 	}
@@ -453,9 +449,8 @@ func (s *Store) DiscoverClaimableCustomers(ctx context.Context, afterCustomerID 
 		return nil, fmt.Errorf("limit must be >= 1")
 	}
 
-	claimSelection := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
-	ready := claimSelection.ReadyWithoutClaim()
-	breakerEligible := claimSelection.BreakerEligible()
+	ready := sqlReadyWithoutClaim
+	breakerEligible := sqlBreakerEligible
 	// Enumerate distinct claimable-hint customers with a recursive loose
 	// index-scan (the PostgreSQL "loose indexscan" pattern) over
 	// idx_deliveries_ready so that finding the next distinct customer costs
@@ -547,7 +542,6 @@ func (s *Store) HasClaimableWorkBatch(ctx context.Context, customerIDs []string)
 func (s *Store) hasClaimableWorkBatchWithoutBreaker(ctx context.Context, customerIDs []string) (map[string]bool, error) {
 	ctx, cancel := s.claimCtx(ctx)
 	defer cancel()
-	claimSelection := sqlClaimSelectionFor("d", "dc")
 
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		WITH claimable AS (
@@ -564,7 +558,7 @@ func (s *Store) hasClaimableWorkBatchWithoutBreaker(ctx context.Context, custome
 			  AND %s
 		)
 		SELECT customer_id FROM claimable
-	`, claimSelection.Ready(), claimSelection.Stale(s.claimLease.Milliseconds())), customerIDs)
+	`, sqlReady, s.staleSQL), customerIDs)
 	if err != nil {
 		return nil, fmt.Errorf("has claimable work batch: %w", err)
 	}
@@ -576,8 +570,7 @@ func (s *Store) hasClaimableWorkBatchWithoutBreaker(ctx context.Context, custome
 func (s *Store) hasClaimableWorkBatchWithBreaker(ctx context.Context, customerIDs []string) (map[string]bool, error) {
 	ctx, cancel := s.claimCtx(ctx)
 	defer cancel()
-	claimSelection := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
-	breakerEligible := claimSelection.BreakerEligible()
+	breakerEligible := sqlBreakerEligible
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		WITH claimable AS (
 			SELECT DISTINCT d.customer_id
@@ -597,7 +590,7 @@ func (s *Store) hasClaimableWorkBatchWithBreaker(ctx context.Context, customerID
 			  AND %s
 		)
 		SELECT customer_id FROM claimable
-	`, claimSelection.Ready(), breakerEligible, claimSelection.Stale(s.claimLease.Milliseconds()), breakerEligible), customerIDs)
+	`, sqlReady, breakerEligible, s.staleSQL, breakerEligible), customerIDs)
 	if err != nil {
 		return nil, fmt.Errorf("has claimable work batch with breaker: %w", err)
 	}
@@ -625,7 +618,6 @@ func (s *Store) hasClaimableWorkSplit(ctx context.Context, customerID string) (b
 	ctx, cancel := s.claimCtx(ctx)
 	defer cancel()
 	var exists bool
-	claimSelection := sqlClaimSelectionFor("d", "dc")
 	if !s.breakerFiltering {
 		err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 			SELECT EXISTS (
@@ -635,12 +627,11 @@ func (s *Store) hasClaimableWorkSplit(ctx context.Context, customerID string) (b
 				WHERE d.customer_id = $1
 				  AND %s
 			)
-		`, claimSelection.Any(s.claimLease.Milliseconds())), customerID).Scan(&exists)
+		`, s.anySQL), customerID).Scan(&exists)
 		return exists, err
 	}
 
-	claimSelection = claimSelection.WithWebhookAlias("w")
-	breakerEligible := claimSelection.BreakerEligible()
+	breakerEligible := sqlBreakerEligible
 	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT EXISTS (
 			SELECT 1
@@ -651,6 +642,6 @@ func (s *Store) hasClaimableWorkSplit(ctx context.Context, customerID string) (b
 			  AND %s
 			  AND %s
 		)
-	`, claimSelection.Any(s.claimLease.Milliseconds()), breakerEligible), customerID).Scan(&exists)
+	`, s.anySQL, breakerEligible), customerID).Scan(&exists)
 	return exists, err
 }

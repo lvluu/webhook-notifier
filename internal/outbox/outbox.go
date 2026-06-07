@@ -2,6 +2,7 @@ package outbox
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 )
 
@@ -81,6 +82,9 @@ type Store struct {
 	claimLease       time.Duration
 	breakerFiltering bool
 	claimTimeout     time.Duration
+
+	staleSQL string // pre-computed stale predicate with claimLease baked in
+	anySQL   string // pre-computed (ready OR stale) predicate
 }
 
 // Option configures a Store.
@@ -125,6 +129,13 @@ func New(db *sql.DB, opts ...Option) *Store {
 	for _, opt := range opts {
 		opt(store)
 	}
+
+	leaseMS := store.claimLease.Milliseconds()
+	store.staleSQL = fmt.Sprintf("dc.claimed_at < now() - (%d * interval '1 millisecond')", leaseMS)
+	store.anySQL = fmt.Sprintf(`(
+      (%s)
+      OR (%s)
+  )`, sqlReady, store.staleSQL)
 
 	return store
 }

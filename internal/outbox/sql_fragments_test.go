@@ -3,153 +3,132 @@ package outbox
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestSqlClaimSelectionReady(t *testing.T) {
-	sel := sqlClaimSelectionFor("d", "dc")
-
-	got := sel.Ready()
-
-	if !strings.Contains(got, "d.status IN ('pending', 'failed_retry')") {
-		t.Error("Ready() missing delivery alias in status clause")
+func TestSqlFragmentsReady(t *testing.T) {
+	if !strings.Contains(sqlReady, "d.status IN ('pending', 'failed_retry')") {
+		t.Error("sqlReady missing delivery alias in status clause")
 	}
-	if !strings.Contains(got, "d.next_attempt_at <= now()") {
-		t.Error("Ready() missing next_attempt_at clause")
+	if !strings.Contains(sqlReady, "d.next_attempt_at <= now()") {
+		t.Error("sqlReady missing next_attempt_at clause")
 	}
-	if !strings.Contains(got, "dc.delivery_id IS NULL") {
-		t.Error("Ready() missing claim alias in delivery_id IS NULL")
+	if !strings.Contains(sqlReady, "dc.delivery_id IS NULL") {
+		t.Error("sqlReady missing claim alias in delivery_id IS NULL")
 	}
-	if strings.Contains(got, "$") {
-		t.Errorf("Ready() must not contain positional parameters, got: %s", got)
+	if strings.Contains(sqlReady, "$") {
+		t.Errorf("sqlReady must not contain positional parameters, got: %s", sqlReady)
 	}
 }
 
-func TestSqlClaimSelectionReadyCustomAliases(t *testing.T) {
-	sel := sqlClaimSelectionFor("del", "clm")
-
-	got := sel.Ready()
-
-	if !strings.Contains(got, "del.status IN") {
-		t.Error("Ready() should use custom delivery alias")
+func TestSqlFragmentsStaleViaStore(t *testing.T) {
+	s := New(nil)
+	if !strings.Contains(s.staleSQL, "dc.claimed_at < now()") {
+		t.Error("staleSQL should reference dc.claimed_at")
 	}
-	if !strings.Contains(got, "del.next_attempt_at") {
-		t.Error("Ready() should use custom delivery alias for next_attempt_at")
-	}
-	if !strings.Contains(got, "clm.delivery_id") {
-		t.Error("Ready() should use custom claim alias")
+	if strings.Contains(s.staleSQL, "$") {
+		t.Errorf("staleSQL must not contain positional parameters, got: %s", s.staleSQL)
 	}
 }
 
-func TestSqlClaimSelectionStaleEmbedsClaimLease(t *testing.T) {
-	sel := sqlClaimSelectionFor("d", "dc")
-
-	t.Run("short_lease", func(t *testing.T) {
-		got := sel.Stale(5000)
-
-		if !strings.Contains(got, "now() - (5000 * interval '1 millisecond')") {
-			t.Errorf("Stale(5000) should embed claimLeaseMS, got: %s", got)
-		}
-		if strings.Contains(got, "$2") {
-			t.Errorf("Stale() must not contain $2 parameter reference, got: %s", got)
-		}
-	})
-
-	t.Run("long_lease", func(t *testing.T) {
-		got := sel.Stale(300000)
-
-		if !strings.Contains(got, "now() - (300000 * interval '1 millisecond')") {
-			t.Errorf("Stale(300000) should embed claimLeaseMS, got: %s", got)
-		}
-	})
-
-	t.Run("zero_lease", func(t *testing.T) {
-		got := sel.Stale(0)
-
-		if !strings.Contains(got, "now() - (0 * interval '1 millisecond')") {
-			t.Errorf("Stale(0) should embed 0, got: %s", got)
-		}
-	})
-}
-
-func TestSqlClaimSelectionStaleUsesClaimAlias(t *testing.T) {
-	sel := sqlClaimSelectionFor("d", "clm")
-
-	got := sel.Stale(5000)
-
-	if !strings.Contains(got, "clm.claimed_at") {
-		t.Errorf("Stale() should use claim alias 'clm', got: %s", got)
+func TestSqlFragmentsBreakerEligible(t *testing.T) {
+	if !strings.Contains(sqlBreakerEligible, "w.breaker_state = 'closed'") {
+		t.Error("sqlBreakerEligible missing closed state")
+	}
+	if !strings.Contains(sqlBreakerEligible, "w.breaker_state = 'half_open'") {
+		t.Error("sqlBreakerEligible missing half_open state")
+	}
+	if !strings.Contains(sqlBreakerEligible, "w.breaker_state = 'open'") {
+		t.Error("sqlBreakerEligible missing open state")
+	}
+	if !strings.Contains(sqlBreakerEligible, "d.id") {
+		t.Error("sqlBreakerEligible missing delivery alias for probe_delivery_id")
 	}
 }
 
-func TestSqlClaimSelectionAnyNoPositionalParams(t *testing.T) {
-	sel := sqlClaimSelectionFor("d", "dc")
-
-	got := sel.Any(5000)
-
-	if strings.Contains(got, "$2") {
-		t.Errorf("Any() must not contain $2 parameter reference, got: %s", got)
+func TestSqlFragmentsAnyComposesReadyAndStale(t *testing.T) {
+	// anySQL is pre-computed on Store; this test verifies the pattern
+	// via Store creation with default config.
+	s := New(nil)
+	if !strings.Contains(s.anySQL, "d.status IN ('pending', 'failed_retry')") {
+		t.Error("anySQL missing Ready fragment")
 	}
-	if strings.Contains(got, "$") {
-		t.Errorf("Any() must not contain any positional parameters, got: %s", got)
+	if !strings.Contains(s.anySQL, "dc.delivery_id IS NULL") {
+		t.Error("anySQL missing Ready claim fragment")
 	}
-}
-
-func TestSqlClaimSelectionAnyComposesReadyAndStale(t *testing.T) {
-	sel := sqlClaimSelectionFor("d", "dc")
-
-	got := sel.Any(7500)
-
-	if !strings.Contains(got, "d.status IN ('pending', 'failed_retry')") {
-		t.Error("Any() missing Ready fragment")
+	if !strings.Contains(s.anySQL, "dc.claimed_at < now()") {
+		t.Error("anySQL missing Stale fragment")
 	}
-	if !strings.Contains(got, "dc.delivery_id IS NULL") {
-		t.Error("Any() missing Ready claim fragment")
+	if !strings.Contains(s.anySQL, "OR") {
+		t.Error("anySQL missing OR between Ready and Stale")
 	}
-	if !strings.Contains(got, "now() - (7500 * interval '1 millisecond')") {
-		t.Error("Any() missing Stale fragment with claimLease")
-	}
-	if !strings.Contains(got, "OR") {
-		t.Error("Any() missing OR between Ready and Stale")
+	if strings.Contains(s.anySQL, "$") {
+		t.Errorf("anySQL must not contain positional parameters, got: %s", s.anySQL)
 	}
 }
 
-func TestSqlClaimSelectionBreakerEligible(t *testing.T) {
-	sel := sqlClaimSelectionFor("d", "dc").WithWebhookAlias("w")
-
-	got := sel.BreakerEligible()
-
-	if !strings.Contains(got, "w.breaker_state = 'closed'") {
-		t.Error("BreakerEligible missing closed state")
+func TestStoreFragmentsWithCustomClaimLease(t *testing.T) {
+	s := New(nil, WithClaimLease(30*time.Second))
+	if !strings.Contains(s.staleSQL, "30000") {
+		t.Errorf("staleSQL with 30s lease should contain 30000ms, got: %s", s.staleSQL)
 	}
-	if !strings.Contains(got, "w.breaker_state = 'half_open'") {
-		t.Error("BreakerEligible missing half_open state")
-	}
-	if !strings.Contains(got, "w.breaker_state = 'open'") {
-		t.Error("BreakerEligible missing open state")
-	}
-	if !strings.Contains(got, "d.id") {
-		t.Error("BreakerEligible missing delivery alias for probe_delivery_id")
+	if !strings.Contains(s.anySQL, "30000") {
+		t.Errorf("anySQL with 30s lease should contain 30000ms, got: %s", s.anySQL)
 	}
 }
 
-func TestSqlClaimSelectionWithWebhookAliasIsImmutable(t *testing.T) {
-	original := sqlClaimSelectionFor("d", "dc")
-	withWebhook := original.WithWebhookAlias("w")
-
-	if original.webhookAlias != "" {
-		t.Errorf("WithWebhookAlias mutated original: webhookAlias=%q, want empty", original.webhookAlias)
-	}
-	if withWebhook.webhookAlias != "w" {
-		t.Errorf("WithWebhookAlias returned incorrect value: webhookAlias=%q, want 'w'", withWebhook.webhookAlias)
+func TestStoreFragmentsWithDefaultClaimLease(t *testing.T) {
+	s := New(nil)
+	if !strings.Contains(s.staleSQL, "300000") {
+		t.Errorf("staleSQL with default 5m lease should contain 300000ms, got: %s", s.staleSQL)
 	}
 }
 
-func TestSqlClaimSelectionBreakerEligibleWithEmptyWebhook(t *testing.T) {
-	sel := sqlClaimSelectionFor("d", "dc")
+func TestStoreFragmentsWithShortClaimLease(t *testing.T) {
+	s := New(nil, WithClaimLease(100*time.Millisecond))
+	if !strings.Contains(s.staleSQL, "100") {
+		t.Errorf("staleSQL with 100ms lease should contain 100, got: %s", s.staleSQL)
+	}
+}
 
-	got := sel.BreakerEligible()
+func TestStoreFragmentsReadyWithoutClaim(t *testing.T) {
+	if !strings.Contains(sqlReadyWithoutClaim, "d.status IN ('pending', 'failed_retry')") {
+		t.Error("sqlReadyWithoutClaim missing status clause")
+	}
+	if !strings.Contains(sqlReadyWithoutClaim, "d.next_attempt_at <= now()") {
+		t.Error("sqlReadyWithoutClaim missing next_attempt_at clause")
+	}
+	if strings.Contains(sqlReadyWithoutClaim, "dc.delivery_id IS NULL") {
+		t.Error("sqlReadyWithoutClaim should NOT contain claim alias clause")
+	}
+	if strings.Contains(sqlReadyWithoutClaim, "$") {
+		t.Errorf("sqlReadyWithoutClaim must not contain positional parameters, got: %s", sqlReadyWithoutClaim)
+	}
+}
 
-	if !strings.Contains(got, ".breaker_state = 'closed'") {
-		t.Error("BreakerEligible should still produce SQL with empty webhook alias")
+func TestStoreFragmentsAnyCompositionOrder(t *testing.T) {
+	s := New(nil)
+	// anySQL should wrap ready and stale in parentheses with OR
+	if !strings.HasPrefix(s.anySQL, "(") {
+		t.Error("anySQL should start with opening paren")
+	}
+	if !strings.HasSuffix(s.anySQL, ")") {
+		t.Error("anySQL should end with closing paren")
+	}
+	// Should contain OR between the two fragments
+	readyIdx := strings.Index(s.anySQL, sqlReady)
+	staleIdx := strings.Index(s.anySQL, s.staleSQL)
+	orIdx := strings.Index(s.anySQL, "OR")
+	if readyIdx < 0 {
+		t.Error("anySQL missing sqlReady")
+	}
+	if staleIdx < 0 {
+		t.Error("anySQL missing staleSQL")
+	}
+	if orIdx < 0 {
+		t.Error("anySQL missing OR")
+	}
+	if orIdx < readyIdx || orIdx > staleIdx {
+		t.Error("OR should appear between ready and stale fragments")
 	}
 }
