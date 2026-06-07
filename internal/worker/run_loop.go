@@ -54,10 +54,12 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 		}
 
 		if len(deliveries) == 0 {
+			t := time.NewTimer(w.emptyClaimDelay())
 			select {
 			case <-ctx.Done():
+				t.Stop()
 				return ctx.Err()
-			case <-time.After(w.emptyClaimDelay()):
+			case <-t.C:
 			}
 			continue
 		}
@@ -86,10 +88,12 @@ func (w *Worker) backoffTransient(ctx context.Context, phase string, cause error
 		)
 	}
 	observe.IncWorkerTransientDBError(phase)
+	t := time.NewTimer(transientErrorBackoff)
 	select {
 	case <-ctx.Done():
+		t.Stop()
 		return ctx.Err()
-	case <-time.After(transientErrorBackoff):
+	case <-t.C:
 		return nil
 	}
 }
