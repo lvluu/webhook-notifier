@@ -173,8 +173,6 @@ func startDeliveryRuntimeWithDeps(
 		persister := circuitbreaker.NewAsyncPersister(db, logger.With("component", "breaker-persister"), 1024)
 		webhookBreaker = circuitbreaker.NewMemory(cfg.Breaker, snapshots, persister.Sink())
 		group.Go("breaker persister", persister.Run)
-	} else {
-		webhookBreaker = circuitbreaker.NewMemory(cfg.Breaker, nil, nil)
 	}
 
 	var broadcastDB *sql.DB

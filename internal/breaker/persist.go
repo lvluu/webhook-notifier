@@ -79,9 +79,10 @@ func PersistTransition(ctx context.Context, db *sql.DB, transition Transition) e
 
 // AsyncPersister persists breaker transitions from a bounded queue.
 type AsyncPersister struct {
-	db     *sql.DB
-	logger *slog.Logger
-	ch     chan Transition
+	db      *sql.DB
+	logger  *slog.Logger
+	ch      chan Transition
+	persist func(context.Context, *sql.DB, Transition) error
 }
 
 // NewAsyncPersister creates a bounded asynchronous transition persister.
@@ -90,9 +91,10 @@ func NewAsyncPersister(db *sql.DB, logger *slog.Logger, capacity int) *AsyncPers
 		capacity = 1
 	}
 	return &AsyncPersister{
-		db:     db,
-		logger: logger,
-		ch:     make(chan Transition, capacity),
+		db:      db,
+		logger:  logger,
+		ch:      make(chan Transition, capacity),
+		persist: PersistTransition,
 	}
 }
 
@@ -108,7 +110,7 @@ func (p *AsyncPersister) Sink() TransitionSink {
 					"state", transition.State,
 				)
 			}
-			if err := PersistTransition(context.Background(), p.db, transition); err != nil && p.logger != nil {
+			if err := p.persist(context.Background(), p.db, transition); err != nil && p.logger != nil {
 				p.logger.Error("persist breaker transition failed",
 					"webhook_id", transition.WebhookID,
 					"state", transition.State,
@@ -126,7 +128,7 @@ func (p *AsyncPersister) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case transition := <-p.ch:
-			if err := PersistTransition(ctx, p.db, transition); err != nil && p.logger != nil {
+			if err := p.persist(ctx, p.db, transition); err != nil && p.logger != nil {
 				p.logger.Error("persist breaker transition failed",
 					"webhook_id", transition.WebhookID,
 					"state", transition.State,
