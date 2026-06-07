@@ -93,9 +93,7 @@ func RunLateArrivalFairness(ctx context.Context) error {
 	plainSched := roundrobin.New()
 	instrSched := newInstrumentedScheduler(plainSched)
 	ingestStore := ingest.New(db, reg, instrSched)
-	outboxStore := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: profile.BreakerFailureThreshold,
-	}))
+	outboxStore := outbox.New(db, outbox.WithBreakerFiltering(profile.BreakerFailureThreshold > 0))
 
 	if err := scenarios.SeedCustomers(ctx, db, profile.SmallCount); err != nil {
 		return fmt.Errorf("seed customers: %w", err)

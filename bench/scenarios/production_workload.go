@@ -167,9 +167,7 @@ func runProductionWorkloadOnce(ctx context.Context, db *sql.DB, profile producti
 	}
 
 	sched := roundrobin.New()
-	outboxStore := newProductionWorkloadInstrumentedStore(outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: profile.BreakerFailureThreshold,
-	})))
+	outboxStore := newProductionWorkloadInstrumentedStore(outbox.New(db, outbox.WithBreakerFiltering(profile.BreakerFailureThreshold > 0)))
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()

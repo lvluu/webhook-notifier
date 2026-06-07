@@ -197,9 +197,7 @@ func prepareScaleIdempotencyWorkload(ctx context.Context, db *sql.DB, receiverBa
 
 func drainScaleIdempotency(ctx context.Context, db *sql.DB, numWorkers int, profile scaleIdempotencyProfile, policy retry.RetryPolicy) (time.Duration, error) {
 	plainSched := roundrobin.New()
-	outboxStore := outbox.New(db, outbox.WithBreakerConfig(outbox.BreakerConfig{
-		FailureThreshold: profile.BreakerFailureThreshold,
-	}))
+	outboxStore := outbox.New(db, outbox.WithBreakerFiltering(profile.BreakerFailureThreshold > 0))
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()

@@ -37,11 +37,6 @@ func (is *instrumentedScheduler) Remove(customerID string) {
 	is.inner.Remove(customerID)
 }
 
-// WaitForWork delegates to the inner Scheduler.
-func (is *instrumentedScheduler) WaitForWork(ctx context.Context) error {
-	return is.inner.WaitForWork(ctx)
-}
-
 // Pick delegates to the inner Scheduler and increments the Pick counter on
 // success. If the returned customer matches the tracked customer and
 // firstPickTotal hasn't been set yet, records the pick as the first service.
