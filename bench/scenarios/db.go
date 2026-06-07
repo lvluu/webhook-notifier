@@ -19,11 +19,11 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// OpenBenchDatabase returns an isolated Postgres database for benchmark runs.
+// openBenchDatabase returns an isolated Postgres database for benchmark runs.
 // BENCH_DATABASE_URL or DATABASE_URL can override the container when needed,
 // but the default path is a fresh throwaway container with the repo migrations
 // applied.
-func OpenBenchDatabase(ctx context.Context) (*sql.DB, func(), error) {
+func openBenchDatabase(ctx context.Context) (*sql.DB, func(), error) {
 	if dsn := os.Getenv("BENCH_DATABASE_URL"); dsn != "" {
 		slog.Info("using bench database override", "component", "bench-db", "source", "BENCH_DATABASE_URL")
 		return openBenchDatabaseAtDSN(ctx, dsn, false)
@@ -111,7 +111,7 @@ func openBenchDatabaseAtDSN(ctx context.Context, dsn string, migrate bool) (*sql
 		return nil, nil, fmt.Errorf("ping postgres: %w", err)
 	}
 	if migrate {
-		if err := ApplyBenchMigrations(ctx, db); err != nil {
+		if err := applyBenchMigrations(ctx, db); err != nil {
 			_ = db.Close()
 			return nil, nil, err
 		}
@@ -129,8 +129,8 @@ func openBenchDatabaseAtDSN(ctx context.Context, dsn string, migrate bool) (*sql
 	}, nil
 }
 
-// ApplyBenchMigrations applies all repo SQL migrations to a benchmark database.
-func ApplyBenchMigrations(ctx context.Context, db *sql.DB) error {
+// applyBenchMigrations applies all repo SQL migrations to a benchmark database.
+func applyBenchMigrations(ctx context.Context, db *sql.DB) error {
 	files, err := filepath.Glob(filepath.Join(repoRoot(), "migrations", "*.up.sql"))
 	if err != nil {
 		return fmt.Errorf("find migrations: %w", err)

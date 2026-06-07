@@ -20,15 +20,15 @@ import (
 	"github.com/lvluu/webhook-notifier/bench/receiver"
 )
 
-const horizontalScaleReportPath = "bench/results/horizontal-scale.md"
+const scalabilityReportPath = "bench/results/scalability.md"
 
 const (
-	horizontalScaleWorkersPerReplica     = 8
-	horizontalScaleDeliveryConcurrency   = 16
-	horizontalScaleBenchmarkHostCapacity = horizontalScaleWorkersPerReplica * horizontalScaleDeliveryConcurrency
+	scalabilityWorkersPerReplica     = 8
+	scalabilityDeliveryConcurrency   = 16
+	scalabilityBenchmarkHostCapacity = scalabilityWorkersPerReplica * scalabilityDeliveryConcurrency
 )
 
-type horizontalScaleProfile struct {
+type scalabilityProfile struct {
 	Name                       string
 	ReplicaCounts              []int
 	SparseCustomers            int
@@ -45,7 +45,7 @@ type horizontalScaleProfile struct {
 	BreakerFailureThreshold    int
 }
 
-type horizontalScaleReplica struct {
+type scalabilityReplica struct {
 	id          string
 	businessURL string
 	metricsURL  string
@@ -54,7 +54,7 @@ type horizontalScaleReplica struct {
 	stderr      bytes.Buffer
 }
 
-type horizontalScaleSparseResult struct {
+type scalabilitySparseResult struct {
 	ReplicaCount                  int
 	ExpectedDeliveries            int
 	TerminalDeliveries            int
@@ -69,10 +69,10 @@ type horizontalScaleSparseResult struct {
 	FairnessGateOK                bool
 	AllTerminalOK                 bool
 	DuplicateOK                   bool
-	Distribution                  horizontalScaleDistributionVerdict
+	Distribution                  scalabilityDistributionVerdict
 }
 
-type horizontalScaleDenseRun struct {
+type scalabilityDenseRun struct {
 	ReplicaCount        int
 	Duration            time.Duration
 	Throughput          float64
@@ -83,48 +83,48 @@ type horizontalScaleDenseRun struct {
 	AllTerminalOK       bool
 	DuplicateOK         bool
 	ReplicaGateOK       bool
-	Distribution        horizontalScaleDistributionVerdict
+	Distribution        scalabilityDistributionVerdict
 }
 
-type horizontalScaleScalingVerdict struct {
+type scalabilityScalingVerdict struct {
 	Mode       string
 	Message    string
 	Pass       bool
 	Bottleneck string
 }
 
-type horizontalScaleDistributionVerdict struct {
+type scalabilityDistributionVerdict struct {
 	MissingReplicaIDs []string
 	ImbalanceRatio    float64
 	Diagnostic        string
 	HardFail          bool
 }
 
-func horizontalScaleProfileFromEnv() (horizontalScaleProfile, error) {
-	raw, name, err := LoadBenchProfileConfig("horizontal_scale")
+func scalabilityProfileFromEnv() (scalabilityProfile, error) {
+	raw, name, err := loadBenchProfileConfig("scalability")
 	if err != nil {
-		return horizontalScaleProfile{}, err
+		return scalabilityProfile{}, err
 	}
 	if len(raw.ReplicaCounts) == 0 {
-		return horizontalScaleProfile{}, fmt.Errorf("horizontal_scale profile %q requires replica_counts", name)
+		return scalabilityProfile{}, fmt.Errorf("scalability profile %q requires replica_counts", name)
 	}
 	if raw.SparseCustomers < 1 || raw.SparseEventsPerCustomer < 1 || raw.DenseCustomers < 1 || raw.DenseDeliveriesPerCustomer < 1 {
-		return horizontalScaleProfile{}, fmt.Errorf("horizontal_scale profile %q has invalid customer/delivery counts", name)
+		return scalabilityProfile{}, fmt.Errorf("scalability profile %q has invalid customer/delivery counts", name)
 	}
 	if raw.RequestTimeout.Duration() <= 0 {
-		return horizontalScaleProfile{}, fmt.Errorf("horizontal_scale profile %q requires request_timeout > 0", name)
+		return scalabilityProfile{}, fmt.Errorf("scalability profile %q requires request_timeout > 0", name)
 	}
 	if raw.MinBatchHint < 1 || raw.MultiPickCount < 1 {
-		return horizontalScaleProfile{}, fmt.Errorf("horizontal_scale profile %q requires min_batch_hint >=1 and multi_pick_count >=1", name)
+		return scalabilityProfile{}, fmt.Errorf("scalability profile %q requires min_batch_hint >=1 and multi_pick_count >=1", name)
 	}
 	if raw.RetryMaxAttempts < 1 || raw.RetryBaseDelay.Duration() < 0 || raw.RetryCapDelay.Duration() < 0 {
-		return horizontalScaleProfile{}, fmt.Errorf("horizontal_scale profile %q has invalid retry config", name)
+		return scalabilityProfile{}, fmt.Errorf("scalability profile %q has invalid retry config", name)
 	}
 	if raw.FairnessRatioLimit <= 0 {
-		return horizontalScaleProfile{}, fmt.Errorf("horizontal_scale profile %q requires fairness_ratio_limit > 0", name)
+		return scalabilityProfile{}, fmt.Errorf("scalability profile %q requires fairness_ratio_limit > 0", name)
 	}
 
-	return horizontalScaleProfile{
+	return scalabilityProfile{
 		Name:                       name,
 		ReplicaCounts:              raw.ReplicaCounts,
 		SparseCustomers:            raw.SparseCustomers,
@@ -142,15 +142,15 @@ func horizontalScaleProfileFromEnv() (horizontalScaleProfile, error) {
 	}, nil
 }
 
-// RunHorizontalScale executes Horizontal Scale: horizontal scalability across real notifier
+// RunScalability executes Scalability: horizontal scalability across real notifier
 // OS processes sharing one Postgres outbox.
-func RunHorizontalScale(ctx context.Context) error {
-	profile, err := horizontalScaleProfileFromEnv()
+func RunScalability(ctx context.Context) error {
+	profile, err := scalabilityProfileFromEnv()
 	if err != nil {
-		return fmt.Errorf("load horizontal scale profile: %w", err)
+		return fmt.Errorf("load scalability profile: %w", err)
 	}
 
-	db, cleanup, err := OpenBenchDatabase(ctx)
+	db, cleanup, err := openBenchDatabase(ctx)
 	if err != nil {
 		return fmt.Errorf("open bench db: %w", err)
 	}
@@ -161,35 +161,35 @@ func RunHorizontalScale(ctx context.Context) error {
 	}
 
 	maxReplicas := profile.ReplicaCounts[len(profile.ReplicaCounts)-1]
-	sparse, err := runHorizontalScaleSparsePhase(ctx, db, profile, maxReplicas)
+	sparse, err := runScalabilitySparsePhase(ctx, db, profile, maxReplicas)
 	if err != nil {
 		return fmt.Errorf("run sparse phase: %w", err)
 	}
 
-	denseRuns := make([]horizontalScaleDenseRun, 0, len(profile.ReplicaCounts))
+	denseRuns := make([]scalabilityDenseRun, 0, len(profile.ReplicaCounts))
 	for _, replicas := range profile.ReplicaCounts {
-		run, runErr := runHorizontalScaleDensePhase(ctx, db, profile, replicas)
+		run, runErr := runScalabilityDensePhase(ctx, db, profile, replicas)
 		if runErr != nil {
 			return fmt.Errorf("run dense phase (replicas=%d): %w", replicas, runErr)
 		}
 		denseRuns = append(denseRuns, run)
 	}
 
-	scaling := horizontalScaleComputeScalingVerdict(denseRuns)
-	if err := writeHorizontalScaleReport(horizontalScaleReportPath, profile, sparse, denseRuns, scaling); err != nil {
-		return fmt.Errorf("write horizontal scale report: %w", err)
+	scaling := scalabilityComputeScalingVerdict(denseRuns)
+	if err := writeScalabilityReport(scalabilityReportPath, profile, sparse, denseRuns, scaling); err != nil {
+		return fmt.Errorf("write scalability report: %w", err)
 	}
 
 	if !sparse.AllTerminalOK || !sparse.DuplicateOK || !sparse.FairnessGateOK || !sparse.ReplicaGateOK {
-		return fmt.Errorf("horizontal scale sparse hard gate failed")
+		return fmt.Errorf("scalability sparse hard gate failed")
 	}
 	for _, run := range denseRuns {
 		if !run.AllTerminalOK || !run.DuplicateOK || !run.ReplicaGateOK {
-			return fmt.Errorf("horizontal scale dense hard gate failed for replicas=%d", run.ReplicaCount)
+			return fmt.Errorf("scalability dense hard gate failed for replicas=%d", run.ReplicaCount)
 		}
 	}
 	// Scaling verdict is diagnostic — a regression or flat throughput is reported
-	// in the markdown output but does not fail the scenario. Horizontal scalability
+	// in the markdown output but does not fail the scenario. Scalability
 	// proof is established through the dense-phase replica gates (all terminal,
 	// zero duplicates, no zero-work replica) rather than a strict throughput slope.
 	_ = scaling
@@ -197,9 +197,9 @@ func RunHorizontalScale(ctx context.Context) error {
 	return nil
 }
 
-func runHorizontalScaleSparsePhase(ctx context.Context, db *sql.DB, profile horizontalScaleProfile, replicaCount int) (horizontalScaleSparseResult, error) {
-	if err := ResetBenchData(ctx, db); err != nil {
-		return horizontalScaleSparseResult{}, fmt.Errorf("reset bench data: %w", err)
+func runScalabilitySparsePhase(ctx context.Context, db *sql.DB, profile scalabilityProfile, replicaCount int) (scalabilitySparseResult, error) {
+	if err := resetBenchData(ctx, db); err != nil {
+		return scalabilitySparseResult{}, fmt.Errorf("reset bench data: %w", err)
 	}
 
 	rs := receiver.NewServer(
@@ -210,28 +210,28 @@ func runHorizontalScaleSparsePhase(ctx context.Context, db *sql.DB, profile hori
 	)
 	defer rs.Close()
 
-	if err := seedHorizontalScaleCustomers(ctx, db, "hs-sparse-small-", profile.SparseCustomers); err != nil {
-		return horizontalScaleSparseResult{}, err
+	if err := seedScalabilityCustomers(ctx, db, "hs-sparse-small-", profile.SparseCustomers); err != nil {
+		return scalabilitySparseResult{}, err
 	}
-	if err := seedHorizontalScaleWebhooks(ctx, db, "hs-sparse-small-", profile.SparseCustomers, rs.URL(), []string{"/hooks/fast", "/hooks/slow", "/hooks/flaky"}); err != nil {
-		return horizontalScaleSparseResult{}, err
+	if err := seedScalabilityWebhooks(ctx, db, "hs-sparse-small-", profile.SparseCustomers, rs.URL(), []string{"/hooks/fast", "/hooks/slow", "/hooks/flaky"}); err != nil {
+		return scalabilitySparseResult{}, err
 	}
 
-	replicas, err := startHorizontalScaleReplicas(ctx, db, profile, replicaCount)
+	replicas, err := startScalabilityReplicas(ctx, db, profile, replicaCount)
 	if err != nil {
-		return horizontalScaleSparseResult{}, err
+		return scalabilitySparseResult{}, err
 	}
-	defer stopHorizontalScaleReplicas(replicas)
+	defer stopScalabilityReplicas(replicas)
 
-	if err := submitHorizontalScaleSparseEvents(ctx, profile, replicas); err != nil {
-		return horizontalScaleSparseResult{}, err
-	}
-
-	if err := waitForHorizontalScaleDrain(ctx, db, 8*time.Minute); err != nil {
-		return horizontalScaleSparseResult{}, err
+	if err := submitScalabilitySparseEvents(ctx, profile, replicas); err != nil {
+		return scalabilitySparseResult{}, err
 	}
 
-	claimSum, claimCount, emptyClaims := collectHorizontalScaleClaimMetrics(replicas)
+	if err := waitForScalabilityDrain(ctx, db, 8*time.Minute); err != nil {
+		return scalabilitySparseResult{}, err
+	}
+
+	claimSum, claimCount, emptyClaims := collectScalabilityClaimMetrics(replicas)
 	avgClaim := 0.0
 	avgPerCustomerClaim := 0.0
 	emptyRate := 0.0
@@ -243,22 +243,22 @@ func runHorizontalScaleSparsePhase(ctx context.Context, db *sql.DB, profile hori
 
 	recordings := rs.Recorded()
 	expected := profile.SparseCustomers * profile.SparseEventsPerCustomer * 3
-	terminal, err := QueryTerminalDeliveries(ctx, db)
+	terminal, err := queryTerminalDeliveries(ctx, db)
 	if err != nil {
-		return horizontalScaleSparseResult{}, fmt.Errorf("query terminal deliveries: %w", err)
+		return scalabilitySparseResult{}, fmt.Errorf("query terminal deliveries: %w", err)
 	}
-	firstP95, err := queryProductionWorkloadFirstAttemptP95(ctx, db, "hs-sparse-small-%")
+	firstP95, err := queryFairnessFirstAttemptP95(ctx, db, "hs-sparse-small-%")
 	if err != nil {
-		return horizontalScaleSparseResult{}, fmt.Errorf("query sparse first-attempt p95: %w", err)
+		return scalabilitySparseResult{}, fmt.Errorf("query sparse first-attempt p95: %w", err)
 	}
 
-	expectedReplicaIDs := horizontalScaleReplicaIDs(replicaCount)
-	perReplica := horizontalScaleCountByReplica(recordings)
-	distribution := horizontalScalePerReplicaDistributionVerdict(perReplica, expectedReplicaIDs)
-	thresholdMs := horizontalScaleSparseFairnessThreshold(profile.Name)
+	expectedReplicaIDs := scalabilityReplicaIDs(replicaCount)
+	perReplica := scalabilityCountByReplica(recordings)
+	distribution := scalabilityPerReplicaDistributionVerdict(perReplica, expectedReplicaIDs)
+	thresholdMs := scalabilitySparseFairnessThreshold(profile.Name)
 
-	duplicates := CountDuplicateAttemptTuples(recordings)
-	return horizontalScaleSparseResult{
+	duplicates := countDuplicateAttemptTuples(recordings)
+	return scalabilitySparseResult{
 		ReplicaCount:                  replicaCount,
 		ExpectedDeliveries:            expected,
 		TerminalDeliveries:            terminal,
@@ -277,9 +277,9 @@ func runHorizontalScaleSparsePhase(ctx context.Context, db *sql.DB, profile hori
 	}, nil
 }
 
-func runHorizontalScaleDensePhase(ctx context.Context, db *sql.DB, profile horizontalScaleProfile, replicaCount int) (horizontalScaleDenseRun, error) {
-	if err := ResetBenchData(ctx, db); err != nil {
-		return horizontalScaleDenseRun{}, fmt.Errorf("reset bench data: %w", err)
+func runScalabilityDensePhase(ctx context.Context, db *sql.DB, profile scalabilityProfile, replicaCount int) (scalabilityDenseRun, error) {
+	if err := resetBenchData(ctx, db); err != nil {
+		return scalabilityDenseRun{}, fmt.Errorf("reset bench data: %w", err)
 	}
 
 	rs := receiver.NewServer(
@@ -288,43 +288,43 @@ func runHorizontalScaleDensePhase(ctx context.Context, db *sql.DB, profile horiz
 	)
 	defer rs.Close()
 
-	if err := seedHorizontalScaleCustomers(ctx, db, "hs-dense-customer-", profile.DenseCustomers); err != nil {
-		return horizontalScaleDenseRun{}, err
+	if err := seedScalabilityCustomers(ctx, db, "hs-dense-customer-", profile.DenseCustomers); err != nil {
+		return scalabilityDenseRun{}, err
 	}
-	if err := seedHorizontalScaleWebhooks(ctx, db, "hs-dense-customer-", profile.DenseCustomers, rs.URL(), []string{"/hooks/dense-fast"}); err != nil {
-		return horizontalScaleDenseRun{}, err
+	if err := seedScalabilityWebhooks(ctx, db, "hs-dense-customer-", profile.DenseCustomers, rs.URL(), []string{"/hooks/dense-fast"}); err != nil {
+		return scalabilityDenseRun{}, err
 	}
-	if err := seedHorizontalScaleDenseDeliveries(ctx, db, profile.DenseCustomers, profile.DenseDeliveriesPerCustomer); err != nil {
-		return horizontalScaleDenseRun{}, err
+	if err := seedScalabilityDenseDeliveries(ctx, db, profile.DenseCustomers, profile.DenseDeliveriesPerCustomer); err != nil {
+		return scalabilityDenseRun{}, err
 	}
 
-	replicas, err := startHorizontalScaleReplicas(ctx, db, profile, replicaCount)
+	replicas, err := startScalabilityReplicas(ctx, db, profile, replicaCount)
 	if err != nil {
-		return horizontalScaleDenseRun{}, err
+		return scalabilityDenseRun{}, err
 	}
-	defer stopHorizontalScaleReplicas(replicas)
+	defer stopScalabilityReplicas(replicas)
 
 	start := time.Now()
-	if err := waitForHorizontalScaleDrain(ctx, db, 12*time.Minute); err != nil {
-		return horizontalScaleDenseRun{}, err
+	if err := waitForScalabilityDrain(ctx, db, 12*time.Minute); err != nil {
+		return scalabilityDenseRun{}, err
 	}
 	duration := time.Since(start)
 
 	recordings := rs.Recorded()
 	expected := profile.DenseCustomers * profile.DenseDeliveriesPerCustomer
-	terminal, err := QueryTerminalDeliveries(ctx, db)
+	terminal, err := queryTerminalDeliveries(ctx, db)
 	if err != nil {
-		return horizontalScaleDenseRun{}, fmt.Errorf("query terminal deliveries: %w", err)
+		return scalabilityDenseRun{}, fmt.Errorf("query terminal deliveries: %w", err)
 	}
-	perReplica := horizontalScaleCountByReplica(recordings)
-	distribution := horizontalScalePerReplicaDistributionVerdict(perReplica, horizontalScaleReplicaIDs(replicaCount))
+	perReplica := scalabilityCountByReplica(recordings)
+	distribution := scalabilityPerReplicaDistributionVerdict(perReplica, scalabilityReplicaIDs(replicaCount))
 	throughput := float64(expected)
 	if duration > 0 {
 		throughput /= duration.Seconds()
 	}
 
-	duplicates := CountDuplicateAttemptTuples(recordings)
-	return horizontalScaleDenseRun{
+	duplicates := countDuplicateAttemptTuples(recordings)
+	return scalabilityDenseRun{
 		ReplicaCount:        replicaCount,
 		Duration:            duration,
 		Throughput:          throughput,
@@ -339,7 +339,7 @@ func runHorizontalScaleDensePhase(ctx context.Context, db *sql.DB, profile horiz
 	}, nil
 }
 
-func startHorizontalScaleReplicas(ctx context.Context, db *sql.DB, profile horizontalScaleProfile, count int) ([]*horizontalScaleReplica, error) {
+func startScalabilityReplicas(ctx context.Context, db *sql.DB, profile scalabilityProfile, count int) ([]*scalabilityReplica, error) {
 	var dsn string
 	if err := db.QueryRowContext(ctx, "SELECT current_setting('transaction_read_only')").Scan(new(string)); err != nil {
 		return nil, fmt.Errorf("validate bench database connection: %w", err)
@@ -366,29 +366,29 @@ func startHorizontalScaleReplicas(ctx context.Context, db *sql.DB, profile horiz
 
 	receiverAddr := strings.TrimSpace(os.Getenv("HORIZONTAL_SCALE_RECEIVER_ADDR"))
 
-	replicas := make([]*horizontalScaleReplica, 0, count)
+	replicas := make([]*scalabilityReplica, 0, count)
 	for i := 1; i <= count; i++ {
 		replicaID := fmt.Sprintf("replica-%d", i)
-		businessAddr, err := horizontalScaleReserveAddr()
+		businessAddr, err := scalabilityReserveAddr()
 		if err != nil {
-			stopHorizontalScaleReplicas(replicas)
+			stopScalabilityReplicas(replicas)
 			return nil, err
 		}
-		metricsAddr, err := horizontalScaleReserveAddr()
+		metricsAddr, err := scalabilityReserveAddr()
 		if err != nil {
-			stopHorizontalScaleReplicas(replicas)
+			stopScalabilityReplicas(replicas)
 			return nil, err
 		}
 
-		//nolint:gosec // Horizontal Scale intentionally launches local notifier OS processes with benchmark-controlled args.
+		//nolint:gosec // Scalability intentionally launches local notifier OS processes with benchmark-controlled args.
 		cmd := exec.CommandContext(ctx,
 			"go", "run", "./cmd/notifier",
 			"-db", dsn,
 			"-addr", businessAddr,
 			"-metrics-addr", metricsAddr,
-			"-workers", strconv.Itoa(horizontalScaleWorkersPerReplica),
-			"-delivery-concurrency", strconv.Itoa(horizontalScaleDeliveryConcurrency),
-			"-host-cap", strconv.Itoa(horizontalScaleBenchmarkHostCapacity),
+			"-workers", strconv.Itoa(scalabilityWorkersPerReplica),
+			"-delivery-concurrency", strconv.Itoa(scalabilityDeliveryConcurrency),
+			"-host-cap", strconv.Itoa(scalabilityBenchmarkHostCapacity),
 			"-request-timeout", profile.RequestTimeout.String(),
 			"-min-batch", strconv.Itoa(profile.MinBatchHint),
 			"-multi-pick", strconv.Itoa(profile.MultiPickCount),
@@ -403,7 +403,7 @@ func startHorizontalScaleReplicas(ctx context.Context, db *sql.DB, profile horiz
 		)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-		replica := &horizontalScaleReplica{
+		replica := &scalabilityReplica{
 			id:          replicaID,
 			businessURL: "http://" + businessAddr,
 			metricsURL:  "http://" + metricsAddr,
@@ -413,12 +413,12 @@ func startHorizontalScaleReplicas(ctx context.Context, db *sql.DB, profile horiz
 		cmd.Stderr = &replica.stderr
 
 		if err := cmd.Start(); err != nil {
-			stopHorizontalScaleReplicas(replicas)
+			stopScalabilityReplicas(replicas)
 			return nil, fmt.Errorf("start %s: %w", replicaID, err)
 		}
 
-		if err := horizontalScaleWaitReady(replica.businessURL+"/", 12*time.Second); err != nil {
-			stopHorizontalScaleReplicas(append(replicas, replica))
+		if err := scalabilityWaitReady(replica.businessURL+"/", 12*time.Second); err != nil {
+			stopScalabilityReplicas(append(replicas, replica))
 			return nil, fmt.Errorf("wait ready %s: %w; stderr=%s", replicaID, err, replica.stderr.String())
 		}
 		replicas = append(replicas, replica)
@@ -427,7 +427,7 @@ func startHorizontalScaleReplicas(ctx context.Context, db *sql.DB, profile horiz
 	return replicas, nil
 }
 
-func stopHorizontalScaleReplicas(replicas []*horizontalScaleReplica) {
+func stopScalabilityReplicas(replicas []*scalabilityReplica) {
 	for _, replica := range replicas {
 		if replica == nil || replica.cmd == nil || replica.cmd.Process == nil {
 			continue
@@ -456,7 +456,7 @@ func stopHorizontalScaleReplicas(replicas []*horizontalScaleReplica) {
 	}
 }
 
-func horizontalScaleReserveAddr() (string, error) {
+func scalabilityReserveAddr() (string, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", fmt.Errorf("reserve tcp addr: %w", err)
@@ -468,7 +468,7 @@ func horizontalScaleReserveAddr() (string, error) {
 	return addr, nil
 }
 
-func horizontalScaleWaitReady(url string, timeout time.Duration) error {
+func scalabilityWaitReady(url string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -493,7 +493,7 @@ func horizontalScaleWaitReady(url string, timeout time.Duration) error {
 	}
 }
 
-func submitHorizontalScaleSparseEvents(ctx context.Context, profile horizontalScaleProfile, replicas []*horizontalScaleReplica) error {
+func submitScalabilitySparseEvents(ctx context.Context, profile scalabilityProfile, replicas []*scalabilityReplica) error {
 	client := &http.Client{Timeout: 2 * time.Second}
 	idx := 0
 	for c := 0; c < profile.SparseCustomers; c++ {
@@ -532,12 +532,12 @@ func submitHorizontalScaleSparseEvents(ctx context.Context, profile horizontalSc
 	return nil
 }
 
-func waitForHorizontalScaleDrain(ctx context.Context, db *sql.DB, timeout time.Duration) error {
+func waitForScalabilityDrain(ctx context.Context, db *sql.DB, timeout time.Duration) error {
 	pollCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	for {
-		pending, err := CountPendingDeliveries(pollCtx, db)
+		pending, err := countPendingDeliveries(pollCtx, db)
 		if err != nil {
 			return fmt.Errorf("count pending deliveries: %w", err)
 		}
@@ -552,9 +552,9 @@ func waitForHorizontalScaleDrain(ctx context.Context, db *sql.DB, timeout time.D
 	}
 }
 
-func seedHorizontalScaleCustomers(ctx context.Context, db *sql.DB, prefix string, count int) error {
-	for start := 0; start < count; start += productionWorkloadSeedBatchRows {
-		end := min(start+productionWorkloadSeedBatchRows, count)
+func seedScalabilityCustomers(ctx context.Context, db *sql.DB, prefix string, count int) error {
+	for start := 0; start < count; start += fairnessSeedBatchRows {
+		end := min(start+fairnessSeedBatchRows, count)
 		var sb strings.Builder
 		sb.WriteString("INSERT INTO customers (id, class) VALUES ")
 		args := make([]any, 0, end-start)
@@ -567,13 +567,13 @@ func seedHorizontalScaleCustomers(ctx context.Context, db *sql.DB, prefix string
 		}
 		sb.WriteString(" ON CONFLICT (id) DO NOTHING")
 		if _, err := db.ExecContext(ctx, sb.String(), args...); err != nil {
-			return fmt.Errorf("seed horizontal scale customers: %w", err)
+			return fmt.Errorf("seed scalability customers: %w", err)
 		}
 	}
 	return nil
 }
 
-func seedHorizontalScaleWebhooks(ctx context.Context, db *sql.DB, prefix string, count int, receiverURL string, paths []string) error {
+func seedScalabilityWebhooks(ctx context.Context, db *sql.DB, prefix string, count int, receiverURL string, paths []string) error {
 	if count == 0 || len(paths) == 0 {
 		return nil
 	}
@@ -582,14 +582,14 @@ func seedHorizontalScaleWebhooks(ctx context.Context, db *sql.DB, prefix string,
 	batchCustomers := max(1, maxWebhookInsertParams/rowsPerCustomer)
 	for start := 0; start < count; start += batchCustomers {
 		end := min(start+batchCustomers, count)
-		if err := seedHorizontalScaleWebhookBatch(ctx, db, prefix, start, end, receiverURL, paths); err != nil {
+		if err := seedScalabilityWebhookBatch(ctx, db, prefix, start, end, receiverURL, paths); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func seedHorizontalScaleWebhookBatch(ctx context.Context, db *sql.DB, prefix string, start, end int, receiverURL string, paths []string) error {
+func seedScalabilityWebhookBatch(ctx context.Context, db *sql.DB, prefix string, start, end int, receiverURL string, paths []string) error {
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO webhooks (customer_id, url, secret_encrypted, event_types, active) VALUES ")
 	args := make([]any, 0, (end-start)*len(paths)*4)
@@ -608,12 +608,12 @@ func seedHorizontalScaleWebhookBatch(ctx context.Context, db *sql.DB, prefix str
 	}
 	sb.WriteString(" ON CONFLICT (customer_id, url) DO UPDATE SET active = true")
 	if _, err := db.ExecContext(ctx, sb.String(), args...); err != nil {
-		return fmt.Errorf("seed horizontal scale webhooks: %w", err)
+		return fmt.Errorf("seed scalability webhooks: %w", err)
 	}
 	return nil
 }
 
-func seedHorizontalScaleDenseDeliveries(ctx context.Context, db *sql.DB, customerCount, deliveriesPerCustomer int) error {
+func seedScalabilityDenseDeliveries(ctx context.Context, db *sql.DB, customerCount, deliveriesPerCustomer int) error {
 	for i := 0; i < customerCount; i++ {
 		customerID := fmt.Sprintf("hs-dense-customer-%05d", i)
 		var webhookID string
@@ -637,7 +637,7 @@ func seedHorizontalScaleDenseDeliveries(ctx context.Context, db *sql.DB, custome
 			INSERT INTO events (customer_id, type, payload)
 			VALUES ($1, $2, $3)
 			RETURNING id
-		`, customerID, EventType, []byte(`{"event_name":"horizontal-scale.dense"}`)).Scan(&eventID); err != nil {
+		`, customerID, eventType, []byte(`{"event_name":"scalability.dense"}`)).Scan(&eventID); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("insert dense event for %s: %w", customerID, err)
 		}
@@ -658,7 +658,7 @@ func seedHorizontalScaleDenseDeliveries(ctx context.Context, db *sql.DB, custome
 	return nil
 }
 
-func collectHorizontalScaleClaimMetrics(replicas []*horizontalScaleReplica) (claimSum, claimCount, emptyClaims float64) {
+func collectScalabilityClaimMetrics(replicas []*scalabilityReplica) (claimSum, claimCount, emptyClaims float64) {
 	client := &http.Client{Timeout: time.Second}
 	for _, replica := range replicas {
 		resp, err := client.Get(replica.metricsURL + "/metrics")
@@ -668,9 +668,9 @@ func collectHorizontalScaleClaimMetrics(replicas []*horizontalScaleReplica) (cla
 		body, _ := ioReadAllLimit(resp.Body, 2<<20)
 		_ = resp.Body.Close()
 		text := string(body)
-		claimSum += horizontalScaleMetricValue(text, "webhook_claim_batch_size_sum")
-		claimCount += horizontalScaleMetricValue(text, "webhook_claim_batch_size_count")
-		emptyClaims += horizontalScaleMetricValue(text, "webhook_claim_empty_total")
+		claimSum += scalabilityMetricValue(text, "webhook_claim_batch_size_sum")
+		claimCount += scalabilityMetricValue(text, "webhook_claim_batch_size_count")
+		emptyClaims += scalabilityMetricValue(text, "webhook_claim_empty_total")
 	}
 	return claimSum, claimCount, emptyClaims
 }
@@ -680,7 +680,7 @@ func ioReadAllLimit(rc io.ReadCloser, limit int64) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(rc, limit))
 }
 
-func horizontalScaleMetricValue(metricsText, metric string) float64 {
+func scalabilityMetricValue(metricsText, metric string) float64 {
 	prefix := metric + " "
 	for _, line := range strings.Split(metricsText, "\n") {
 		if !strings.HasPrefix(line, prefix) {
@@ -699,14 +699,14 @@ func horizontalScaleMetricValue(metricsText, metric string) float64 {
 	return 0
 }
 
-func horizontalScaleSparseFairnessThreshold(profileName string) float64 {
-	if profileName == BenchProfileStress {
+func scalabilitySparseFairnessThreshold(profileName string) float64 {
+	if profileName == benchProfileStress {
 		return 3000
 	}
 	return 6000
 }
 
-func horizontalScaleReplicaIDs(count int) []string {
+func scalabilityReplicaIDs(count int) []string {
 	ids := make([]string, 0, count)
 	for i := 1; i <= count; i++ {
 		ids = append(ids, fmt.Sprintf("replica-%d", i))
@@ -714,7 +714,7 @@ func horizontalScaleReplicaIDs(count int) []string {
 	return ids
 }
 
-func horizontalScaleCountByReplica(recordings []receiver.Recording) map[string]int {
+func scalabilityCountByReplica(recordings []receiver.Recording) map[string]int {
 	counts := make(map[string]int)
 	for _, r := range recordings {
 		rid := r.Headers.Get("X-Notifier-Replica")
@@ -726,7 +726,7 @@ func horizontalScaleCountByReplica(recordings []receiver.Recording) map[string]i
 	return counts
 }
 
-func horizontalScalePerReplicaDistributionVerdict(counts map[string]int, expectedReplicaIDs []string) horizontalScaleDistributionVerdict {
+func scalabilityPerReplicaDistributionVerdict(counts map[string]int, expectedReplicaIDs []string) scalabilityDistributionVerdict {
 	missing := make([]string, 0)
 	minCount := -1
 	maxCount := 0
@@ -750,7 +750,7 @@ func horizontalScalePerReplicaDistributionVerdict(counts map[string]int, expecte
 	if imbalance > 1.0 {
 		diagnostic = fmt.Sprintf("imbalance ratio %.2fx (max/min)", imbalance)
 	}
-	return horizontalScaleDistributionVerdict{
+	return scalabilityDistributionVerdict{
 		MissingReplicaIDs: missing,
 		ImbalanceRatio:    imbalance,
 		Diagnostic:        diagnostic,
@@ -758,30 +758,30 @@ func horizontalScalePerReplicaDistributionVerdict(counts map[string]int, expecte
 	}
 }
 
-func horizontalScaleComputeScalingVerdict(runs []horizontalScaleDenseRun) horizontalScaleScalingVerdict {
+func scalabilityComputeScalingVerdict(runs []scalabilityDenseRun) scalabilityScalingVerdict {
 	if len(runs) < 2 {
-		return horizontalScaleScalingVerdict{Mode: "insufficient", Message: "need at least two dense runs", Pass: false}
+		return scalabilityScalingVerdict{Mode: "insufficient", Message: "need at least two dense runs", Pass: false}
 	}
-	sorted := append([]horizontalScaleDenseRun(nil), runs...)
+	sorted := append([]scalabilityDenseRun(nil), runs...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ReplicaCount < sorted[j].ReplicaCount })
 	base := sorted[0]
 	best := sorted[len(sorted)-1]
 	if best.Throughput > base.Throughput {
-		return horizontalScaleScalingVerdict{
+		return scalabilityScalingVerdict{
 			Mode:    "improvement",
 			Message: fmt.Sprintf("throughput improved %.2f -> %.2f deliveries/s", base.Throughput, best.Throughput),
 			Pass:    true,
 		}
 	}
 	if best.Throughput == base.Throughput {
-		return horizontalScaleScalingVerdict{
+		return scalabilityScalingVerdict{
 			Mode:       "no-improvement",
 			Message:    fmt.Sprintf("throughput flat at %.2f deliveries/s", best.Throughput),
 			Pass:       true,
 			Bottleneck: "No scaling gain observed; likely DB claim-path contention or partner latency ceiling.",
 		}
 	}
-	return horizontalScaleScalingVerdict{
+	return scalabilityScalingVerdict{
 		Mode:       "regression",
 		Message:    fmt.Sprintf("throughput regressed %.2f -> %.2f deliveries/s", base.Throughput, best.Throughput),
 		Pass:       true,
@@ -789,14 +789,14 @@ func horizontalScaleComputeScalingVerdict(runs []horizontalScaleDenseRun) horizo
 	}
 }
 
-func writeHorizontalScaleReport(path string, profile horizontalScaleProfile, sparse horizontalScaleSparseResult, denseRuns []horizontalScaleDenseRun, scaling horizontalScaleScalingVerdict) error {
+func writeScalabilityReport(path string, profile scalabilityProfile, sparse scalabilitySparseResult, denseRuns []scalabilityDenseRun, scaling scalabilityScalingVerdict) error {
 	f, err := os.Create(path) // #nosec G304 -- scenario-owned report path
 	if err != nil {
-		return fmt.Errorf("create horizontal scale report: %w", err)
+		return fmt.Errorf("create scalability report: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
-	_, _ = fmt.Fprintf(f, `# Horizontal Scale: Horizontal Scalability (Shared Postgres Outbox)
+	_, _ = fmt.Fprintf(f, `# Scalability
 
 ## Description
 
@@ -853,13 +853,13 @@ Outbound attempts include `+"`X-Notifier-Replica`"+` only when replica identity 
 		sparse.AvgDeliveriesPerClaimQuery,
 		sparse.AvgDeliveriesPerCustomerClaim,
 		sparse.EmptyClaimRate*100,
-		PassFail(sparse.AllTerminalOK),
-		PassFail(sparse.DuplicateOK),
-		PassFail(sparse.FairnessGateOK),
-		PassFail(sparse.ReplicaGateOK),
+		passFail(sparse.AllTerminalOK),
+		passFail(sparse.DuplicateOK),
+		passFail(sparse.FairnessGateOK),
+		passFail(sparse.ReplicaGateOK),
 	)
 
-	for _, replicaID := range horizontalScaleReplicaIDs(sparse.ReplicaCount) {
+	for _, replicaID := range scalabilityReplicaIDs(sparse.ReplicaCount) {
 		_, _ = fmt.Fprintf(f, "| %s | %d |\n", replicaID, sparse.PerReplicaDelivered[replicaID])
 	}
 	_, _ = fmt.Fprintf(f, "\nSparse distribution diagnostic: %s\n\n", sparse.Distribution.Diagnostic)
@@ -877,9 +877,9 @@ Outbound attempts include `+"`X-Notifier-Replica`"+` only when replica identity 
 			run.Duration.Round(time.Millisecond),
 			run.Throughput,
 			run.Duplicates,
-			PassFail(run.AllTerminalOK),
-			PassFail(run.DuplicateOK),
-			PassFail(run.ReplicaGateOK),
+			passFail(run.AllTerminalOK),
+			passFail(run.DuplicateOK),
+			passFail(run.ReplicaGateOK),
 		)
 	}
 
@@ -892,12 +892,12 @@ Outbound attempts include `+"`X-Notifier-Replica`"+` only when replica identity 
 | Summary | %s |
 | Bottleneck (if no improvement/regression) | %s |
 | Gate | %s |
-`, scaling.Mode, scaling.Message, horizontalScaleDefaultIfEmpty(scaling.Bottleneck, "-"), PassFail(scaling.Pass))
+`, scaling.Mode, scaling.Message, scalabilityDefaultIfEmpty(scaling.Bottleneck, "-"), passFail(scaling.Pass))
 
 	return f.Close()
 }
 
-func horizontalScaleDefaultIfEmpty(value, fallback string) string {
+func scalabilityDefaultIfEmpty(value, fallback string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback
 	}

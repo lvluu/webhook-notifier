@@ -1,4 +1,4 @@
-# Horizontal Scale: Horizontal Scalability (Shared Postgres Outbox)
+# Scalability
 
 ## Description
 

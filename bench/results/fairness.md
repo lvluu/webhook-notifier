@@ -1,4 +1,4 @@
-# Production Workload: Assignment-Aligned Production-Like Workload
+# Fairness
 
 ## Description
 
@@ -6,7 +6,7 @@ Profile **stress** seeds a Delivery backlog with set-based SQL (each Event fans 
 Seeding directly avoids a per-Customer ingest `Submit` stampede that would otherwise measure DB connection contention instead of delivery throughput; ingest-path performance is covered separately.
 Each Customer has 3 Webhooks (`/hooks/fast`, `/hooks/slow`, `/hooks/flaky`) with mixed latency/failure behavior to approximate production HTTP variability.
 
-Assignment mapping:
+Validation coverage:
 - Reliability: retries under transient 503s, duplicate tuple protection.
 - Scalability: throughput across worker counts [16 32 64].
 - Fairness: Small-vs-Whale P95 first-attempt latency comparison under concurrent load.

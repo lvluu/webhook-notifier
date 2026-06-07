@@ -63,16 +63,16 @@ Use `just` as the project task runner:
 
 ```bash
 just demo                     # local end-to-end demo
-just bench-6                  # mixed Whale/Small fairness proof
-just bench-8                  # multi-replica scalability proof
-just bench-partner-resilience # retry, terminal failure, breaker proof
-just bench-7                  # internal breaker hardening
+just bench-reliability         # retry, terminal failure, DLQ proof
+just bench-fairness            # mixed Whale/Small fairness proof
+just bench-scalability         # multi-replica scalability proof
+just bench-partner-protection  # host limiter and breaker isolation proof
 ```
 
 The benchmark command can also be run directly:
 
 ```bash
-BENCH_PROFILE=stress go run ./cmd/bench scenario6
+BENCH_PROFILE=stress go run ./cmd/bench fairness
 ```
 
 See [bench/README.md](../bench/README.md) for the full scenario map and

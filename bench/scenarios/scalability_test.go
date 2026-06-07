@@ -5,28 +5,28 @@ import (
 	"testing"
 )
 
-func TestHorizontalScaleComputeScalingVerdict(t *testing.T) {
+func TestScalabilityComputeScalingVerdict(t *testing.T) {
 	tests := []struct {
 		name     string
-		runs     []horizontalScaleDenseRun
+		runs     []scalabilityDenseRun
 		wantMode string
 		wantPass bool
 	}{
 		{
 			name:     "throughput improvement",
-			runs:     []horizontalScaleDenseRun{{ReplicaCount: 1, Throughput: 100}, {ReplicaCount: 2, Throughput: 180}},
+			runs:     []scalabilityDenseRun{{ReplicaCount: 1, Throughput: 100}, {ReplicaCount: 2, Throughput: 180}},
 			wantMode: "improvement",
 			wantPass: true,
 		},
 		{
 			name:     "no improvement",
-			runs:     []horizontalScaleDenseRun{{ReplicaCount: 1, Throughput: 150}, {ReplicaCount: 2, Throughput: 150}},
+			runs:     []scalabilityDenseRun{{ReplicaCount: 1, Throughput: 150}, {ReplicaCount: 2, Throughput: 150}},
 			wantMode: "no-improvement",
 			wantPass: true,
 		},
 		{
 			name:     "regression",
-			runs:     []horizontalScaleDenseRun{{ReplicaCount: 1, Throughput: 180}, {ReplicaCount: 2, Throughput: 120}},
+			runs:     []scalabilityDenseRun{{ReplicaCount: 1, Throughput: 180}, {ReplicaCount: 2, Throughput: 120}},
 			wantMode: "regression",
 			wantPass: true,
 		},
@@ -34,7 +34,7 @@ func TestHorizontalScaleComputeScalingVerdict(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := horizontalScaleComputeScalingVerdict(tc.runs)
+			got := scalabilityComputeScalingVerdict(tc.runs)
 			if got.Mode != tc.wantMode {
 				t.Fatalf("mode=%q want=%q", got.Mode, tc.wantMode)
 			}
@@ -45,7 +45,7 @@ func TestHorizontalScaleComputeScalingVerdict(t *testing.T) {
 	}
 }
 
-func TestHorizontalScalePerReplicaDistributionVerdict(t *testing.T) {
+func TestScalabilityPerReplicaDistributionVerdict(t *testing.T) {
 	tests := []struct {
 		name         string
 		counts       map[string]int
@@ -70,7 +70,7 @@ func TestHorizontalScalePerReplicaDistributionVerdict(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := horizontalScalePerReplicaDistributionVerdict(tc.counts, tc.expectedIDs)
+			got := scalabilityPerReplicaDistributionVerdict(tc.counts, tc.expectedIDs)
 			if got.HardFail != tc.wantHardFail {
 				t.Fatalf("hardFail=%v want=%v", got.HardFail, tc.wantHardFail)
 			}

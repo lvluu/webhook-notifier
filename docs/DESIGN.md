@@ -452,7 +452,11 @@ Dashboards and alerting are pair-session discussion: which p99 thresholds warran
 
 The benchmark harness and scenario map are maintained in [bench/README.md](../bench/README.md). Current pass/fail results are indexed in [bench/RESULTS.md](../bench/RESULTS.md), with detailed reports under `bench/results/`.
 
-Design-level intent: the benchmark suite must keep covering the three assignment claims — reliability, horizontal scalability, and Customer fairness — plus internal hardening for failure modes that are too specific for the assignment-facing proof map. Avoid duplicating scenario setups or pass/fail gates here; those change with benchmark tuning and belong in the benchmark docs.
+Design-level intent: the benchmark suite mirrors the dashboard's four main
+categories: Reliability, Fairness, Scalability, and Partner Protection. Together
+they cover the requirements for reliable delivery, horizontal scaling, and
+Customer fairness while keeping partner-isolation behavior explicit. Scenario
+setups and pass/fail gates belong in the benchmark docs.
 
 ## What is deliberately out
 

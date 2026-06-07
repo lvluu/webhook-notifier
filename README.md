@@ -6,8 +6,8 @@ Design: [docs/DESIGN.md](docs/DESIGN.md) · Requirements: [REQUIREMENTS.md](REQU
 
 ## Status
 
-PoC complete. The assignment-facing benchmark scenarios pass, with legacy
-issue-scoped scenarios retained under `cmd/bench-legacy` for reference.
+PoC complete. Four dashboard-aligned benchmarks validate Reliability,
+Fairness, Scalability, and Partner Protection.
 
 ```bash
 gh issue list --label ready-for-agent --state open
@@ -64,16 +64,16 @@ scalability, and reliability. Use the smaller `BENCH_PROFILE=dev` while
 iterating locally and `BENCH_PROFILE=stress` for report-quality runs.
 
 ```bash
-just bench-6                  # mixed Whale/Small fairness proof
-just bench-8                  # multi-replica horizontal scalability proof
-just bench-partner-resilience # retry, terminal failure, breaker isolation
-just bench-7                  # internal breaker hardening
+just bench-reliability        # retry, terminal failure, DLQ proof
+just bench-fairness           # mixed Whale/Small fairness proof
+just bench-scalability        # multi-replica scalability proof
+just bench-partner-protection # host limiter and breaker isolation proof
 ```
 
 Direct runner form:
 
 ```bash
-BENCH_PROFILE=stress go run ./cmd/bench production_workload
+BENCH_PROFILE=stress go run ./cmd/bench fairness
 ```
 
 See [bench/README.md](bench/README.md) for all scenarios and
@@ -166,8 +166,7 @@ DATABASE_URL=postgres://notifier:notifier@localhost:5432/notifier?sslmode=disabl
 │   └── adr/               # numbered architectural decisions
 ├── cmd/
 │   ├── notifier/          # service entrypoint
-│   ├── bench/             # assignment-facing benchmark scenario runner
-│   └── bench-legacy/      # legacy issue-scoped benchmark runner
+│   └── bench/             # four dashboard-aligned benchmarks
 ├── internal/
 │   ├── ingest/            # Event ingest + fan-out to Deliveries
 │   ├── scheduler/         # Scheduler interface + round-robin impl (ADR-0001)

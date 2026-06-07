@@ -25,7 +25,6 @@ coverage.*
 /chaos
 /notifier
 /bench
-/bench-legacy
 !/bench/
 !/bench/**
 /delivery-history-retention

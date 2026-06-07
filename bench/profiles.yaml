@@ -1,97 +1,5 @@
 scenarios:
-  # Late Arrival Fairness: fairness under load with a late-arriving small customer.
-  late_arrival_fairness:
-    dev:
-      worker_count: 4
-      whale_deliveries: 5000
-      small_count: 10
-      small_deliveries: 2
-      late_deliveries: 1
-      small_drip_interval: 100ms
-      late_notify_delay: 5s
-      breaker_failure_threshold: 0
-    stress:
-      worker_count: 8
-      whale_deliveries: 50000
-      small_count: 100
-      small_deliveries: 5
-      late_deliveries: 3
-      small_drip_interval: 1s
-      late_notify_delay: 30s
-      breaker_failure_threshold: 0
-  # Legacy — folded into partner_resilience.
-  # Transient Recovery: transient partner failures plus a recoverable outage window.
-  transient_recovery:
-    dev:
-      worker_count: 16
-      customer_count: 5
-      events_per_customer: 20
-      submit_interval: 5ms
-      outage_delay: 1s
-      outage_duration: 5s
-      breaker_failure_threshold: 0
-    stress:
-      worker_count: 64
-      customer_count: 10
-      events_per_customer: 100
-      submit_interval: 20ms
-      outage_delay: 5s
-      outage_duration: 30s
-      breaker_failure_threshold: 0
-  # Legacy — folded into partner_resilience.
-  # Terminal Fast-Fail: terminal 4xx failures should fast-fail without retry churn.
-  terminal_fast_fail:
-    dev:
-      worker_count: 4
-      event_count: 100
-      breaker_failure_threshold: 0
-    stress:
-      worker_count: 32
-      event_count: 1000
-      breaker_failure_threshold: 0
-  # Scale Idempotency: horizontal scale, claim atomicity, and idempotency stability.
-  scale_idempotency:
-    dev:
-      worker_counts: [1, 2, 4]
-      throughput_deliveries: 1000
-      retry_deliveries: 10
-      breaker_failure_threshold: 0
-    stress:
-      worker_counts: [1, 4, 8, 32, 64]
-      throughput_deliveries: 10000
-      retry_deliveries: 100
-      breaker_failure_threshold: 0
-  # Legacy — folded into partner_resilience.
-  # Breaker Isolation: dead-partner circuit breaker plus healthy-customer pool protection.
-  breaker_isolation:
-    dev:
-      worker_count: 16
-      customer_count: 5
-      deliveries_per_customer: 1000
-      request_timeout: 250ms
-      discovery_interval: 50ms
-      discovery_empty_backoff: 50ms
-      discovery_error_backoff: 50ms
-      discovery_max_backoff: 250ms
-      discovery_limit: 100
-      breaker_failure_threshold: 2
-      breaker_initial_cooldown: 2s
-      breaker_max_cooldown: 2s
-    stress:
-      worker_count: 64
-      customer_count: 10
-      deliveries_per_customer: 5000
-      request_timeout: 250ms
-      discovery_interval: 50ms
-      discovery_empty_backoff: 50ms
-      discovery_error_backoff: 50ms
-      discovery_max_backoff: 250ms
-      discovery_limit: 100
-      breaker_failure_threshold: 2
-      breaker_initial_cooldown: 15s
-      breaker_max_cooldown: 15s
-  # Production Workload: assignment-aligned production-like mixed ingest and delivery workload.
-  production_workload:
+  fairness:
     dev:
       worker_counts: [4, 8]
       whale_deliveries: 200
@@ -118,46 +26,7 @@ scenarios:
       retry_cap_delay: 2s
       fairness_ratio_limit: 1.05
       breaker_failure_threshold: 0
-  # Breaker Storm: mass breaker tripping under batch mark — validates that the
-  # batch breaker bookkeeping path handles many webhooks tripping
-  # simultaneously in production-sized batches without N+1 per-item
-  # queries inside the marking transaction.
-  breaker_storm:
-    dev:
-      worker_count: 4
-      customer_count: 10
-      deliveries_per_customer: 200
-      request_timeout: 250ms
-      discovery_interval: 50ms
-      discovery_empty_backoff: 50ms
-      discovery_error_backoff: 50ms
-      discovery_max_backoff: 250ms
-      discovery_limit: 100
-      min_batch_hint: 32
-      breaker_failure_threshold: 2
-      breaker_initial_cooldown: 2s
-      breaker_max_cooldown: 2s
-      retry_max_attempts: 3
-      retry_base_delay: 50ms
-      retry_cap_delay: 50ms
-    stress:
-      worker_count: 16
-      customer_count: 50
-      deliveries_per_customer: 1000
-      request_timeout: 250ms
-      discovery_interval: 50ms
-      discovery_empty_backoff: 50ms
-      discovery_error_backoff: 50ms
-      discovery_max_backoff: 250ms
-      discovery_limit: 200
-      min_batch_hint: 32
-      breaker_failure_threshold: 2
-      breaker_initial_cooldown: 15s
-      breaker_max_cooldown: 15s
-      retry_max_attempts: 3
-      retry_base_delay: 50ms
-      retry_cap_delay: 50ms
-  horizontal_scale:
+  scalability:
     dev:
       replica_counts: [1, 2]
       sparse_customers: 1000
@@ -186,12 +55,10 @@ scenarios:
       retry_base_delay: 25ms
       retry_cap_delay: 2s
       fairness_ratio_limit: 1.05
-  # Partner Resilience: reliability drill-down (folded Scenarios 2+3+5, Issue #44).
-  partner_resilience:
+  reliability:
     dev:
       worker_count: 8
       customer_count: 5
-      deliveries_per_customer: 100
       events_per_customer: 20
       submit_interval: 5ms
       outage_delay: 1s
@@ -208,11 +75,37 @@ scenarios:
     stress:
       worker_count: 32
       customer_count: 10
-      deliveries_per_customer: 1000
       events_per_customer: 100
       submit_interval: 20ms
       outage_delay: 5s
       outage_duration: 30s
+      request_timeout: 250ms
+      discovery_interval: 50ms
+      discovery_empty_backoff: 50ms
+      discovery_error_backoff: 50ms
+      discovery_max_backoff: 250ms
+      discovery_limit: 100
+      breaker_failure_threshold: 2
+      breaker_initial_cooldown: 15s
+      breaker_max_cooldown: 15s
+  partner_protection:
+    dev:
+      worker_count: 8
+      customer_count: 5
+      deliveries_per_customer: 100
+      request_timeout: 250ms
+      discovery_interval: 50ms
+      discovery_empty_backoff: 50ms
+      discovery_error_backoff: 50ms
+      discovery_max_backoff: 250ms
+      discovery_limit: 100
+      breaker_failure_threshold: 2
+      breaker_initial_cooldown: 2s
+      breaker_max_cooldown: 2s
+    stress:
+      worker_count: 32
+      customer_count: 10
+      deliveries_per_customer: 1000
       request_timeout: 250ms
       discovery_interval: 50ms
       discovery_empty_backoff: 50ms

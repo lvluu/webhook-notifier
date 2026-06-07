@@ -12,18 +12,18 @@ import (
 )
 
 const (
-	// BenchProfileDev is the small, fast local benchmark profile.
-	BenchProfileDev = "dev"
-	// BenchProfileStress is the report-quality benchmark profile.
-	BenchProfileStress = "stress"
+	// benchProfileDev is the small, fast local benchmark profile.
+	benchProfileDev = "dev"
+	// benchProfileStress is the report-quality benchmark profile.
+	benchProfileStress = "stress"
 )
 
 type benchProfilesFile struct {
-	Scenarios map[string]map[string]BenchProfileConfig `yaml:"scenarios"`
+	Scenarios map[string]map[string]benchProfileConfig `yaml:"scenarios"`
 }
 
-// BenchProfileConfig is the YAML-backed configuration shared by benchmark scenarios.
-type BenchProfileConfig struct {
+// benchProfileConfig is the YAML-backed configuration shared by benchmark scenarios.
+type benchProfileConfig struct {
 	WorkerCount                int           `yaml:"worker_count"`
 	WorkerCounts               []int         `yaml:"worker_counts"`
 	ReplicaCounts              []int         `yaml:"replica_counts"`
@@ -34,17 +34,11 @@ type BenchProfileConfig struct {
 	SparseEventsPerCustomer    int           `yaml:"sparse_events_per_customer"`
 	DenseCustomers             int           `yaml:"dense_customers"`
 	DenseDeliveriesPerCustomer int           `yaml:"dense_deliveries_per_customer"`
-	LateDeliveries             int           `yaml:"late_deliveries"`
-	SmallDripInterval          durationValue `yaml:"small_drip_interval"`
-	LateNotifyDelay            durationValue `yaml:"late_notify_delay"`
 	CustomerCount              int           `yaml:"customer_count"`
 	EventsPerCustomer          int           `yaml:"events_per_customer"`
 	SubmitInterval             durationValue `yaml:"submit_interval"`
 	OutageDelay                durationValue `yaml:"outage_delay"`
 	OutageDuration             durationValue `yaml:"outage_duration"`
-	EventCount                 int           `yaml:"event_count"`
-	ThroughputDeliveries       int           `yaml:"throughput_deliveries"`
-	RetryDeliveries            int           `yaml:"retry_deliveries"`
 	DeliveriesPerCustomer      int           `yaml:"deliveries_per_customer"`
 	RequestTimeout             durationValue `yaml:"request_timeout"`
 	DiscoveryInterval          durationValue `yaml:"discovery_interval"`
@@ -98,47 +92,46 @@ var (
 	benchProfilesErr  error
 )
 
-// LoadBenchProfileConfig returns the selected profile config for a scenario.
-func LoadBenchProfileConfig(scenario string) (BenchProfileConfig, string, error) {
-	profiles, err := ReadBenchProfiles()
+func loadBenchProfileConfig(scenario string) (benchProfileConfig, string, error) {
+	profiles, err := readBenchProfiles()
 	if err != nil {
-		return BenchProfileConfig{}, "", err
+		return benchProfileConfig{}, "", err
 	}
 
 	profilesForScenario, ok := profiles.Scenarios[scenario]
 	if !ok {
-		return BenchProfileConfig{}, "", fmt.Errorf("unknown bench scenario %q in profiles", scenario)
+		return benchProfileConfig{}, "", fmt.Errorf("unknown bench scenario %q in profiles", scenario)
 	}
 
-	name, err := BenchProfileNameFromEnv()
+	name, err := benchProfileNameFromEnv()
 	if err != nil {
-		return BenchProfileConfig{}, "", err
+		return benchProfileConfig{}, "", err
 	}
 
 	profile, ok := profilesForScenario[name]
 	if !ok {
-		return BenchProfileConfig{}, "", fmt.Errorf("missing %q profile for %s", name, scenario)
+		return benchProfileConfig{}, "", fmt.Errorf("missing %q profile for %s", name, scenario)
 	}
 
 	return profile, name, nil
 }
 
-// BenchProfileNameFromEnv returns the selected BENCH_PROFILE name.
-func BenchProfileNameFromEnv() (string, error) {
+// benchProfileNameFromEnv returns the selected BENCH_PROFILE name.
+func benchProfileNameFromEnv() (string, error) {
 	name := os.Getenv("BENCH_PROFILE")
 	if name == "" {
-		return BenchProfileDev, nil
+		return benchProfileDev, nil
 	}
 	switch name {
-	case BenchProfileDev, BenchProfileStress:
+	case benchProfileDev, benchProfileStress:
 		return name, nil
 	default:
-		return "", fmt.Errorf("unsupported BENCH_PROFILE %q: want %q or %q", name, BenchProfileDev, BenchProfileStress)
+		return "", fmt.Errorf("unsupported BENCH_PROFILE %q: want %q or %q", name, benchProfileDev, benchProfileStress)
 	}
 }
 
-// ReadBenchProfiles parses bench/profiles.yaml once and caches the result.
-func ReadBenchProfiles() (benchProfilesFile, error) {
+// readBenchProfiles parses bench/profiles.yaml once and caches the result.
+func readBenchProfiles() (benchProfilesFile, error) {
 	benchProfilesOnce.Do(func() {
 		path, err := benchProfilesPath()
 		if err != nil {
