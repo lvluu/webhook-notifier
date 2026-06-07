@@ -4,14 +4,18 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
+	"strconv"
 	"time"
 )
 
 // Sign returns the hex-encoded HMAC-SHA256 signature for a timestamped body.
+// Pre-allocates the payload as []byte to avoid string conversion round-trips.
 func Sign(secret, body []byte, ts time.Time) string {
-	payload := fmt.Sprintf("%d.%s", ts.Unix(), string(body))
+	payload := make([]byte, 0, 12+len(body))
+	payload = strconv.AppendInt(payload, ts.Unix(), 10)
+	payload = append(payload, '.')
+	payload = append(payload, body...)
 	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(payload))
+	mac.Write(payload)
 	return hex.EncodeToString(mac.Sum(nil))
 }

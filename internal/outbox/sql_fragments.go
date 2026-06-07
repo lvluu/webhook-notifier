@@ -1,67 +1,31 @@
 package outbox
 
-import "fmt"
+// Pre-computed SQL fragments — computed once at Store construction to
+// eliminate fmt.Sprintf on every claim query.
 
-type sqlClaimSelection struct {
-	deliveryAlias string
-	claimAlias    string
-	webhookAlias  string
-}
+const (
+	sqlReady = `d.status IN ('pending', 'failed_retry')
+          AND d.next_attempt_at <= now()
+          AND dc.delivery_id IS NULL`
 
-func sqlClaimSelectionFor(deliveryAlias, claimAlias string) sqlClaimSelection {
-	return sqlClaimSelection{
-		deliveryAlias: deliveryAlias,
-		claimAlias:    claimAlias,
-	}
-}
+	// ReadyWithoutClaim matches deliveries whose status and schedule make them
+	// ready to attempt, ignoring whether an active claim already exists. Discovery
+	// uses this claim-agnostic predicate so its loose index-scan can stop at the
+	// first ready row per customer instead of walking claimed-but-still-'pending'
+	// rows that the dc.delivery_id IS NULL anti-join would otherwise filter out
+	// (issue #124: claimed rows stay in idx_deliveries_ready, so the anti-join
+	// collapses the LIMIT-1 scan into a full hash anti-join once unclaimed rows go
+	// sparse). DiscoverClaimableCustomers is only a rotation hint; ClaimNextN with
+	// FOR UPDATE SKIP LOCKED remains the exact claim-eligibility authority.
+	sqlReadyWithoutClaim = `d.status IN ('pending', 'failed_retry')
+          AND d.next_attempt_at <= now()`
 
-func (s sqlClaimSelection) WithWebhookAlias(webhookAlias string) sqlClaimSelection {
-	s.webhookAlias = webhookAlias
-	return s
-}
-
-func (s sqlClaimSelection) Ready() string {
-	return fmt.Sprintf(`%s.status IN ('pending', 'failed_retry')
-          AND %s.next_attempt_at <= now()
-          AND %s.delivery_id IS NULL`, s.deliveryAlias, s.deliveryAlias, s.claimAlias)
-}
-
-// ReadyWithoutClaim matches deliveries whose status and schedule make them
-// ready to attempt, ignoring whether an active claim already exists. Discovery
-// uses this claim-agnostic predicate so its loose index-scan can stop at the
-// first ready row per customer instead of walking claimed-but-still-'pending'
-// rows that the dc.delivery_id IS NULL anti-join would otherwise filter out
-// (issue #124: claimed rows stay in idx_deliveries_ready, so the anti-join
-// collapses the LIMIT-1 scan into a full hash anti-join once unclaimed rows go
-// sparse). DiscoverClaimableCustomers is only a rotation hint; ClaimNextN with
-// FOR UPDATE SKIP LOCKED remains the exact claim-eligibility authority.
-func (s sqlClaimSelection) ReadyWithoutClaim() string {
-	return fmt.Sprintf(`%s.status IN ('pending', 'failed_retry')
-          AND %s.next_attempt_at <= now()`, s.deliveryAlias, s.deliveryAlias)
-}
-
-func (s sqlClaimSelection) Stale(claimLeaseMS int64) string {
-	return fmt.Sprintf(`%s.claimed_at < now() - (%d * interval '1 millisecond')`, s.claimAlias, claimLeaseMS)
-}
-
-func (s sqlClaimSelection) Any(claimLeaseMS int64) string {
-	return fmt.Sprintf(`(
-      (%s)
-      OR (%s)
-  )`, s.Ready(), s.Stale(claimLeaseMS))
-}
-
-func (s sqlClaimSelection) BreakerEligible() string {
-	return sqlBreakerEligiblePredicate(s.webhookAlias, s.deliveryAlias)
-}
-
-func sqlBreakerEligiblePredicate(webhookAlias, deliveryAlias string) string {
-	return fmt.Sprintf(`(
-      %s.breaker_state = 'closed'
-      OR (%s.breaker_state = 'half_open' AND %s.breaker_probe_delivery_id = %s.id)
-      OR (%s.breaker_state = 'open' AND %s.breaker_next_probe_at <= now())
-  )`, webhookAlias, webhookAlias, webhookAlias, deliveryAlias, webhookAlias, webhookAlias)
-}
+	sqlBreakerEligible = `(
+      w.breaker_state = 'closed'
+      OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = d.id)
+      OR (w.breaker_state = 'open' AND w.breaker_next_probe_at <= now())
+  )`
+)
 
 // sqlClaimedDeliveryProjection is the shared SELECT-FROM-JOIN-ORDER block used
 // by every claim variant to project the final claimed-delivery result set.
