@@ -60,7 +60,7 @@ test-unit:
         ./internal/observe ./internal/pgdsn ./internal/retry \
         ./internal/scheduler/roundrobin ./internal/scheduler/swrr \
         ./internal/signer ./internal/worker ./bench/receiver \
-        ./internal/testutil/retention
+        ./bench/scenarios ./internal/testutil/retention
 
 # run golangci-lint (installs locally if missing)
 lint:

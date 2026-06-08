@@ -60,7 +60,7 @@ just lint
 # 8. Run the e2e demo
 just demo
 
-# 8. Tear down
+# 9. Tear down
 just down
 ```
 
