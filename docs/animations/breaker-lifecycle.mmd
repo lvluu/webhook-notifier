@@ -1,49 +1,53 @@
 flowchart LR
-    %% Animation intent:
-    %% 1. Closed Webhook is normally claimable.
-    %% 2. Failures are recorded from delivery attempts.
-    %% 3. Consecutive failures at threshold open the breaker.
-    %% 4. Open Webhooks are filtered from claim and discovery until probe time.
-    %% 5. Claim SQL moves an eligible open Webhook to half_open for one probe.
-    %% 6. Probe success closes; probe failure reopens with longer cooldown.
+    %% Animation intent (ADR-0014):
+    %% 1. Attempt outcomes are marked in Postgres first.
+    %% 2. The process-local decision engine counts consecutive failures.
+    %% 3. Only lifecycle transitions are persisted asynchronously.
+    %% 4. Persisted state filters claim/discovery across replicas.
+    %% 5. Claim SQL designates one half-open probe Delivery.
 
-    C["closed: normally claimable"]
-    F["failure recorded"]
-    CNT["count consecutive failures"]
-    O["open: excluded from claim and discovery"]
-    WAIT["queued Deliveries remain pending"]
-    D["cooldown elapsed"]
-    P["claim SQL selects one probe Delivery"]
-    H["half_open: probe in progress"]
-    PS["probe succeeds"]
-    PF["probe fails"]
-    RESET["reset failures and clear probe"]
-    BACKOFF["increase cooldown up to max"]
-    OK["success recorded"]
+    MARK["Delivery mark commits"]
+    MEM["In-memory breaker decision engine"]
+    CLOSED["closed"]
+    OPEN["open"]
+    PERSIST["bounded async transition persister"]
+    DB[("webhooks breaker state")]
+    BLOCK["claim/discovery exclude Webhook; blocked Deliveries deferred"]
+    DUE["cooldown elapsed"]
+    CLAIM["claim SQL atomically designates one probe Delivery"]
+    HALF["half_open"]
+    SUCCESS["probe or normal Attempt succeeds"]
+    FAILURE["Attempt fails"]
+    BACKOFF["increase cooldown up to maximum"]
+    START["startup loads persisted snapshots"]
 
-    C -->|"Attempt fails"| F
-    F --> CNT
-    CNT -->|"below threshold"| C
-    CNT -->|"threshold reached"| O
-    C -->|"Attempt succeeds"| OK
-    OK --> RESET
-    RESET --> C
-    O --> WAIT
-    WAIT --> O
-    O -->|"breaker_next_probe_at reached"| D
-    D --> P
-    P -->|"set breaker_probe_delivery_id"| H
-    H --> PS
-    PS --> RESET
-    H --> PF
-    PF --> BACKOFF
-    BACKOFF --> O
+    START --> MEM
+    DB --> START
+    MARK -->|"record outcome after commit"| MEM
+    MEM --> CLOSED
+    CLOSED -->|"failure below threshold"| FAILURE
+    FAILURE --> MEM
+    CLOSED -->|"threshold reached"| OPEN
+    OPEN --> PERSIST
+    PERSIST --> DB
+    DB --> BLOCK
+    BLOCK -->|"breaker_next_probe_at reached"| DUE
+    DUE --> CLAIM
+    CLAIM -->|"persist designated probe"| DB
+    CLAIM --> HALF
+    HALF -->|"probe succeeds"| SUCCESS
+    SUCCESS --> CLOSED
+    CLOSED -->|"state transition"| PERSIST
+    HALF -->|"probe fails"| BACKOFF
+    BACKOFF --> OPEN
 
+    classDef memory fill:#e8f1ff,stroke:#4d6fb3,color:#10233f;
     classDef healthy fill:#ecfdf3,stroke:#3b8f5f,color:#123524;
     classDef warning fill:#fff7e6,stroke:#c48225,color:#4a2c00;
     classDef openState fill:#fff0f0,stroke:#c45050,color:#4c1111;
-    classDef probe fill:#e8f1ff,stroke:#4d6fb3,color:#10233f;
-    class C,OK,PS,RESET healthy;
-    class F,CNT,PF,BACKOFF warning;
-    class O,WAIT openState;
-    class D,P,H probe;
+    classDef db fill:#f5f0ff,stroke:#7b61b8,color:#2b2147;
+    class MARK,MEM,START memory;
+    class CLOSED,SUCCESS healthy;
+    class FAILURE,BACKOFF,PERSIST,DUE,CLAIM,HALF warning;
+    class OPEN,BLOCK openState;
+    class DB db;

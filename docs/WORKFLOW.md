@@ -45,6 +45,7 @@ state, plus the tuning knobs used by the service and benchmark harness.
 16. `RetryPolicy.NextWithKey` classifies the response/error, including
     pre-flight MaxAge expiration, 2xx success, terminal 4xx, retryable
     408/429/5xx/network errors, attempt exhaustion, and `Retry-After`.
+    `MaxAge` defaults to disabled and is not exposed by the notifier CLI.
 17. The Worker groups outcomes and writes set-based batch marks:
     `MarkSucceededBatch`, `MarkRetryBatch`, or `MarkDeadBatch`.
 18. Batch marks delete the `delivery_claims` row, insert Attempt records when
@@ -63,11 +64,14 @@ Use `just` as the project task runner:
 
 ```bash
 just demo                     # local end-to-end demo
-just bench-reliability         # retry, terminal failure, DLQ proof
-just bench-fairness            # mixed Whale/Small fairness proof
-just bench-scalability         # multi-replica scalability proof
-just bench-partner-protection  # host limiter and breaker isolation proof
+just bench-reliability               # dev profile: retry and DLQ proof
+just bench-fairness stress           # stress profile: mixed Whale/Small proof
+just bench-scalability stress        # stress profile: replica scaling proof
+just bench-partner-protection stress # stress profile: limiter/breaker proof
 ```
+
+Benchmark recipes default to `dev`; pass `stress` explicitly when producing
+report-quality evidence.
 
 The benchmark command can also be run directly:
 

@@ -1,3 +1,7 @@
 :8080 {
+	handle_path /_notifier/* {
+		reverse_proxy notifier:9090
+	}
+
 	reverse_proxy notifier:8080
 }

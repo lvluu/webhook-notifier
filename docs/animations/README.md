@@ -1,75 +1,75 @@
-# Animation Sources
+# Architecture Diagrams
 
-This directory contains Mermaid source diagrams for animated walkthroughs of
-the Webhook Notifier mechanics. Keep the `.mmd` files as the source of truth;
-generated GIFs or videos are presentation artifacts.
+The SVG files are the human-readable architecture documentation. The Mermaid
+`.mmd` files are editable source and are not the primary review format.
 
-## Recommended Workflow
+## Overall Architecture
 
-Use an animated Mermaid editor for presentation artifacts. The source diagrams
-in this directory remain the authoritative files; exported video files or
-share links are generated from them when needed.
+[Open full-size SVG](overall-architecture.svg)
 
-1. Paste or submit one `.mmd` file to the renderer.
-2. Pick a theme and animation style that keeps the sequence readable.
-3. Export MP4/WebM, or copy the share/embed URL.
-4. Save generated files next to the source using the same basename, for example
-   `claim-next-batch.mp4`.
+![Overall architecture](overall-architecture.svg)
 
-Animated Mermaid export is useful here because these diagrams are explanatory
-flow walkthroughs, not recordings of a terminal session.
+## Multi-Customer Claiming
 
-## CLI / Automation Options
+**What:** one database claim can collect bounded work from several Customers.
 
-There is no project-pinned animated Mermaid renderer for batch exports. Use one
-of these paths:
+**Why:** sparse Customer workloads should not pay one database round-trip per
+Delivery, while a Whale Customer must not monopolize the shared batch.
 
-- **Animated Mermaid web editor** - preferred path for polished Mermaid
-  animations, share links, embeds, and MP4/WebM exports.
-- **Mermaid CLI (`mmdc`)** - renders Mermaid to SVG, PNG, or PDF. It can inline
-  custom CSS into SVG output, which can be used for simple SVG animation, but it
-  does not produce step-through GIF walkthroughs on its own.
-- **Manim** - best for fully controlled, code-generated animations. Use when
-  Mermaid layout is too limiting or the animation needs exact timing and custom
-  visual states.
-- **asciinema + agg** - best for terminal demos, not architecture diagrams.
-  Record a terminal session with asciinema, then convert the `.cast` file to a
-  GIF with `agg`.
+[Open full-size SVG](claim-next-batch.svg)
 
-## Local Static Preview
+![Multi-Customer claiming](claim-next-batch.svg)
 
-For static previews, use Mermaid CLI:
+## Webhook Circuit Breaker
 
-```bash
-npm exec --yes @mermaid-js/mermaid-cli -- \
-  -i docs/animations/claim-next-batch.mmd \
-  -o /tmp/claim-next-batch.svg
-```
+**What:** in-memory decisions drive `closed`, `open`, and `half_open`
+transitions, with persisted state controlling cross-replica claims.
 
-Static SVGs are not a replacement for the animated GIFs, but they catch Mermaid
-syntax errors before exporting animations.
+**Why:** broken Webhooks should stop consuming worker capacity without adding a
+Webhook-row update to every delivery outcome.
 
-## Diagrams
+[Open full-size SVG](breaker-lifecycle.svg)
 
-- `overall-architecture.mmd` - simplified top-level path from Event ingest,
-  to Postgres as queue, to worker fan-out and Delivery status.
-- `claim-next-batch.mmd` - how multi-Customer claiming amortizes sparse work
-  while preserving per-Customer caps.
-- `breaker-lifecycle.mmd` - how an unhealthy Webhook moves through
-  `closed`, `open`, and `half_open`.
-- `retry-policy.mmd` - how retryable and terminal Attempt outcomes move a
-  Delivery through retry backoff or final state.
-- `host-limiter.mmd` - how host saturation causes short requeue without
-  consuming retry budget.
+![Webhook circuit breaker](breaker-lifecycle.svg)
 
-## Embedding
+## Retry Policy
 
-After exporting videos or share links, embed them from `docs/DESIGN.md` or
-README pages:
+**What:** classifies success, retryable failure, terminal failure, exhaustion,
+and optional age expiration.
 
-```md
-[ClaimNextBatch walkthrough](animations/claim-next-batch.mp4)
-```
+**Why:** every Worker must apply the same bounded reliability policy and avoid
+retry storms.
 
-Avoid duplicating mechanism details in captions; link back to
-`docs/DESIGN.md`, ADRs, and benchmark docs for the authoritative text.
+[Open full-size SVG](retry-policy.svg)
+
+![Retry policy](retry-policy.svg)
+
+## Delivery Lifecycle
+
+**What:** shows the durable states a Delivery passes through from fanout to
+success or dead-lettering.
+
+**Why:** distinguishes a temporary claim lease from persisted Delivery status
+and makes crash recovery visible.
+
+[Open full-size SVG](delivery-lifecycle.svg)
+
+![Delivery lifecycle](delivery-lifecycle.svg)
+
+## Host Limiter
+
+**What:** caps process-local concurrent Attempts per Integration Partner
+hostname and Requeues work when capacity is unavailable.
+
+**Why:** one slow or overloaded partner should not occupy all local delivery
+capacity or consume retry budget before a request is sent.
+
+[Open full-size SVG](host-limiter.svg)
+
+![Host limiter](host-limiter.svg)
+
+## Maintaining Diagrams
+
+Run `just diagrams` after editing a Mermaid source. Run `just diagrams-check`
+to verify every committed SVG matches its source. Both commands use pinned
+Mermaid CLI `11.12.0`.

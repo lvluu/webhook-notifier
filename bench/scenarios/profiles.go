@@ -11,6 +11,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func benchmarkReportPath(scenario, profile string) string {
+	return filepath.Join("bench", "results", scenario+"_"+profile+".md")
+}
+
 const (
 	// benchProfileDev is the small, fast local benchmark profile.
 	benchProfileDev = "dev"

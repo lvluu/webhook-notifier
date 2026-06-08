@@ -1,4 +1,10 @@
--- DB query health probes for sustained-load notifier runs.
+-- Maintained, read-only Postgres health snapshot for a running notifier load.
+-- What: hot-table bloat, backlog age, sessions, locks, relation size, and
+-- optional pg_stat_statements evidence.
+-- Why: queue throughput can look healthy briefly while bloat, lock pressure,
+-- or query-plan cost accumulates underneath it.
+-- Prerequisite: psql connected to the notifier database. Query-level output is
+-- richer when pg_stat_statements is installed and preloaded.
 -- Usage: psql "$DATABASE_URL" -f bench/scripts/db_query_health.sql
 
 \timing on

@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# Sustained-load gate for an already-running workload.
+# What: waits for a minimum pending/retry backlog, then samples queue age and
+# optional Prometheus success rate for a fixed duration.
+# Why: a throughput run is not steady-state evidence if the producer stops
+# keeping the queue saturated. Exit 2 means backlog fell below the floor.
+# Usage: sustained_load_watch.sh [pending_floor] [duration_seconds] [interval_seconds]
+# Requires DATABASE_URL. Prometheus at localhost:9091 is optional.
 set -euo pipefail
 
 floor="${1:-500}"

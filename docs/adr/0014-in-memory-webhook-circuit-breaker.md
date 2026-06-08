@@ -1,5 +1,11 @@
 # In-memory Webhook circuit breaker decision engine
 
+## Status
+
+Accepted. Supersedes [ADR-0008](./0008-persisted-webhook-circuit-breaker.md)
+for breaker decision-making and mark-path behavior. Persisted state remains the
+claim-visible coordination mechanism.
+
 ## Context
 
 ADR-0008 put Webhook Circuit Breaker state directly in the outbox mark path.

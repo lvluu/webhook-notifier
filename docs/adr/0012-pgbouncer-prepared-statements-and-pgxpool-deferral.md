@@ -1,5 +1,7 @@
 # PgBouncer prepared statements and pgxpool deferral
 
+Status: Accepted.
+
 ## Context
 
 The notifier hot path is dominated by repeated Postgres CTEs: Delivery claim,
@@ -11,11 +13,9 @@ That simple-protocol override was originally chosen because PgBouncer was
 running in transaction pooling mode. Older PgBouncer versions could not safely
 support protocol-level prepared statements in that mode.
 
-The local stack uses the `edoburu/pgbouncer` image. As of June 3, 2026,
-Docker Hub lists `v1.25.1-p0` as the current tag for that image, which is newer
-than PgBouncer 1.21. PgBouncer 1.21 introduced protocol-level prepared statement
-support for transaction pooling when `max_prepared_statements` is set to a
-non-zero value.
+The local stack pins `edoburu/pgbouncer:v1.25.1-p0`, which is newer than
+PgBouncer 1.21. PgBouncer 1.21 introduced protocol-level prepared statement
+support for transaction pooling when `max_prepared_statements` is non-zero.
 
 ## Decision
 

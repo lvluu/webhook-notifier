@@ -5,6 +5,14 @@ import (
 	"testing"
 )
 
+func TestBenchmarkReportPathIncludesProfile(t *testing.T) {
+	got := benchmarkReportPath("partner-protection", "stress")
+	want := "bench/results/partner-protection_stress.md"
+	if got != want {
+		t.Fatalf("benchmarkReportPath() = %q, want %q", got, want)
+	}
+}
+
 func TestScalabilityComputeScalingVerdict(t *testing.T) {
 	tests := []struct {
 		name     string

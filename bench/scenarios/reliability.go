@@ -28,9 +28,6 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/worker"
 )
 
-const reliabilityReportPath = "bench/results/reliability.md"
-const partnerProtectionReportPath = "bench/results/partner-protection.md"
-
 // ---------------------------------------------------------------------------
 // Profile
 // ---------------------------------------------------------------------------
@@ -153,14 +150,15 @@ func RunReliability(ctx context.Context) error {
 	}
 	results.PhaseB = phaseB
 
-	if err := writeReliabilityReport(reliabilityReportPath, profile, results); err != nil {
+	reportPath := benchmarkReportPath("reliability", profile.Name)
+	if err := writeReliabilityReport(reportPath, profile, results); err != nil {
 		return fmt.Errorf("write report: %w", err)
 	}
 	if !reliabilityPassed(results) {
 		return fmt.Errorf("reliability hard gate failed")
 	}
 
-	slog.Info("reliability scenario complete", "profile", profile.Name, "report", reliabilityReportPath)
+	slog.Info("reliability scenario complete", "profile", profile.Name, "report", reportPath)
 	return nil
 }
 
@@ -186,14 +184,15 @@ func RunPartnerProtection(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("partner protection: %w", err)
 	}
-	if err := writePartnerProtectionReport(partnerProtectionReportPath, profile, result); err != nil {
+	reportPath := benchmarkReportPath("partner-protection", profile.Name)
+	if err := writePartnerProtectionReport(reportPath, profile, result); err != nil {
 		return fmt.Errorf("write report: %w", err)
 	}
 	if !partnerProtectionPassed(result) {
 		return fmt.Errorf("partner protection hard gate failed")
 	}
 
-	slog.Info("partner protection scenario complete", "profile", profile.Name, "report", partnerProtectionReportPath)
+	slog.Info("partner protection scenario complete", "profile", profile.Name, "report", reportPath)
 	return nil
 }
 
@@ -1100,6 +1099,19 @@ func writeReliabilityReport(path string, profile reliabilityProfile, results rel
 Profile **%s**: validates transient partner recovery, retry distribution,
 terminal 4xx fast-fail, DLQ classification, and complete terminal outcomes.
 
+## Architecture Settings
+
+| Module | Phase A: transient recovery | Phase B: terminal 4xx |
+|---|---|---|
+| Topology | %d in-process Workers | 4 in-process Workers |
+| Scheduler | Equal-share round-robin | Equal-share round-robin |
+| Ingest | Real `+"`ingest.Store.Submit`"+` with Registry cache | Real `+"`ingest.Store.Submit`"+` with Registry cache |
+| Discovery | DB discovery: interval %s, empty backoff %s, limit %d | Same discovery configuration |
+| Circuit breaker | Disabled in Outbox and Worker to isolate RetryPolicy recovery | Disabled to prove 4xx fast-fail without breaker interference |
+| HostLimiter | Enabled: cap 16 per hostname, 100ms Requeue delay | Disabled |
+| Retry | 20 attempts, 1s base delay, 15s cap delay; MaxAge disabled | Worker defaults: 8 attempts, 1s base delay, 5m cap delay; MaxAge disabled |
+| HTTP | Shared rewritten test client; Worker default 30s request timeout | Default Worker client and 30s request timeout |
+
 ## Phase A — Transient + Recovering Partners
 
 | Metric | Value |
@@ -1138,6 +1150,8 @@ terminal 4xx fast-fail, DLQ classification, and complete terminal outcomes.
 | Bad webhook all dead, no retry waste | %s |
 `,
 		profile.Name,
+		profile.WorkerCount, profile.DiscoveryInterval,
+		profile.DiscoveryEmptyBackoff, profile.DiscoveryLimit,
 		results.PhaseA.TotalEvents, results.PhaseA.ExpectedDeliveries,
 		results.PhaseA.TotalDeliveries, results.PhaseA.TerminalDeliveries,
 		results.PhaseA.PartnerAP99Ms,
@@ -1171,6 +1185,19 @@ dead Integration Partner and healthy Customers on distinct hostnames. The hard
 gates cover breaker transitions, bounded dead-partner Attempts, skipped backlog,
 stable goroutine count, and healthy-Customer First-Attempt Queue Latency.
 
+## Architecture Settings
+
+| Module | Setting in this scenario |
+|---|---|
+| Topology | %d in-process Workers sharing one Postgres database and Scheduler |
+| Scheduler | Equal-share round-robin; weighted scheduling disabled |
+| Ingest | Bypassed; one Event and %d Deliveries per Customer are seeded directly |
+| Discovery | DB discovery: interval %s, empty backoff %s, limit %d; no PgNotify path |
+| Circuit breaker | Enabled: in-memory ADR-0014 decisions plus persisted claim filtering; threshold %d, cooldown %s, max cooldown %s |
+| HostLimiter | Enabled with cap 1 per hostname, 50ms Requeue delay; each Customer uses a distinct hostname |
+| Worker execution | `+"`MinBatchHint=1`"+`, `+"`DeliveryConcurrency=1`"+` per Worker |
+| Retry | 20 attempts, fixed 50ms retry delay; request timeout %s; MaxAge disabled |
+
 | Metric | Control | Dead Partner |
 |---|---:|---:|
 | Duration | %s | %s |
@@ -1192,6 +1219,11 @@ stable goroutine count, and healthy-Customer First-Attempt Queue Latency.
 | Deliveries skipped after breaker open | %s |
 `,
 		profile.Name,
+		profile.WorkerCount, profile.DeliveriesPerCustomer,
+		profile.DiscoveryInterval, profile.DiscoveryEmptyBackoff,
+		profile.DiscoveryLimit, profile.BreakerFailureThreshold,
+		profile.BreakerInitialCooldown, profile.BreakerMaxCooldown,
+		profile.RequestTimeout,
 		result.ControlDuration.Round(time.Millisecond), result.DeadDuration.Round(time.Millisecond),
 		result.WorstControlP95Ms, result.WorstDeadP95Ms, result.WorstHealthyRatio,
 		result.BaselineGoroutines, result.FinalGoroutines,

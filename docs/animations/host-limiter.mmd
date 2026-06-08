@@ -8,7 +8,7 @@ flowchart TD
     %% 6. Worker yields so another Customer can proceed.
 
     A["Worker has claimed a Delivery"]
-    B["Parse delivery URL hostname"]
+    B["Read generated url_host; parse and cache URL only as fallback"]
     C{"HostLimiter.TryAcquire(hostname)"}
 
     D["slot acquired"]
@@ -18,7 +18,7 @@ flowchart TD
     H["Outbox marks success, retry, or dead"]
 
     I["capacity reached"]
-    J["Outbox requeues Delivery with short delay"]
+    J["Outbox requeues Delivery with short default delay"]
     K["no HTTP request sent"]
     L["no Attempt recorded and retry budget unchanged"]
     M["Worker yields to Scheduler"]

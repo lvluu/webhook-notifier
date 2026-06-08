@@ -6,10 +6,10 @@ The benchmark suite mirrors the four main rows in
 ## Run
 
 ```bash
-just bench-reliability
-just bench-fairness
-just bench-scalability
-just bench-partner-protection
+just bench-reliability               # dev profile (default)
+just bench-fairness stress           # report-quality profile
+just bench-scalability stress
+just bench-partner-protection stress
 ```
 
 Direct runner form:
@@ -21,9 +21,10 @@ BENCH_PROFILE=stress go run ./cmd/bench scalability
 BENCH_PROFILE=stress go run ./cmd/bench partner-protection
 ```
 
-Use `BENCH_PROFILE=dev` for local iteration. Stress profiles produce
-report-quality results. Each run starts an isolated Postgres testcontainer and
-applies migrations unless `BENCH_DATABASE_URL` is set.
+The `just` recipes accept `dev` or `stress` as their optional first argument and
+default to `dev`. The direct runner uses `BENCH_PROFILE`. Stress profiles
+produce report-quality results. Each run starts an isolated Postgres
+testcontainer and applies migrations unless `BENCH_DATABASE_URL` is set.
 
 ## Proof Map
 
@@ -54,12 +55,16 @@ scenario is running.
 
 ## Reports
 
-Each benchmark rewrites one committed report:
+Each benchmark writes a profile-specific committed report so a local dev run
+does not overwrite stress evidence:
 
-- `bench/results/reliability.md`
-- `bench/results/fairness.md`
-- `bench/results/scalability.md`
-- `bench/results/partner-protection.md`
+- `bench/results/reliability_<profile>.md`
+- `bench/results/fairness_<profile>.md`
+- `bench/results/scalability_<profile>.md`
+- `bench/results/partner-protection_<profile>.md`
+
+For example, `BENCH_PROFILE=stress go run ./cmd/bench fairness` writes
+`bench/results/fairness_stress.md`.
 
 ## Dashboard Relationship
 
@@ -76,8 +81,8 @@ but it is not the report-quality benchmark environment.
 For sustained-load and query-level checks:
 
 ```bash
-psql "$DATABASE_URL" -f bench/scripts/issue54_health.sql
 psql "$DATABASE_URL" -f bench/scripts/db_query_health.sql
+just db-top-queries 20
 ```
 
 Thresholds and operational guidance live in

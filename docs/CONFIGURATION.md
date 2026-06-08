@@ -15,7 +15,7 @@ All flags for `cmd/notifier`:
 | Flag | Env | Default | Purpose |
 |---|---|---|---|
 | `--db` | `DATABASE_URL` | `postgres://notifier:notifier@localhost:5432/notifier?sslmode=disable` | Postgres connection string |
-| `--max-conns` | — | `workerCount + 10` | Max open DB connections; zero uses auto-derived default |
+| `--max-conns` | — | `0` (auto: clamp `workers * 3` to `25..50`) | Max open DB connections; an explicit value also becomes the idle-connection limit |
 
 ### Concurrency & Throughput
 
@@ -50,8 +50,12 @@ All flags for `cmd/notifier`:
 |---|---|---|
 | `--replica-id` | _empty_ | Optional replica identity for `X-Notifier-Replica` diagnostic header |
 | `--enable-pg-notify-wakeups` | `true` | Use Postgres `LISTEN/NOTIFY` wakeups in addition to polling |
-| `--pg-notify-db` | _empty_ | Optional direct `DATABASE_URL` for `LISTEN/NOTIFY` connections (uses main DB pool when empty) |
+| `--pg-notify-db` | _empty_ | Optional direct `DATABASE_URL` for `LISTEN/NOTIFY`; when empty, a dedicated connection uses the main DSN |
 | `--pg-notify-channel` | `webhook_customer_ready` | Postgres `LISTEN/NOTIFY` channel for Customer wakeups |
+| `--breaker-threshold` | `20` | Consecutive Webhook failures before opening; `0` disables breaker filtering |
+| `--breaker-initial-cooldown` | `5m` | Delay before the first half-open probe |
+| `--breaker-max-cooldown` | `15m` | Maximum cooldown after failed probes |
+| `--pprof` | `false` | Enable `/debug/pprof/` on the metrics server |
 
 ## Retry Policy
 
@@ -72,18 +76,22 @@ Behavior:
 - **5xx** → retryable with decorrelated jitter.
 - Network error / timeout → retryable.
 - Attempt exhaustion → terminal dead.
-- `MaxAge` exceeded → terminal dead regardless of remaining attempts.
+- `MaxAge` exceeded → terminal dead regardless of remaining attempts. `MaxAge`
+  is implemented but defaults to `0` (disabled) and is not currently exposed by
+  the notifier CLI.
 
 ## Circuit Breaker
 
-Configured in `internal/outbox/outbox.go`. Per-Webhook state persisted in
-`webhooks` table.
+Configured by notifier flags and implemented in `internal/breaker/`. Attempt
+outcomes update a process-local decision engine after delivery marks commit;
+only lifecycle transitions are persisted to the `webhooks` table for
+cross-process claim and discovery filtering (ADR-0014).
 
-| Constant | Default | Purpose |
+| Flag | Default | Purpose |
 |---|---|---|
-| `DefaultBreakerThreshold` | `20` | Consecutive failures before opening breaker |
-| `DefaultBreakerCooldown` | `5m` | Cooldown before first half-open probe |
-| `DefaultBreakerMaxCooldown` | `15m` | Maximum cooldown after repeated probe failures |
+| `--breaker-threshold` | `20` | Consecutive failures before opening breaker; `0` disables it |
+| `--breaker-initial-cooldown` | `5m` | Cooldown before first half-open probe |
+| `--breaker-max-cooldown` | `15m` | Maximum cooldown after repeated probe failures |
 
 ## Host Concurrency Cap
 
@@ -98,8 +106,8 @@ Production deployments need fleet-wide coordination (see DESIGN.md).
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `MaxOpenConns` | `workers + 10` | Maximum pool size (auto-derived) |
-| `MaxIdleConns` | `workers + 5` | Maximum idle connections |
+| `MaxOpenConns` | clamp `workers * 3` to `25..50` | Automatic maximum pool size when `--max-conns=0` |
+| `MaxIdleConns` | `MaxOpenConns / 2` | Automatic idle limit; explicit `--max-conns` uses the same value for open and idle limits |
 | `ConnMaxLifetime` | `30m` | Maximum connection lifetime |
 
 When running behind PgBouncer in transaction pooling mode, the pool is
@@ -132,7 +140,7 @@ Configured through `workerRuntimeConfig.Discovery`:
 | `/metrics` | `:9090` | Prometheus scrape endpoint |
 | `/health` | `:9090` | Liveness check |
 | `/ready` | `:9090` | Readiness check (DB + schema version) |
-| `/debug/pprof/` | `:9090` | Go pprof profiling (disabled by default; enable with `cfg.Pprof`) |
+| `/debug/pprof/` | `:9090` | Go pprof profiling (disabled by default; enable with `--pprof`) |
 
 ### Key Metrics
 
@@ -146,7 +154,15 @@ Configured through `workerRuntimeConfig.Discovery`:
 | `webhook_host_semaphore_wait_seconds` | Histogram | `host` |
 | `webhook_breaker_state` | Gauge | `webhook_id`, `state` |
 | `webhook_breaker_trips_total` | Counter | `reason` |
-| `webhook_replicas` | Gauge | `replica_id` |
+| `webhook_queue_wait_seconds` | Histogram | `customer_class` |
+| `webhook_attempt_total` | Counter | `outcome` |
+| `webhook_claim_duration_seconds` | Histogram | — |
+| `webhook_claim_batch_size` | Histogram | — |
+| `webhook_claim_empty_total` | Counter | — |
+| `webhook_pending_deliveries` | Gauge | `customer_class` |
+| `webhook_workers_configured` | Gauge | — |
+| `webhook_pg_notify_broadcast_total` | Counter | `result` |
+| `webhook_worker_transient_db_errors_total` | Counter | `phase` |
 
 See [docs/observability/dashboard.md](observability/dashboard.md) for Grafana
 panel documentation and [docs/observability/alerts.yml](observability/alerts.yml)
@@ -164,8 +180,10 @@ for Prometheus alerting rules.
 | `prometheus` | `:9091` | Metrics collection |
 | `grafana` | `:3000` | Dashboards |
 
-Profiles: `--profile observe`, `--profile chaos`, `--profile retention`,
-`--profile production`.
+Development-stack profiles are `observe`, `chaos`, and `retention`. The
+production-representative stack uses the separate
+`compose/docker-compose.production.yml` file through the `just stack-production*`
+recipes.
 
 ## Benchmark Profiles
 

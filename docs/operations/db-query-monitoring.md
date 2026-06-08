@@ -1,7 +1,8 @@
 # DB Query Monitoring Runbook
 
-This runbook defines how to monitor query-level Postgres health for notifier
-claim, discovery, and retention paths under sustained load.
+This runbook defines what healthy Postgres behavior means for notifier claim,
+discovery, and retention paths, and why each signal matters under sustained
+load.
 
 ## Quick Start
 
@@ -11,11 +12,9 @@ Run every 60s during load tests:
 psql "$DATABASE_URL" -f bench/scripts/db_query_health.sql
 ```
 
-For a lighter queue/backlog-only probe:
-
-```bash
-psql "$DATABASE_URL" -f bench/scripts/issue54_health.sql
-```
+The maintained snapshot combines backlog, bloat, lock, session, relation-size,
+and optional `pg_stat_statements` evidence. Keeping one probe avoids divergent
+definitions of queue health.
 
 To keep the queue saturated while watching for throughput decay:
 

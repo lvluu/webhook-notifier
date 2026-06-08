@@ -80,6 +80,31 @@ lint:
 tidy:
     go mod tidy
 
+# render human-readable SVGs from Mermaid architecture sources
+diagrams:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for source in docs/animations/*.mmd; do
+        npx -y -p @mermaid-js/mermaid-cli@11.12.0 mmdc -q \
+          -i "$source" -o "${source%.mmd}.svg"
+    done
+
+# verify committed SVG diagrams match their Mermaid sources
+diagrams-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' EXIT
+    for source in docs/animations/*.mmd; do
+        output="$tmp_dir/$(basename "${source%.mmd}").svg"
+        npx -y -p @mermaid-js/mermaid-cli@11.12.0 mmdc -q \
+          -i "$source" -o "$output"
+        cmp "$output" "${source%.mmd}.svg" || {
+            echo "stale diagram: ${source%.mmd}.svg" >&2
+            exit 1
+        }
+    done
+
 # top-N SQL by total execution time (needs running stack + pg_stat_statements)
 db-top-queries n="20":
     {{compose}} exec -T postgres psql -U notifier -d notifier -P pager=off -P border=2 \
@@ -167,20 +192,20 @@ demo:
 # ── Dashboard-aligned benchmarks ──────────────────────────────────────────
 
 # retry recovery, terminal classification, and DLQ behavior
-bench-reliability:
-    BENCH_PROFILE=stress go run ./cmd/bench reliability
+bench-reliability profile="dev":
+    BENCH_PROFILE='{{profile}}' go run ./cmd/bench reliability
 
 # Whale/Small scheduling fairness and queue latency
-bench-fairness:
-    BENCH_PROFILE=stress go run ./cmd/bench fairness
+bench-fairness profile="dev":
+    BENCH_PROFILE='{{profile}}' go run ./cmd/bench fairness
 
 # multi-replica throughput and coordination
-bench-scalability:
-    BENCH_PROFILE=stress go run ./cmd/bench scalability
+bench-scalability profile="dev":
+    BENCH_PROFILE='{{profile}}' go run ./cmd/bench scalability
 
 # dead-partner host limiting, breaker transitions, and healthy-Customer isolation
-bench-partner-protection:
-    BENCH_PROFILE=stress go run ./cmd/bench partner-protection
+bench-partner-protection profile="dev":
+    BENCH_PROFILE='{{profile}}' go run ./cmd/bench partner-protection
 
 # retain terminal deliveries into delivery_history
 delivery-history-retention:

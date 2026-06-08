@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Compact queue/backlog dashboard for `watch -n`. Invoked by `just stack-status`,
-# which passes the compose command via the COMPOSE environment variable.
+# Read-only status summary for the local Compose stack.
+# What: backlog, Claims, Attempt rate, active Customers, and breaker state.
+# Why: one view distinguishes caught-up, actively draining, and falling-behind
+# states without requiring Grafana. Suitable for `watch -n 2 just stack-status`.
+# `just stack-status` passes the Compose command through COMPOSE. This script
+# does not start services or mutate database state.
 set -euo pipefail
 
 read -ra COMPOSE_CMD <<< "${COMPOSE:?COMPOSE env required (set by justfile)}"

@@ -1,63 +1,82 @@
-# Webhook Notifier — Requirements
+# Webhook Notifier - Requirements
+
+This document restates the supplied backend home-assignment brief in generic,
+de-branded language. It records assignment requirements separately from the
+scope decisions made for this proof of concept.
 
 ## Problem Statement
 
-A multi-tenant SaaS platform exposes webhook integration so that Integration
-Partners can receive HTTP POSTs for Events occurring in a Customer's account.
-All webhook Events carry JSON payloads.
+A multi-tenant SaaS platform supports Webhooks so Integration Partners can
+receive HTTP POST requests when Events occur in a Customer's account. Webhook
+Event payloads are JSON.
 
-The platform already provides APIs to manage webhook registrations (create,
-update, delete). What is missing is the **Webhook Notifier** — the component
-that listens for business Events and delivers them as HTTP POSTs to the
-configured webhook URLs.
+The platform already provides APIs for creating, updating, and deleting
+Webhook registrations. The missing component is the **Webhook Notifier**,
+which accepts business Events and POSTs them to the matching configured
+Webhook URLs.
 
-## Challenges
+## Required Challenges
 
-1. **Reliability** — A retry mechanism must handle transient system failures
-   and networking issues from Integration Partners. No Event should be lost
-   between emission and terminal delivery state.
+1. **Reliability** - Retry transient system and Integration Partner network
+   failures so accepted Events are not silently lost.
+2. **Scalability** - Allow delivery workers to scale horizontally as Event
+   volume and traffic change.
+3. **Fairness** - Prevent a Whale Customer's Event burst from causing excessive
+   delay for Small Customers. Fairness must be based on Customer scheduling,
+   rather than a single global FIFO of Events.
 
-2. **Scalability** — Workers must scale horizontally to handle variable Event
-   volume and traffic. Adding workers should increase throughput without
-   changing claim or coordination semantics.
-
-3. **Fairness** — Customers range from a few hundred Subscribers to hundreds
-   of thousands. A single large Customer ("Whale") emitting a burst of Events
-   must not starve smaller Customers from timely delivery. Scheduling
-   decisions must be per-Customer, not per-Event.
-
-## Tasks
+## Required Deliverables
 
 ### System Design
 
-Produce design documentation covering:
-
-- A high-level architecture diagram showing component wiring.
-- A document describing the solution and technology choices.
-- Scope: the design must address the Reliability and Scalability challenges.
+- A high-level architecture diagram showing how the modules are wired.
+- A design document explaining the solution and technology choices.
+- The design must address Reliability and Scalability. This project also
+  documents Fairness because the implementation is explicitly required to
+  demonstrate balanced processing.
 
 ### Implementation
 
-Deliver a working proof-of-concept that demonstrates:
+- A working proof of concept that accepts Events, processes them, and sends
+  HTTP POST requests to configured Webhook URLs.
+- Balanced processing for Small and Whale Customers so Whale traffic does not
+  disproportionately delay Small Customers.
+- A repeatable way to test and benchmark the system.
 
-- Core functionality: listen for Events, process them, and send HTTP POST
-  requests to configured webhook URLs.
-- Balanced event processing across small and large Customers — small
-  Customers must not experience disproportionate delays when Whale Customers
-  are active.
-- A way to test and benchmark the system.
+### Pair-Session Discussion
 
-### Discussion Topics (pair session)
+- Walk through the solution and its trade-offs.
+- Review the code.
+- Discuss monitoring metrics for system performance and latency.
+- Discuss production improvements and remaining risks.
 
-- Monitoring: metrics for performance, latency, and system health.
-- Further improvements and production considerations.
+## Submission Constraints
 
-## Non-Requirements (explicitly out of scope)
+- Submitted code and documentation must not contain company branding.
+- AI-assisted work is permitted, but the candidate must understand and take
+  ownership of all submitted code and documentation.
 
-- Webhook management APIs (create, update, delete) — assumed implemented
-  elsewhere.
-- Strict per-Customer FIFO ordering (per-Customer queues drain in arrival
-  order, but multiple workers may cause some interleaving).
-- Multi-region delivery.
-- Production-grade authentication on the ingest path.
-- Partner-facing replay UI (the DLQ is a queryable table).
+## Project Scope Decisions
+
+The following are PoC scope decisions, not additional statements from the
+assignment brief:
+
+- Webhook management APIs are assumed to exist elsewhere; local registration
+  routes are test and demo helpers only.
+- Strict per-Customer FIFO ordering is not guaranteed when multiple workers
+  process Deliveries concurrently.
+- Multi-region delivery is out of scope.
+- Production-grade authentication on the ingest path is out of scope.
+- A partner-facing replay UI is out of scope; terminal failures are retained
+  in queryable database tables.
+
+## Traceability
+
+| Assignment requirement | Project evidence |
+|---|---|
+| High-level architecture and technology choices | [`docs/DESIGN.md`](docs/DESIGN.md) |
+| Reliable delivery and retry behavior | ADR-0002, ADR-0003, ADR-0009, ADR-0011; reliability benchmark |
+| Horizontal worker scaling | ADR-0002, ADR-0006, ADR-0013; scalability benchmark |
+| Balanced Small/Whale processing | ADR-0001; fairness benchmark |
+| Test and benchmark path | [`bench/README.md`](bench/README.md) and `just bench-*` recipes |
+| Monitoring discussion artifacts | [`docs/observability/`](docs/observability/) |

@@ -2,10 +2,10 @@
 
 | Dashboard category | Benchmark | Report | Status |
 |---|---|---|---|
-| Reliability | `reliability` | [reliability.md](results/reliability.md) | Dev profile PASS; stress run required |
-| Fairness | `fairness` | [fairness.md](results/fairness.md) | Existing stress evidence retained |
-| Scalability | `scalability` | [scalability.md](results/scalability.md) | Existing stress evidence retained |
-| Partner Protection | `partner-protection` | [partner-protection.md](results/partner-protection.md) | Dev profile PASS; stress run required |
+| Reliability | `reliability` | [reliability_dev.md](results/reliability_dev.md) | Dev profile PASS; stress run required |
+| Fairness | `fairness` | [fairness_stress.md](results/fairness_stress.md) | Stress profile PASS |
+| Scalability | `scalability` | [scalability_stress.md](results/scalability_stress.md) | Stress profile PASS |
+| Partner Protection | `partner-protection` | [partner-protection_dev.md](results/partner-protection_dev.md) | Dev profile PASS; stress run required |
 
-The four reports correspond directly to the Reliability, Fairness,
-Scalability, and Partner Protection rows in the Grafana dashboard.
+Reports use the `<scenario>_<profile>.md` convention so dev and stress runs can
+coexist. The listed files are the latest committed evidence for each category.

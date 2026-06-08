@@ -1,5 +1,7 @@
 # DB-backed claimable Customer discovery for horizontal fairness
 
+Status: Accepted as amended by ADR-0013.
+
 ## Amended by
 
 [ADR-0013](./0013-claim-agnostic-claimable-customer-discovery.md) supersedes the

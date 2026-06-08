@@ -7,36 +7,52 @@ groups:
         labels:
           severity: page
         annotations:
-          summary: Webhook delivery p95 latency is above 300 seconds.
+          summary: Webhook delivery p95 lifetime is above 300 seconds.
 
       - alert: WebhookErrorRateHigh
-        expr: rate(webhook_deliveries_total{status="dead"}[5m]) / rate(webhook_deliveries_total[5m]) > 0.05
+        expr: sum(rate(webhook_deliveries_total{status="dead"}[5m])) / clamp_min(sum(rate(webhook_deliveries_total[5m])), 0.001) > 0.05
         for: 10m
         labels:
           severity: page
         annotations:
-          summary: More than 5 percent of webhook deliveries are dead.
+          summary: More than 5 percent of terminal webhook Deliveries are dead.
 
       - alert: WebhookQueueDepthGrowing
-        expr: deriv(sum(webhook_pending_count)[15m:]) > 0
+        expr: deriv(sum(webhook_pending_deliveries)[15m:]) > 0 and webhook_pending_oldest_age_seconds > 300
         for: 30m
         labels:
           severity: warn
         annotations:
-          summary: Webhook pending queue depth is growing.
+          summary: Pending Delivery count and oldest pending age are both growing.
 
-      - alert: WebhookCustomerStarvation
-        expr: histogram_quantile(0.95, sum by (customer_class, le) (rate(webhook_delivery_latency_seconds_bucket{customer_class="small"}[5m]))) > 5 * histogram_quantile(0.50, sum by (le) (rate(webhook_delivery_latency_seconds_bucket[5m])))
+      - alert: WebhookSmallCustomerQueueWaitHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(webhook_queue_wait_seconds_bucket{customer_class="small"}[5m]))) > 5
         for: 10m
         labels:
           severity: warn
         annotations:
-          summary: Small-customer p95 latency is more than 5x the median across all customers.
+          summary: Small Customer p95 first-Attempt queue latency is above 5 seconds.
 
-      - alert: WebhookHostSemaphoreSaturated
-        expr: histogram_quantile(0.95, sum by (host, le) (rate(webhook_host_semaphore_wait_seconds_bucket[5m]))) > 1
+      - alert: WebhookClaimEmptyRateHigh
+        expr: sum(rate(webhook_claim_empty_total[5m])) / clamp_min(sum(rate(webhook_claim_batch_size_count[5m])), 0.001) > 0.25 and sum(webhook_pending_deliveries) > 0
         for: 10m
         labels:
           severity: warn
         annotations:
-          summary: A partner host semaphore is saturated.
+          summary: More than 25 percent of claim queries are empty while backlog exists.
+
+      - alert: WebhookPostgresPoolSaturated
+        expr: webhook_pg_pool_in_use / clamp_min(webhook_pg_pool_max_open, 1) > 0.9
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: The notifier Postgres pool is more than 90 percent in use.
+
+      - alert: WebhookBreakerPersistenceFallback
+        expr: increase(webhook_breaker_sync_fallback_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: warn
+        annotations:
+          summary: Breaker transition persistence fell back to synchronous writes.

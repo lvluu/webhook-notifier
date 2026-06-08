@@ -1,0 +1,11 @@
+flowchart LR
+    ingest[EventIngest fanout] --> pending[Delivery pending]
+    pending -->|atomic claim lease| claimed[Claimed work]
+    claimed -->|partner returns 2xx| succeeded[Delivery succeeded]
+    claimed -->|terminal response, exhausted Attempts,<br/>or MaxAge expiry| dead[Delivery dead]
+    claimed -->|retryable failure| retry[Delivery failed_retry]
+    claimed -->|claim lease expires| pending
+    retry -->|retry delay elapses| pending
+
+    claim_note[Claimed means a delivery_claims row,<br/>not a deliveries.status value]
+    claim_note -. explains .-> claimed

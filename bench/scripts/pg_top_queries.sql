@@ -1,4 +1,8 @@
--- Top-N SQL statements by total execution time, from pg_stat_statements.
+-- Read-only Top-N SQL ranking from pg_stat_statements.
+-- What: statements consuming the most aggregate database execution time.
+-- Why: optimization should target measured database cost, not query frequency
+-- or intuition alone. Reset counters before a comparison window when needed.
+-- Requires pg_stat_statements to be installed and preloaded.
 -- Invoked by `just db-top-queries [n]` (passes -v limit=N; default 20).
 -- Standalone: psql "$DATABASE_URL" -v limit=20 -f bench/scripts/pg_top_queries.sql
 

@@ -6,6 +6,20 @@ Profile **stress** runs real notifier OS processes (`go run ./cmd/notifier`) sha
 Each replica has unique business/metrics ports and explicit identity (`NOTIFIER_REPLICA_ID`).
 Outbound attempts include `X-Notifier-Replica` only when replica identity is configured.
 
+## Architecture Settings
+
+| Module | Setting in this scenario |
+|---|---|
+| Topology | Real notifier OS processes; replica counts 1, 2, and 4; each replica has 8 Workers and DeliveryConcurrency 16 |
+| Database | One shared Postgres database; notifier processes connect directly in the benchmark harness (no PgBouncer) |
+| Scheduler | Equal-share process-local round-robin; weighted scheduling disabled |
+| Wakeups/discovery | PgNotify wakeups enabled by notifier defaults plus DB discovery every 50ms |
+| Claim batching | `MinBatchHint=8`, `MultiPickCount=32`, default maximum batch hint 64 |
+| Circuit breaker | Disabled (`breaker_failure_threshold=0`) so breaker filtering cannot affect scaling |
+| HostLimiter | Enabled with cap 128 per hostname per replica, intentionally high enough not to be the expected bottleneck |
+| Retry | Notifier defaults: 8 attempts, 1s base delay, 5m cap delay; MaxAge disabled |
+| Ingest | Sparse phase uses real HTTP ingest; dense phase pre-seeds Deliveries to isolate delivery-pipeline throughput |
+
 ### Phase 1 — Sparse end-to-end ingest
 
 - 20000 Small Customers × 1 Events each, mixed fast/slow/flaky receivers.

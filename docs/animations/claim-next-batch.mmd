@@ -1,18 +1,21 @@
 flowchart TD
     %% Animation intent:
     %% 1. claimMulti co-picks several Customers from the process-local Scheduler.
-    %% 2. ClaimNextBatch computes a total limit and a per-Customer candidate cap.
-    %% 3. SQL de-duplicates input Customers.
-    %% 4. Each Customer contributes ready candidates and stale-claim candidates.
-    %% 5. Optional breaker filtering/probe handling happens inside the claim SQL.
-    %% 6. A final time-ordered cut chooses the batch; there is no per-Customer
+    %% 2. Worker trims the picked set when the total limit cannot provide at
+    %%    least two candidate slots per Customer, and re-notifies the overflow.
+    %% 3. ClaimNextBatch computes a per-Customer candidate cap.
+    %% 4. SQL de-duplicates input Customers.
+    %% 5. Each Customer contributes ready candidates and stale-claim candidates.
+    %% 6. Optional breaker filtering/probe handling happens inside the claim SQL.
+    %% 7. A final time-ordered cut chooses the batch; there is no per-Customer
     %%    return guarantee.
-    %% 7. Worker re-notifies Customers that produced rows, checks empty Customers
+    %% 8. Worker re-notifies Customers that produced rows, checks empty Customers
     %%    with HasClaimableWorkBatch, then Notify/Remove keeps rotation accurate.
 
     subgraph Worker["worker.claimMulti"]
       P["Pick up to MultiPickCount Customers"]
       TL["totalLimit = sum(clamp(batchHint, MinBatchHint, MaxBatchHint))"]
+      TRIM["Keep at most max(totalLimit / 2, 1) Customers; Notify overflow"]
       CS["claimedSet from returned Deliveries"]
       E["empty Customers = picked - claimedSet"]
       HW["HasClaimableWorkBatch(empty Customers)"]
@@ -41,7 +44,8 @@ flowchart TD
     end
 
     P --> TL
-    TL --> PC
+    TL --> TRIM
+    TRIM --> PC
     PC --> U
     U --> RC
     U --> SC
@@ -69,6 +73,6 @@ flowchart TD
     classDef worker fill:#e8f1ff,stroke:#4d6fb3,color:#10233f;
     classDef sql fill:#ecfdf3,stroke:#3b8f5f,color:#123524;
     classDef db fill:#f5f0ff,stroke:#7b61b8,color:#2b2147;
-    class P,TL,CS,E,HW,RN,ER worker;
+    class P,TL,TRIM,CS,E,HW,RN,ER worker;
     class PC,U,RC,SC,BF,POOL,CUT,INS,RET sql;
     class DV,DC,WH,EV,CU db;

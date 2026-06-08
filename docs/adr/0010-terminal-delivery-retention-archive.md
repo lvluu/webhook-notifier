@@ -1,5 +1,7 @@
 # Terminal delivery retention uses an archive table
 
+Status: Accepted.
+
 The live `deliveries` table is the hot queue and should stay small enough for claim and discovery queries to remain predictable. Terminal Deliveries will be copied to a time-partitioned archive table, then removed from `deliveries` after a bounded operational retention window; old archive history can be dropped by partition instead of deleted row-by-row.
 
 This keeps the queue path focused on claimable work while preserving terminal history for debugging and audit. PostgreSQL deletes still create dead tuples that depend on vacuum cleanup, so deletion remains acceptable for the live queue's short retention window but is not the long-term history retention mechanism.

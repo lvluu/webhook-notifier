@@ -1,5 +1,8 @@
 # Delivery claims as the authoritative claim store
 
+Status: Accepted. Supersedes persisted `deliveries.status = 'in_flight'`
+claim ownership.
+
 ## Context
 
 The original outbox model used `deliveries.status = 'in_flight'` to represent a claimed row. That was simple, but it forced claim ownership, retry accounting, and recovery semantics into one mutable row. Under higher concurrency, batch mark paths also had to infer the claim attempt from the delivery row itself, which made deadlock avoidance and recovery logic harder to reason about.

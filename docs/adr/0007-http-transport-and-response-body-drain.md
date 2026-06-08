@@ -1,5 +1,17 @@
 # Shared HTTP transport and response body drain
 
-Workers use a shared, tuned `http.Client` per Worker instead of `http.DefaultClient` so high-concurrency Delivery bursts to one Integration Partner do not collapse onto Go's low default per-host idle connection pool. Per-Attempt deadlines are enforced with request contexts, while transport timeouts bound connection setup and response headers separately. Every response body is fully drained and closed before classifying the Attempt, because Go can only reuse an HTTP connection after the body has been consumed or discarded.
+Status: Accepted. Runtime sharing was widened from one client per Worker to one
+client per notifier process without changing the decision.
 
-The default transport keeps `MaxConnsPerHost=0` so the existing process-local HostLimiter remains the PoC enforcement mechanism for host concurrency, while raising idle pool limits enough for sustained benchmark load. Benchmarks may override the transport config and request timeout through Worker options, but normal workers should share one client rather than constructing clients per Delivery. A horizontally scaled production deployment needs fleet-wide enforcement of the Host Concurrency Cap.
+The notifier uses one tuned `http.Client` shared by all Workers in a process
+instead of `http.DefaultClient` or clients created per Delivery. This gives
+high-concurrency Delivery bursts a common connection pool. Per-Attempt
+deadlines are enforced with request contexts, while transport timeouts bound
+connection setup and response headers separately. Every response body is fully
+drained and closed before classification so Go can reuse the connection.
+
+The current transport sets `MaxConnsPerHost=500` as a backstop and
+`MaxIdleConnsPerHost=500`. The lower process-local HostLimiter default of 20 is
+the normal PoC concurrency control. Benchmarks may override transport and
+request-timeout configuration through Worker options. A horizontally scaled
+production deployment still needs fleet-wide Host Concurrency Cap enforcement.

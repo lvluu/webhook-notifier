@@ -1,5 +1,8 @@
 # SubscriptionRegistry with LRU + TTL cache
 
+Status: Accepted. The Registry is used on ingest only and is keyed by
+`(customer_id, event_type)`.
+
 ## Context
 
 The Webhook Notifier must resolve which Webhooks receive a given Event at ingest time. Today, `ingest.Store.Submit` runs an `INSERT INTO deliveries ... SELECT FROM webhooks WHERE customer_id = $1 AND active AND $2 = ANY(event_types)` inside the same transaction as the Event insert. This hits the `webhooks` table on every Event — a hot path that will dominate DB load under burst conditions (Whale Customer bulk import).

@@ -23,7 +23,6 @@ import (
 const (
 	fairnesswhaleCustomerID = "pw-whale"
 	fairnessSmallPrefix     = "pw-small-"
-	fairnessReportPath      = "bench/results/fairness.md"
 	fairnessSeedBatchRows   = 1000
 )
 
@@ -133,10 +132,11 @@ func RunFairness(ctx context.Context) error {
 		results = append(results, run)
 	}
 
-	if err := writeFairnessReport(fairnessReportPath, profile, results); err != nil {
+	reportPath := benchmarkReportPath("fairness", profile.Name)
+	if err := writeFairnessReport(reportPath, profile, results); err != nil {
 		return fmt.Errorf("write fairness report: %w", err)
 	}
-	slog.Info("fairness complete", "profile", profile.Name, "report", fairnessReportPath)
+	slog.Info("fairness complete", "profile", profile.Name, "report", reportPath)
 	return nil
 }
 
@@ -535,6 +535,20 @@ Profile **%s** seeds a Delivery backlog with set-based SQL (each Event fans out 
 Seeding directly avoids a per-Customer ingest `+"`Submit`"+` stampede that would otherwise measure DB connection contention instead of delivery throughput; ingest-path performance is covered separately.
 Each Customer has 3 Webhooks (`+"`/hooks/fast`"+`, `+"`/hooks/slow`"+`, `+"`/hooks/flaky`"+`) with mixed latency/failure behavior to approximate production HTTP variability.
 
+## Architecture Settings
+
+| Module | Setting in this scenario |
+|---|---|
+| Topology | In-process worker goroutines sharing one Postgres database and one process-local Scheduler |
+| Scheduler | Equal-share round-robin; weighted scheduling disabled |
+| Ingest | Bypassed for load generation; Events and Deliveries are set-based SQL seeded with the same Event-to-Webhook fanout shape |
+| Discovery | Manual claimable-Customer DB poll every 200ms; no PgNotify path |
+| Claim batching | `+"`MinBatchHint=%d`"+`, `+"`MultiPickCount=32`"+`; default maximum batch hint 64 |
+| Circuit breaker | Disabled (`+"`breaker_failure_threshold=%d`"+`) to isolate scheduler fairness from partner isolation |
+| HostLimiter | Disabled; receiver latency and failures are part of Delivery cost, not capped by hostname |
+| Retry | Max attempts %d, base delay %s, cap delay %s; MaxAge disabled |
+| HTTP | Default shared Worker client, request timeout %s |
+
 Validation coverage:
 - Reliability: retries under transient 503s, duplicate tuple protection.
 - Scalability: throughput across worker counts %v.
@@ -549,7 +563,10 @@ Fairness metric note:
 
 | Workers | Total Deliveries | Duration | Throughput (Deliveries/sec) | Avg Claim Batch | Claim Calls | Empty Claims | Retry Rate | Dead Rate | Duplicate (delivery_id, attempt_number) tuples | Small P95 First-Attempt Latency (ms) | Whale P95 First-Attempt Latency (ms) | Reliability | Fairness |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-`, profile.Name, profile.SmallCount, profile.WorkerCounts)
+`, profile.Name, profile.SmallCount,
+		profile.MinBatchHint, profile.BreakerFailureThreshold,
+		profile.RetryMaxAttempts, profile.RetryBaseDelay, profile.RetryCapDelay,
+		profile.RequestTimeout, profile.WorkerCounts)
 	for _, r := range results {
 		_, _ = fmt.Fprintf(f, "| %d | %d | %s | %.2f | %.2f | %d | %d | %.2f%% | %.2f%% | %d | %.2f | %.2f | %s | %s |\n",
 			r.Workers,
@@ -568,5 +585,17 @@ Fairness metric note:
 			passFail(r.FairnessOK),
 		)
 	}
+	_, _ = fmt.Fprint(f, `
+
+## Scaling Interpretation
+
+This scenario varies in-process Worker count to expose the workload's
+contention knee; it is not a claim that more Workers always improve throughput.
+When throughput falls while claim calls and empty claims rise, additional
+Workers are spending more capacity competing for claimable work instead of
+draining more Deliveries. The result identifies a tuning ceiling for this
+database, receiver, and batch configuration while the fairness gate remains a
+separate Small-versus-Whale latency comparison.
+`)
 	return f.Close()
 }

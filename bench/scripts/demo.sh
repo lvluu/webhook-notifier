@@ -110,7 +110,7 @@ curl -fsS http://localhost:9092/metrics 2>/dev/null | grep -E '^webhook_requests
 
 echo ""
 echo "Notifier health:"
-curl -fsS http://localhost:9090/health 2>/dev/null || echo "    (metrics endpoint unavailable)"
+curl -fsS http://localhost:8080/_notifier/health
 
 echo ""
 echo "=== Demo complete ==="

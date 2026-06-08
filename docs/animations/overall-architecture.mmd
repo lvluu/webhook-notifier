@@ -1,45 +1,63 @@
 flowchart LR
     %% Animation intent:
-    %% Top-level path only: Event enters the notifier, Postgres acts as the
-    %% durable queue, workers fan out Delivery attempts to Integration Partners.
+    %% 1. A producer submits an Event to one notifier replica.
+    %% 2. Registry-backed ingest atomically persists the Event and Deliveries.
+    %% 3. Local wakeups plus DB discovery populate each process-local Scheduler.
+    %% 4. Workers claim through Postgres, POST to partners, and batch-mark outcomes.
+    %% 5. Terminal rows later move out of the live queue through retention.
 
-    EVENT["Business Event"]
-    INGRESS["Notifier ingress"]
-    PG["Postgres queue"]
-    W1["Worker"]
-    W2["Worker"]
-    W3["Worker"]
-    P1["Partner endpoint A"]
-    P2["Partner endpoint B"]
-    P3["Partner endpoint C"]
-    RESULT["delivery status"]
+    PROD["Business Event producer"]
 
-    EVENT -->|"POST /api/events"| INGRESS
-    INGRESS -->|"store Event"| PG
-    INGRESS -->|"create Delivery rows"| PG
+    subgraph Notifier["Webhook Notifier replicas"]
+      API["HTTP ingest"]
+      REG["SubscriptionRegistry; LRU + TTL"]
+      DISC["DB-backed Customer discovery"]
+      SCHED["Process-local Customer Scheduler"]
+      WORK["Worker pool"]
+      PROTECT["Signer + HostLimiter + RetryPolicy + Breaker"]
+    end
 
-    PG -->|"claim next Delivery"| W1
-    PG -->|"claim next Delivery"| W2
-    PG -->|"claim next Delivery"| W3
+    subgraph PG["Postgres: durable state and coordination"]
+      WH[("webhooks")]
+      EV[("events")]
+      DV[("deliveries")]
+      CL[("delivery_claims")]
+      AT[("delivery_attempts")]
+      DL[("dead_letters")]
+      HIST[("delivery_history")]
+    end
 
-    W1 -->|"HTTP POST"| P1
-    W2 -->|"HTTP POST"| P2
-    W3 -->|"HTTP POST"| P3
+    PARTNER["Integration Partner URLs"]
+    RETAIN["Scheduled retention command"]
 
-    P1 --> RESULT
-    P2 --> RESULT
-    P3 --> RESULT
+    PROD -->|"POST /api/events"| API
+    API -->|"resolve matching Webhooks"| REG
+    REG -->|"cache miss"| WH
+    API -->|"one transaction"| EV
+    API -->|"one Delivery per Webhook"| DV
+    API -->|"local Notify + remote wake hint"| SCHED
 
-    RESULT -->|"success, retry, or dead"| PG
-    PG -->|"retry later if needed"| W1
+    DV -->|"ready Customer hint"| DISC
+    WH -->|"breaker eligibility"| DISC
+    DISC --> SCHED
+    SCHED -->|"fair Customer picks"| WORK
+    WORK -->|"atomic claim"| DV
+    WORK -->|"claim lease"| CL
+    WORK --> PROTECT
+    PROTECT -->|"signed HTTP POST"| PARTNER
+    PARTNER -->|"response or error"| PROTECT
+    PROTECT -->|"batch mark success/retry/dead"| DV
+    PROTECT -->|"real Attempts only"| AT
+    PROTECT -->|"terminal failures"| DL
 
-    classDef event fill:#e8f1ff,stroke:#4d6fb3,color:#10233f;
-    classDef queue fill:#f5f0ff,stroke:#7b61b8,color:#2b2147;
-    classDef worker fill:#fff7e6,stroke:#c48225,color:#4a2c00;
+    RETAIN -->|"archive terminal Deliveries"| DV
+    RETAIN --> HIST
+
+    classDef ingress fill:#e8f1ff,stroke:#4d6fb3,color:#10233f;
+    classDef runtime fill:#fff7e6,stroke:#c48225,color:#4a2c00;
+    classDef db fill:#f5f0ff,stroke:#7b61b8,color:#2b2147;
     classDef partner fill:#fff0f0,stroke:#c45050,color:#4c1111;
-    classDef result fill:#ecfdf3,stroke:#3b8f5f,color:#123524;
-    class EVENT,INGRESS event;
-    class PG queue;
-    class W1,W2,W3 worker;
-    class P1,P2,P3 partner;
-    class RESULT result;
+    class PROD,API,REG ingress;
+    class DISC,SCHED,WORK,PROTECT,RETAIN runtime;
+    class WH,EV,DV,CL,AT,DL,HIST db;
+    class PARTNER partner;

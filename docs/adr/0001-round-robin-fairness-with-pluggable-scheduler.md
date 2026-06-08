@@ -1,5 +1,8 @@
 # Weighted round-robin fairness with a pluggable Scheduler interface
 
+Status: Accepted. The default runtime uses equal-share round-robin; SWRR is an
+implemented internal option and is not exposed by the notifier CLI.
+
 ## Context
 
 The Webhook Notifier must prevent Whale Customers from starving Small Customers when Delivery volume is imbalanced. Equal-share round-robin solves the PoC requirement, but product has already flagged that Whale vs Small (or paid vs free) Customers will eventually need **differentiated shares** — e.g. paid tiers get more slots per cycle, or a misbehaving Whale gets throttled during an incident. Deficit Round Robin (DRR) is the textbook answer when per-item cost varies, but is overkill while Deliveries are uniform-cost HTTP POSTs.

@@ -1,5 +1,8 @@
 # Retry policy and Delivery lifecycle
 
+Status: Accepted. Claim representation is amended by ADR-0011 and optional
+age-based expiration by ADR-0009.
+
 ## Context
 
 Reliability is one of the three central claims of the Webhook Notifier. The retry shape — how many Attempts, how long apart, when to give up, what counts as terminal — needs to be explicit rather than ad-hoc, because (a) reviewers will probe for specifics and (b) production hardening later will start from these defaults.

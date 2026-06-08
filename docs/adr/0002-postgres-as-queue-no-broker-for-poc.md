@@ -1,5 +1,8 @@
 # Postgres as the queue, no message broker for the PoC
 
+Status: Accepted. Claim storage is amended by ADR-0011 and discovery semantics
+by ADR-0013.
+
 ## Context
 
 The Webhook Notifier needs a durable place to hold Deliveries between Event ingest and worker pickup, plus per-Customer scheduling state. The obvious production-shaped choice is a message broker (Redis Streams, Kafka) keyed by Customer. The obvious PoC-shaped choice is Postgres as both the durable log and the work queue.
@@ -18,8 +21,14 @@ The `Scheduler` interface (ADR-0001) isolates the fairness policy so round-robin
 
 ## Consequences
 
-- Worker pickup is a two-step query inside one transaction: `Scheduler.Pick()` returns the next `customer_id` to serve; the worker then issues `SELECT … FROM deliveries WHERE customer_id = $1 AND status = 'pending' AND next_attempt_at <= now() FOR UPDATE SKIP LOCKED LIMIT 1`. This preserves the fairness ordering while keeping claim atomicity.
+- Worker pickup is two-stage: `Scheduler.Pick()` selects one or more Customer
+  IDs in memory, then the Outbox executes one atomic CTE that locks eligible
+  `deliveries` rows with `FOR UPDATE SKIP LOCKED` and inserts or refreshes
+  `delivery_claims` rows. `ClaimNextBatch` can amortize one query across several
+  Customers while applying a per-Customer candidate cap.
 - The `deliveries` table needs an index on `(customer_id, status, next_attempt_at)` to keep that query cheap.
-- Scheduler state (which Customers have pending work) is derived from a cheap aggregate query — not maintained as separate state — so it never drifts from the Outbox.
+- Scheduler membership is process-local and populated by local/remote wake hints
+  plus periodic DB-backed discovery. Discovery is a claim-agnostic superset
+  hint; the claim query remains authoritative (ADR-0006, ADR-0013).
 - At higher scale, row-lock contention on a single hot Customer would push us toward partitioning or a broker. That trigger is recorded here so it isn't rediscovered the hard way.
 - The bench harness should report `SELECT FOR UPDATE` wait time alongside delivery latency to surface this contention if it appears.

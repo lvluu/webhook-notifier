@@ -20,8 +20,6 @@ import (
 	"github.com/lvluu/webhook-notifier/bench/receiver"
 )
 
-const scalabilityReportPath = "bench/results/scalability.md"
-
 const (
 	scalabilityWorkersPerReplica     = 8
 	scalabilityDeliveryConcurrency   = 16
@@ -176,7 +174,8 @@ func RunScalability(ctx context.Context) error {
 	}
 
 	scaling := scalabilityComputeScalingVerdict(denseRuns)
-	if err := writeScalabilityReport(scalabilityReportPath, profile, sparse, denseRuns, scaling); err != nil {
+	reportPath := benchmarkReportPath("scalability", profile.Name)
+	if err := writeScalabilityReport(reportPath, profile, sparse, denseRuns, scaling); err != nil {
 		return fmt.Errorf("write scalability report: %w", err)
 	}
 
@@ -804,6 +803,20 @@ Profile **%s** runs real notifier OS processes (`+"`go run ./cmd/notifier`"+`) s
 Each replica has unique business/metrics ports and explicit identity (`+"`NOTIFIER_REPLICA_ID`"+`).
 Outbound attempts include `+"`X-Notifier-Replica`"+` only when replica identity is configured.
 
+## Architecture Settings
+
+| Module | Setting in this scenario |
+|---|---|
+| Topology | Real notifier OS processes; replica counts %v; each replica has 8 Workers and DeliveryConcurrency 16 |
+| Database | One shared Postgres database; notifier processes connect directly in the benchmark harness (no PgBouncer) |
+| Scheduler | Equal-share process-local round-robin; weighted scheduling disabled |
+| Wakeups/discovery | PgNotify wakeups enabled by notifier defaults plus DB discovery every 50ms |
+| Claim batching | `+"`MinBatchHint=%d`"+`, `+"`MultiPickCount=%d`"+`, default maximum batch hint 64 |
+| Circuit breaker | Disabled (`+"`breaker_failure_threshold=%d`"+`) so breaker filtering cannot affect scaling |
+| HostLimiter | Enabled with cap 128 per hostname per replica, intentionally high enough not to be the expected bottleneck |
+| Retry | Notifier defaults: 8 attempts, 1s base delay, 5m cap delay; MaxAge disabled |
+| Ingest | Sparse phase uses real HTTP ingest; dense phase pre-seeds Deliveries to isolate delivery-pipeline throughput |
+
 ### Phase 1 — Sparse end-to-end ingest
 
 - %d Small Customers × %d Events each, mixed fast/slow/flaky receivers.
@@ -842,6 +855,8 @@ Outbound attempts include `+"`X-Notifier-Replica`"+` only when replica identity 
 | Replica | Delivered Attempts |
 |---|---:|
 `, profile.Name,
+		profile.ReplicaCounts, profile.MinBatchHint, profile.MultiPickCount,
+		profile.BreakerFailureThreshold,
 		profile.SparseCustomers, profile.SparseEventsPerCustomer,
 		profile.DenseCustomers, profile.DenseDeliveriesPerCustomer,
 		sparse.ReplicaCount,
