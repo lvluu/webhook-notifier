@@ -3,6 +3,7 @@ package breaker
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -11,7 +12,7 @@ import (
 )
 
 // LoadFromDB loads persisted Webhook Circuit Breaker state.
-func LoadFromDB(ctx context.Context, db *sql.DB) (map[string]Snapshot, error) {
+func LoadFromDB(ctx context.Context, db *sql.DB) (snapshots map[string]Snapshot, err error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT id::text, breaker_state, breaker_failure_count,
 		       breaker_cooldown_ms, breaker_next_probe_at,
@@ -21,9 +22,13 @@ func LoadFromDB(ctx context.Context, db *sql.DB) (map[string]Snapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load breaker states: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close rows: %w", closeErr))
+		}
+	}()
 
-	snapshots := make(map[string]Snapshot)
+	snapshots = make(map[string]Snapshot)
 	for rows.Next() {
 		var snapshot Snapshot
 		var cooldownMillis int64
@@ -104,6 +109,7 @@ func (p *AsyncPersister) Sink() TransitionSink {
 		select {
 		case p.ch <- transition:
 		default:
+			observe.IncBreakerSyncFallback()
 			if p.logger != nil {
 				p.logger.Warn("breaker transition persistence queue full; applying transition synchronously",
 					"webhook_id", transition.WebhookID,

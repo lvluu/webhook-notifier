@@ -252,6 +252,19 @@ func TestMetricsEndpoint_returns_nonzero_after_seed(t *testing.T) {
 	requireContains(`webhook_breaker_trips_total{reason="retryable_5xx"} 1`)
 }
 
+func TestIncBreakerSyncFallback_increments_counter(t *testing.T) {
+	ResetMetricsForTest()
+	reg := prometheus.NewRegistry()
+	RegisterMetrics(reg)
+
+	IncBreakerSyncFallback()
+	IncBreakerSyncFallback()
+
+	if got := testutil.ToFloat64(WebhookBreakerSyncFallbackTotal); got != 2 {
+		t.Fatalf("expected WebhookBreakerSyncFallbackTotal = 2, got %v", got)
+	}
+}
+
 func TestCustomerClassFromValue(t *testing.T) {
 	tests := []struct {
 		class uint32
