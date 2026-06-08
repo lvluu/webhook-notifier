@@ -49,9 +49,18 @@ migrate-down:
 build:
     go build ./...
 
-# run unit + integration tests
+# run all tests (unit + integration, requires Docker)
 test:
     go test ./... -race -count=1
+
+# run only unit tests (no Docker needed) — fast feedback (5-10s)
+test-unit:
+    go test -race -count=1 ./cmd/bench ./cmd/chaos ./cmd/webhook-receiver \
+        ./internal/breaker ./internal/chaos ./internal/ingest \
+        ./internal/observe ./internal/pgdsn ./internal/retry \
+        ./internal/scheduler/roundrobin ./internal/scheduler/swrr \
+        ./internal/signer ./internal/worker ./bench/receiver \
+        ./internal/testutil/retention
 
 # run golangci-lint (installs locally if missing)
 lint:
