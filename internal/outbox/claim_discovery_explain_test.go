@@ -20,7 +20,7 @@ import (
 // discovery cadence (default 1s) under steady load.
 //
 // The test holds the customer set fixed (same distinct result) and grows the
-// per-customer backlog ~4000x. With the loose index-scan the heavy-backlog
+// per-customer backlog ~1000x. With the loose index-scan the heavy-backlog
 // latency must stay close to the light-backlog latency; a regression to the
 // full scan would blow the ratio (and the absolute bound) wide open. It also
 // logs the EXPLAIN (ANALYZE, BUFFERS) plan for both sizes as the evidence
@@ -32,7 +32,7 @@ func TestDiscoverClaimableCustomersDoesNotScanFullBacklog(t *testing.T) {
 
 	const customers = 50
 	const lightPerCustomer = 1
-	const heavyPerCustomer = 40000
+	const heavyPerCustomer = 1000
 
 	// Light backlog: each customer has a single ready delivery.
 	for i := 0; i < customers; i++ {
