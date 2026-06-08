@@ -68,10 +68,13 @@ func main() {
 	} else {
 		// The pool serves workers (claim + mark), ingest HTTP goroutines, discovery,
 		// backlog sampler, breaker persister, and archive — so WorkerCount+10 is
-		// too small under load. Use max(25, WorkerCount*3) as a safer default.
+		// too small under load. Cap at 50 to avoid connection storms on Postgres.
 		maxConns := runtimeCfg.WorkerCount * 3
 		if maxConns < 25 {
 			maxConns = 25
+		}
+		if maxConns > 50 {
+			maxConns = 50
 		}
 		dbConn.SetMaxOpenConns(maxConns)
 		dbConn.SetMaxIdleConns(maxConns / 2)

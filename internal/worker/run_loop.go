@@ -34,6 +34,28 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 		return fmt.Errorf("scheduler is required")
 	}
 
+	// Start the persistent goroutine pool.
+	poolCtx, poolCancel := context.WithCancel(context.Background())
+	defer poolCancel()
+
+	w.deliveryPool = make(chan deliveryWork, w.Config.DeliveryConcurrency)
+	for range w.Config.DeliveryConcurrency {
+		go func() {
+			for {
+				select {
+				case <-poolCtx.Done():
+					return
+				case work := <-w.deliveryPool:
+					*work.result = classified{
+						delivery: work.delivery,
+						outcome:  w.classifyDelivery(work.ctx, work.delivery),
+					}
+					work.done()
+				}
+			}
+		}()
+	}
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -62,6 +84,19 @@ func (w *Worker) Run(ctx context.Context, store DeliveryStore) error {
 			case <-t.C:
 			}
 			continue
+		}
+
+		if err := store.FetchPayloads(ctx, deliveries); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if isTransientDBError(err) {
+				if waitErr := w.backoffTransient(ctx, "fetch-payloads", err); waitErr != nil {
+					return waitErr
+				}
+				continue
+			}
+			return fmt.Errorf("fetch payloads: %w", err)
 		}
 
 		if err := w.processDeliveries(ctx, store, deliveries); err != nil {
@@ -235,31 +270,17 @@ func (w *Worker) processDeliveries(ctx context.Context, store DeliveryStore, del
 	}
 
 	results := make([]classified, len(deliveries))
-	work := make(chan int, len(deliveries))
-	for i := range deliveries {
-		work <- i
+	var batchWg sync.WaitGroup
+	batchWg.Add(len(deliveries))
+	for i, d := range deliveries {
+		w.deliveryPool <- deliveryWork{
+			ctx:      ctx,
+			delivery: d,
+			result:   &results[i],
+			done:     batchWg.Done,
+		}
 	}
-	close(work)
-
-	poolSize := w.Config.DeliveryConcurrency
-	if poolSize > len(deliveries) {
-		poolSize = len(deliveries)
-	}
-	var wg sync.WaitGroup
-	wg.Add(poolSize)
-	for range poolSize {
-		go func() {
-			defer wg.Done()
-			for idx := range work {
-				d := deliveries[idx]
-				results[idx] = classified{
-					delivery: d,
-					outcome:  w.classifyDelivery(ctx, d),
-				}
-			}
-		}()
-	}
-	wg.Wait()
+	batchWg.Wait()
 
 	var succeeded, retries, dead []outbox.BatchMarkItem
 	var requeued []string

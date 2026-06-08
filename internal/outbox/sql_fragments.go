@@ -37,7 +37,7 @@ const sqlClaimedDeliveryProjection = `
 	SELECT
 	    d.id, d.event_id, d.webhook_id, d.customer_id,
 	    COALESCE(cust.class, 1),
-	    e.type, e.payload, w.url, w.url_host, w.secret_encrypted,
+	    e.type, w.url, w.url_host, w.secret_encrypted,
 	    'in_flight' AS status,
 	    dc.attempt_number, d.next_attempt_at, dc.claimed_at,
 	    d.last_error, d.created_at, d.updated_at,

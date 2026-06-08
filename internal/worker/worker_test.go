@@ -374,6 +374,10 @@ func (r *recordingDeliveryStore) HasClaimableWork(context.Context, string) (bool
 	return false, nil
 }
 
+func (r *recordingDeliveryStore) FetchPayloads(context.Context, []outbox.Delivery) error {
+	return nil
+}
+
 func (r *recordingDeliveryStore) MarkSucceeded(context.Context, string, int, time.Duration) error {
 	r.succeeded++
 	return nil
@@ -477,6 +481,10 @@ func (s *removeOnEmptyClaimStore) HasClaimableWorkBatch(context.Context, []strin
 	return nil, nil
 }
 
+func (s *removeOnEmptyClaimStore) FetchPayloads(context.Context, []outbox.Delivery) error {
+	return nil
+}
+
 func (s *removeOnEmptyClaimStore) HasClaimableWork(context.Context, string) (bool, error) {
 	s.claimableChecks++
 	s.once.Do(func() {
@@ -537,6 +545,10 @@ func (s *requeueBatchStore) ClaimNextN(context.Context, string, int) ([]outbox.D
 func (s *requeueBatchStore) ClaimNextBatch(context.Context, []string, int) ([]outbox.Delivery, error) {
 	return nil, nil
 }
+func (s *requeueBatchStore) FetchPayloads(context.Context, []outbox.Delivery) error {
+	return nil
+}
+
 func (s *requeueBatchStore) HasClaimableWork(context.Context, string) (bool, error) {
 	return false, nil
 }
@@ -933,6 +945,10 @@ func (s *whaleBatchStore) ClaimNextBatch(_ context.Context, customerIDs []string
 	}
 	s.mu.Unlock()
 	return []outbox.Delivery{s.whaleDelivery}, nil
+}
+
+func (s *whaleBatchStore) FetchPayloads(context.Context, []outbox.Delivery) error {
+	return nil
 }
 
 func (s *whaleBatchStore) HasClaimableWork(context.Context, string) (bool, error) {
