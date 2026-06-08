@@ -47,6 +47,7 @@ type ProcessResult struct {
 type DeliveryStore interface {
 	ClaimNextN(ctx context.Context, customerID string, limit int) ([]outbox.Delivery, error)
 	ClaimNextBatch(ctx context.Context, customerIDs []string, limit int) ([]outbox.Delivery, error)
+	FetchPayloads(ctx context.Context, deliveries []outbox.Delivery) error
 	HasClaimableWork(ctx context.Context, customerID string) (bool, error)
 	HasClaimableWorkBatch(ctx context.Context, customerIDs []string) (map[string]bool, error)
 	MarkSucceeded(ctx context.Context, deliveryID string, statusCode int, duration time.Duration) error
@@ -60,6 +61,15 @@ type DeliveryStore interface {
 	MarkOutcomesBatch(ctx context.Context, succeeded, retries, dead []outbox.BatchMarkItem) error
 }
 
+// deliveryWork is a single classification job sent to the persistent
+// goroutine pool.
+type deliveryWork struct {
+	ctx      context.Context
+	delivery outbox.Delivery
+	result   *classified
+	done     func()
+}
+
 // Worker sends webhook Deliveries and records retry outcomes.
 type Worker struct {
 	HTTP        *http.Client
@@ -69,6 +79,11 @@ type Worker struct {
 	HostLimiter *HostLimiter
 	Logger      *slog.Logger
 	Config      Config
+
+	// deliveryPool is the persistent goroutine pool for classifying
+	// deliveries concurrently. Created in Run and shared across all
+	// processDeliveries calls to avoid per-batch goroutine churn.
+	deliveryPool chan deliveryWork
 
 	// urlHostCache caches URL -> hostname mappings so the fallback parse path
 	// in classifyDelivery does not re-parse the same URL on every attempt.

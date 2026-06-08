@@ -2,9 +2,8 @@ package worker
 
 import (
 	"context"
-	cryptorand "crypto/rand"
 	"fmt"
-	"math/big"
+	"math/rand/v2"
 	"time"
 
 	"github.com/lvluu/webhook-notifier/internal/scheduler"
@@ -147,11 +146,10 @@ func jitterDelay(delay time.Duration) time.Duration {
 	if delay <= 1 {
 		return delay
 	}
-
 	half := delay / 2
-	n, err := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(delay-half)))
-	if err != nil {
+	span := int64(delay - half)
+	if span <= 0 {
 		return delay
 	}
-	return half + time.Duration(n.Int64())
+	return half + time.Duration(rand.Int64N(span))
 }

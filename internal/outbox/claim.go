@@ -19,6 +19,23 @@ func (s *Store) claimCtx(parent context.Context) (context.Context, context.Cance
 	return parent, func() {}
 }
 
+// hasStaleClaims reports whether any delivery_claims row has exceeded the
+// lease duration. This is a cheap EXISTS scan on
+// idx_delivery_claims_stale_by_claimed_at — roughly O(1) and sub-millisecond
+// under normal conditions — and lets callers skip the expensive per-Customer
+// LATERAL stale_candidate CTE when there is nothing to reclaim.
+func (s *Store) hasStaleClaims(ctx context.Context) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM delivery_claims WHERE claimed_at < now() - $1::interval)`,
+		fmt.Sprintf("%d milliseconds", s.claimLease.Milliseconds()),
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("has stale claims: %w", err)
+	}
+	return exists, nil
+}
+
 // ClaimNextBatch claims up to limit ready Deliveries across the given customer
 // IDs. It is a multi-customer generalization of ClaimNextN that amortises the
 // DB round-trip when individual customers are sparse — the sparse-Customer
@@ -64,62 +81,106 @@ func (s *Store) claimNextBatchWithoutBreaker(ctx context.Context, customerIDs []
 	claimStarted := time.Now()
 	perCustomerLimit := perCustomerClaimLimit(limit, len(customerIDs))
 
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		WITH input_customers AS (
-			SELECT DISTINCT customer_id
-			FROM unnest($1::text[]) AS input(customer_id)
-		),
-		ready_candidate AS (
-			SELECT picked.id, picked.attempt_count, picked.next_attempt_at, picked.created_at
-			FROM input_customers ic
-			CROSS JOIN LATERAL (
-				SELECT d.id, d.attempt_count, d.next_attempt_at, d.created_at
-				FROM deliveries d
-				LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
-				WHERE d.customer_id = ic.customer_id
-				  AND %s
-				ORDER BY d.next_attempt_at, d.created_at, d.id
-				LIMIT $4
-				FOR UPDATE OF d SKIP LOCKED
-			) picked
-		),
-		stale_candidate AS (
-			SELECT picked.id, picked.attempt_count, picked.next_attempt_at, picked.created_at
-			FROM input_customers ic
-			CROSS JOIN LATERAL (
-				SELECT d.id, d.attempt_count, d.next_attempt_at, d.created_at
-				FROM delivery_claims dc
-				JOIN deliveries d ON d.id = dc.delivery_id
-				WHERE d.customer_id = ic.customer_id
-				  AND %s
-				ORDER BY d.next_attempt_at, d.created_at, d.id
-				LIMIT $4
-				FOR UPDATE OF d SKIP LOCKED
-			) picked
-		),
-		candidate_pool AS (
-			SELECT id, attempt_count, next_attempt_at, created_at
-			FROM ready_candidate
-			UNION ALL
-			SELECT id, attempt_count, next_attempt_at, created_at
-			FROM stale_candidate
-		),
-		candidate AS (
-			SELECT id, attempt_count
-			FROM candidate_pool
-			ORDER BY next_attempt_at, created_at, id
-			LIMIT $3
-		),
-		claimed AS (
-			INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
-			SELECT c.id, c.attempt_count + 1, now()
-			FROM candidate c
-			ON CONFLICT (delivery_id) DO UPDATE
-			    SET attempt_number = EXCLUDED.attempt_number,
-			        claimed_at = now()
-			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
-			RETURNING delivery_id, attempt_number, claimed_at
-		)%s`, sqlReady, s.staleSQL, sqlClaimedDeliveryProjection), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
+	hasStale, err := s.hasStaleClaims(ctx)
+	if err != nil {
+		hasStale = true
+	}
+
+	var rows *sql.Rows
+	if hasStale {
+		rows, err = s.db.QueryContext(ctx, fmt.Sprintf(`
+			WITH input_customers AS (
+				SELECT DISTINCT customer_id
+				FROM unnest($1::text[]) AS input(customer_id)
+			),
+			ready_candidate AS (
+				SELECT picked.id, picked.attempt_count, picked.next_attempt_at, picked.created_at
+				FROM input_customers ic
+				CROSS JOIN LATERAL (
+					SELECT d.id, d.attempt_count, d.next_attempt_at, d.created_at
+					FROM deliveries d
+					LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
+					WHERE d.customer_id = ic.customer_id
+					  AND %s
+					ORDER BY d.next_attempt_at, d.created_at, d.id
+					LIMIT $4
+					FOR UPDATE OF d SKIP LOCKED
+				) picked
+			),
+			stale_candidate AS (
+				SELECT picked.id, picked.attempt_count, picked.next_attempt_at, picked.created_at
+				FROM input_customers ic
+				CROSS JOIN LATERAL (
+					SELECT d.id, d.attempt_count, d.next_attempt_at, d.created_at
+					FROM delivery_claims dc
+					JOIN deliveries d ON d.id = dc.delivery_id
+					WHERE d.customer_id = ic.customer_id
+					  AND %s
+					ORDER BY d.next_attempt_at, d.created_at, d.id
+					LIMIT $4
+					FOR UPDATE OF d SKIP LOCKED
+				) picked
+			),
+			candidate_pool AS (
+				SELECT id, attempt_count, next_attempt_at, created_at
+				FROM ready_candidate
+				UNION ALL
+				SELECT id, attempt_count, next_attempt_at, created_at
+				FROM stale_candidate
+			),
+			candidate AS (
+				SELECT id, attempt_count
+				FROM candidate_pool
+				ORDER BY next_attempt_at, created_at, id
+				LIMIT $3
+			),
+			claimed AS (
+				INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
+				SELECT c.id, c.attempt_count + 1, now()
+				FROM candidate c
+				ON CONFLICT (delivery_id) DO UPDATE
+				    SET attempt_number = EXCLUDED.attempt_number,
+				        claimed_at = now()
+				    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
+				RETURNING delivery_id, attempt_number, claimed_at
+			)%s`, sqlReady, s.staleSQL, sqlClaimedDeliveryProjection), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
+	} else {
+		rows, err = s.db.QueryContext(ctx, fmt.Sprintf(`
+			WITH input_customers AS (
+				SELECT DISTINCT customer_id
+				FROM unnest($1::text[]) AS input(customer_id)
+			),
+			ready_candidate AS (
+				SELECT picked.id, picked.attempt_count, picked.next_attempt_at, picked.created_at
+				FROM input_customers ic
+				CROSS JOIN LATERAL (
+					SELECT d.id, d.attempt_count, d.next_attempt_at, d.created_at
+					FROM deliveries d
+					LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
+					WHERE d.customer_id = ic.customer_id
+					  AND %s
+					ORDER BY d.next_attempt_at, d.created_at, d.id
+					LIMIT $4
+					FOR UPDATE OF d SKIP LOCKED
+				) picked
+			),
+			candidate AS (
+				SELECT id, attempt_count
+				FROM ready_candidate
+				ORDER BY next_attempt_at, created_at, id
+				LIMIT $3
+			),
+			claimed AS (
+				INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
+				SELECT c.id, c.attempt_count + 1, now()
+				FROM candidate c
+				ON CONFLICT (delivery_id) DO UPDATE
+				    SET attempt_number = EXCLUDED.attempt_number,
+				        claimed_at = now()
+				    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
+				RETURNING delivery_id, attempt_number, claimed_at
+			)%s`, sqlReady, sqlClaimedDeliveryProjection), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("cte claim batch: %w", err)
 	}
@@ -144,82 +205,143 @@ func (s *Store) claimNextBatchWithBreaker(ctx context.Context, customerIDs []str
 	claimStarted := time.Now()
 	perCustomerLimit := perCustomerClaimLimit(limit, len(customerIDs))
 
+	hasStale, err := s.hasStaleClaims(ctx)
+	if err != nil {
+		hasStale = true
+	}
+
 	breakerEligible := sqlBreakerEligible
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		WITH input_customers AS (
-			SELECT DISTINCT customer_id
-			FROM unnest($1::text[]) AS input(customer_id)
-		),
-		ready_candidate AS (
-			SELECT picked.id, picked.webhook_id, picked.attempt_count, picked.next_attempt_at, picked.created_at
-			FROM input_customers ic
-			CROSS JOIN LATERAL (
-				SELECT d.id, d.webhook_id, d.attempt_count, d.next_attempt_at, d.created_at
-				FROM deliveries d
-				JOIN webhooks w ON w.id = d.webhook_id
-				LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
-				WHERE d.customer_id = ic.customer_id
-				  AND %s
-				  AND %s
-				ORDER BY d.next_attempt_at, d.created_at, d.id
-				LIMIT $4
-				FOR UPDATE OF d SKIP LOCKED
-			) picked
-		),
-		stale_candidate AS (
-			SELECT picked.id, picked.webhook_id, picked.attempt_count, picked.next_attempt_at, picked.created_at
-			FROM input_customers ic
-			CROSS JOIN LATERAL (
-				SELECT d.id, d.webhook_id, d.attempt_count, d.next_attempt_at, d.created_at
-				FROM delivery_claims dc
-				JOIN deliveries d ON d.id = dc.delivery_id
-				JOIN webhooks w ON w.id = d.webhook_id
-				WHERE d.customer_id = ic.customer_id
-				  AND %s
-				  AND %s
-				ORDER BY d.next_attempt_at, d.created_at, d.id
-				LIMIT $4
-				FOR UPDATE OF d SKIP LOCKED
-			) picked
-		),
-		candidate_pool AS (
-			SELECT id, webhook_id, attempt_count, next_attempt_at, created_at
-			FROM ready_candidate
-			UNION ALL
-			SELECT id, webhook_id, attempt_count, next_attempt_at, created_at
-			FROM stale_candidate
-		),
-		candidate AS (
-			SELECT id, webhook_id, attempt_count
-			FROM candidate_pool
-			ORDER BY next_attempt_at, created_at, id
-			LIMIT $3
-		),
-		probe AS (
-			UPDATE webhooks w
-			SET breaker_state = 'half_open',
-			    breaker_probe_delivery_id = c.id
-			FROM candidate c
-			WHERE w.id = c.webhook_id
-			  AND w.breaker_state = 'open'
-			  AND w.breaker_next_probe_at <= now()
-			RETURNING c.id
-		),
-		claimed AS (
-			INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
-			SELECT c.id, c.attempt_count + 1, now()
-			FROM candidate c
-			JOIN webhooks w ON w.id = c.webhook_id
-			WHERE w.breaker_state = 'closed'
-			   OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = c.id)
-			   OR c.id IN (SELECT id FROM probe)
-			ON CONFLICT (delivery_id) DO UPDATE
-			    SET attempt_number = EXCLUDED.attempt_number,
-			        claimed_at = now()
-			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
-			RETURNING delivery_id, attempt_number, claimed_at
-		)
-		%s`, sqlReady, breakerEligible, s.staleSQL, breakerEligible, sqlClaimedDeliveryProjection), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
+	var rows *sql.Rows
+	if hasStale {
+		rows, err = s.db.QueryContext(ctx, fmt.Sprintf(`
+			WITH input_customers AS (
+				SELECT DISTINCT customer_id
+				FROM unnest($1::text[]) AS input(customer_id)
+			),
+			ready_candidate AS (
+				SELECT picked.id, picked.webhook_id, picked.attempt_count, picked.next_attempt_at, picked.created_at
+				FROM input_customers ic
+				CROSS JOIN LATERAL (
+					SELECT d.id, d.webhook_id, d.attempt_count, d.next_attempt_at, d.created_at
+					FROM deliveries d
+					JOIN webhooks w ON w.id = d.webhook_id
+					LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
+					WHERE d.customer_id = ic.customer_id
+					  AND %s
+					  AND %s
+					ORDER BY d.next_attempt_at, d.created_at, d.id
+					LIMIT $4
+					FOR UPDATE OF d SKIP LOCKED
+				) picked
+			),
+			stale_candidate AS (
+				SELECT picked.id, picked.webhook_id, picked.attempt_count, picked.next_attempt_at, picked.created_at
+				FROM input_customers ic
+				CROSS JOIN LATERAL (
+					SELECT d.id, d.webhook_id, d.attempt_count, d.next_attempt_at, d.created_at
+					FROM delivery_claims dc
+					JOIN deliveries d ON d.id = dc.delivery_id
+					JOIN webhooks w ON w.id = d.webhook_id
+					WHERE d.customer_id = ic.customer_id
+					  AND %s
+					  AND %s
+					ORDER BY d.next_attempt_at, d.created_at, d.id
+					LIMIT $4
+					FOR UPDATE OF d SKIP LOCKED
+				) picked
+			),
+			candidate_pool AS (
+				SELECT id, webhook_id, attempt_count, next_attempt_at, created_at
+				FROM ready_candidate
+				UNION ALL
+				SELECT id, webhook_id, attempt_count, next_attempt_at, created_at
+				FROM stale_candidate
+			),
+			candidate AS (
+				SELECT id, webhook_id, attempt_count
+				FROM candidate_pool
+				ORDER BY next_attempt_at, created_at, id
+				LIMIT $3
+			),
+			probe AS (
+				UPDATE webhooks w
+				SET breaker_state = 'half_open',
+				    breaker_probe_delivery_id = c.id
+				FROM candidate c
+				WHERE w.id = c.webhook_id
+				  AND w.breaker_state = 'open'
+				  AND w.breaker_next_probe_at <= now()
+				RETURNING c.id
+			),
+			claimed AS (
+				INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
+				SELECT c.id, c.attempt_count + 1, now()
+				FROM candidate c
+				JOIN webhooks w ON w.id = c.webhook_id
+				WHERE w.breaker_state = 'closed'
+				   OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = c.id)
+				   OR c.id IN (SELECT id FROM probe)
+				ON CONFLICT (delivery_id) DO UPDATE
+				    SET attempt_number = EXCLUDED.attempt_number,
+				        claimed_at = now()
+				    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
+				RETURNING delivery_id, attempt_number, claimed_at
+			)
+			%s`, sqlReady, breakerEligible, s.staleSQL, breakerEligible, sqlClaimedDeliveryProjection), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
+	} else {
+		rows, err = s.db.QueryContext(ctx, fmt.Sprintf(`
+			WITH input_customers AS (
+				SELECT DISTINCT customer_id
+				FROM unnest($1::text[]) AS input(customer_id)
+			),
+			ready_candidate AS (
+				SELECT picked.id, picked.webhook_id, picked.attempt_count, picked.next_attempt_at, picked.created_at
+				FROM input_customers ic
+				CROSS JOIN LATERAL (
+					SELECT d.id, d.webhook_id, d.attempt_count, d.next_attempt_at, d.created_at
+					FROM deliveries d
+					JOIN webhooks w ON w.id = d.webhook_id
+					LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
+					WHERE d.customer_id = ic.customer_id
+					  AND %s
+					  AND %s
+					ORDER BY d.next_attempt_at, d.created_at, d.id
+					LIMIT $4
+					FOR UPDATE OF d SKIP LOCKED
+				) picked
+			),
+			candidate AS (
+				SELECT id, webhook_id, attempt_count
+				FROM ready_candidate
+				ORDER BY next_attempt_at, created_at, id
+				LIMIT $3
+			),
+			probe AS (
+				UPDATE webhooks w
+				SET breaker_state = 'half_open',
+				    breaker_probe_delivery_id = c.id
+				FROM candidate c
+				WHERE w.id = c.webhook_id
+				  AND w.breaker_state = 'open'
+				  AND w.breaker_next_probe_at <= now()
+				RETURNING c.id
+			),
+			claimed AS (
+				INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
+				SELECT c.id, c.attempt_count + 1, now()
+				FROM candidate c
+				JOIN webhooks w ON w.id = c.webhook_id
+				WHERE w.breaker_state = 'closed'
+				   OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = c.id)
+				   OR c.id IN (SELECT id FROM probe)
+				ON CONFLICT (delivery_id) DO UPDATE
+				    SET attempt_number = EXCLUDED.attempt_number,
+				        claimed_at = now()
+				    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
+				RETURNING delivery_id, attempt_number, claimed_at
+			)
+			%s`, sqlReady, breakerEligible, sqlClaimedDeliveryProjection), customerIDs, s.claimLease.Milliseconds(), limit, perCustomerLimit)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("cte claim batch with breaker: %w", err)
 	}
@@ -272,61 +394,112 @@ func (s *Store) ClaimNextN(ctx context.Context, customerID string, limit int) ([
 	claimStarted := time.Now()
 
 	breakerEligible := sqlBreakerEligible
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		WITH ready_candidate AS (
-			SELECT d.id, d.webhook_id, d.attempt_count
-			FROM deliveries d
-			JOIN webhooks w ON w.id = d.webhook_id
-			LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
-			WHERE d.customer_id = $1
-			  AND %s
-			  AND %s
-			ORDER BY d.next_attempt_at, d.created_at, d.id
-			LIMIT $3
-			FOR UPDATE OF d SKIP LOCKED
-		),
-		stale_candidate AS (
-			SELECT d.id, d.webhook_id, d.attempt_count
-			FROM delivery_claims dc
-			JOIN deliveries d ON d.id = dc.delivery_id
-			JOIN webhooks w ON w.id = d.webhook_id
-			WHERE d.customer_id = $1
-			  AND %s
-			  AND %s
-			ORDER BY d.next_attempt_at, d.created_at, d.id
-			LIMIT $3
-			FOR UPDATE OF d SKIP LOCKED
-		),
-		candidate AS (
-			SELECT * FROM ready_candidate
-			UNION ALL
-			SELECT * FROM stale_candidate
-		),
-		probe AS (
-			UPDATE webhooks w
-			SET breaker_state = 'half_open',
-			    breaker_probe_delivery_id = c.id
-			FROM candidate c
-			WHERE w.id = c.webhook_id
-			  AND w.breaker_state = 'open'
-			  AND w.breaker_next_probe_at <= now()
-			RETURNING c.id
-		),
-		claimed AS (
-			INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
-			SELECT c.id, c.attempt_count + 1, now()
-			FROM candidate c
-			JOIN webhooks w ON w.id = c.webhook_id
-			WHERE w.breaker_state = 'closed'
-			   OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = c.id)
-			   OR c.id IN (SELECT id FROM probe)
-			ON CONFLICT (delivery_id) DO UPDATE
-			    SET attempt_number = EXCLUDED.attempt_number,
-			        claimed_at = now()
-			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
-			RETURNING delivery_id, attempt_number, claimed_at
-		)
-		%s`, sqlReady, breakerEligible, s.staleSQL, breakerEligible, sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
+
+	hasStale, err := s.hasStaleClaims(ctx)
+	if err != nil {
+		hasStale = true
+	}
+
+	var rows *sql.Rows
+	if hasStale {
+		rows, err = s.db.QueryContext(ctx, fmt.Sprintf(`
+			WITH ready_candidate AS (
+				SELECT d.id, d.webhook_id, d.attempt_count
+				FROM deliveries d
+				JOIN webhooks w ON w.id = d.webhook_id
+				LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
+				WHERE d.customer_id = $1
+				  AND %s
+				  AND %s
+				ORDER BY d.next_attempt_at, d.created_at, d.id
+				LIMIT $3
+				FOR UPDATE OF d SKIP LOCKED
+			),
+			stale_candidate AS (
+				SELECT d.id, d.webhook_id, d.attempt_count
+				FROM delivery_claims dc
+				JOIN deliveries d ON d.id = dc.delivery_id
+				JOIN webhooks w ON w.id = d.webhook_id
+				WHERE d.customer_id = $1
+				  AND %s
+				  AND %s
+				ORDER BY d.next_attempt_at, d.created_at, d.id
+				LIMIT $3
+				FOR UPDATE OF d SKIP LOCKED
+			),
+			candidate AS (
+				SELECT * FROM ready_candidate
+				UNION ALL
+				SELECT * FROM stale_candidate
+			),
+			probe AS (
+				UPDATE webhooks w
+				SET breaker_state = 'half_open',
+				    breaker_probe_delivery_id = c.id
+				FROM candidate c
+				WHERE w.id = c.webhook_id
+				  AND w.breaker_state = 'open'
+				  AND w.breaker_next_probe_at <= now()
+				RETURNING c.id
+			),
+			claimed AS (
+				INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
+				SELECT c.id, c.attempt_count + 1, now()
+				FROM candidate c
+				JOIN webhooks w ON w.id = c.webhook_id
+				WHERE w.breaker_state = 'closed'
+				   OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = c.id)
+				   OR c.id IN (SELECT id FROM probe)
+				ON CONFLICT (delivery_id) DO UPDATE
+				    SET attempt_number = EXCLUDED.attempt_number,
+				        claimed_at = now()
+				    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
+				RETURNING delivery_id, attempt_number, claimed_at
+			)
+			%s`, sqlReady, breakerEligible, s.staleSQL, breakerEligible, sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
+	} else {
+		rows, err = s.db.QueryContext(ctx, fmt.Sprintf(`
+			WITH ready_candidate AS (
+				SELECT d.id, d.webhook_id, d.attempt_count
+				FROM deliveries d
+				JOIN webhooks w ON w.id = d.webhook_id
+				LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
+				WHERE d.customer_id = $1
+				  AND %s
+				  AND %s
+				ORDER BY d.next_attempt_at, d.created_at, d.id
+				LIMIT $3
+				FOR UPDATE OF d SKIP LOCKED
+			),
+			candidate AS (
+				SELECT * FROM ready_candidate
+			),
+			probe AS (
+				UPDATE webhooks w
+				SET breaker_state = 'half_open',
+				    breaker_probe_delivery_id = c.id
+				FROM candidate c
+				WHERE w.id = c.webhook_id
+				  AND w.breaker_state = 'open'
+				  AND w.breaker_next_probe_at <= now()
+				RETURNING c.id
+			),
+			claimed AS (
+				INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
+				SELECT c.id, c.attempt_count + 1, now()
+				FROM candidate c
+				JOIN webhooks w ON w.id = c.webhook_id
+				WHERE w.breaker_state = 'closed'
+				   OR (w.breaker_state = 'half_open' AND w.breaker_probe_delivery_id = c.id)
+				   OR c.id IN (SELECT id FROM probe)
+				ON CONFLICT (delivery_id) DO UPDATE
+				    SET attempt_number = EXCLUDED.attempt_number,
+				        claimed_at = now()
+				    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
+				RETURNING delivery_id, attempt_number, claimed_at
+			)
+			%s`, sqlReady, breakerEligible, sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("cte claim: %w", err)
 	}
@@ -350,42 +523,75 @@ func (s *Store) claimNextNWithoutBreaker(ctx context.Context, customerID string,
 	defer cancel()
 	claimStarted := time.Now()
 
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		WITH ready_candidate AS (
-			SELECT d.id, d.attempt_count
-			FROM deliveries d
-			LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
-			WHERE d.customer_id = $1
-			  AND %s
-			ORDER BY d.next_attempt_at, d.created_at, d.id
-			LIMIT $3
-			FOR UPDATE OF d SKIP LOCKED
-		),
-		stale_candidate AS (
-			SELECT d.id, d.attempt_count
-			FROM delivery_claims dc
-			JOIN deliveries d ON d.id = dc.delivery_id
-			WHERE d.customer_id = $1
-			  AND %s
-			ORDER BY d.next_attempt_at, d.created_at, d.id
-			LIMIT $3
-			FOR UPDATE OF d SKIP LOCKED
-		),
-		candidate AS (
-			SELECT * FROM ready_candidate
-			UNION ALL
-			SELECT * FROM stale_candidate
-		),
-		claimed AS (
-			INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
-			SELECT c.id, c.attempt_count + 1, now()
-			FROM candidate c
-			ON CONFLICT (delivery_id) DO UPDATE
-			    SET attempt_number = EXCLUDED.attempt_number,
-			        claimed_at = now()
-			    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
-			RETURNING delivery_id, attempt_number, claimed_at
-		)%s`, sqlReady, s.staleSQL, sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
+	hasStale, err := s.hasStaleClaims(ctx)
+	if err != nil {
+		hasStale = true
+	}
+
+	var rows *sql.Rows
+	if hasStale {
+		rows, err = s.db.QueryContext(ctx, fmt.Sprintf(`
+			WITH ready_candidate AS (
+				SELECT d.id, d.attempt_count
+				FROM deliveries d
+				LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
+				WHERE d.customer_id = $1
+				  AND %s
+				ORDER BY d.next_attempt_at, d.created_at, d.id
+				LIMIT $3
+				FOR UPDATE OF d SKIP LOCKED
+			),
+			stale_candidate AS (
+				SELECT d.id, d.attempt_count
+				FROM delivery_claims dc
+				JOIN deliveries d ON d.id = dc.delivery_id
+				WHERE d.customer_id = $1
+				  AND %s
+				ORDER BY d.next_attempt_at, d.created_at, d.id
+				LIMIT $3
+				FOR UPDATE OF d SKIP LOCKED
+			),
+			candidate AS (
+				SELECT * FROM ready_candidate
+				UNION ALL
+				SELECT * FROM stale_candidate
+			),
+			claimed AS (
+				INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
+				SELECT c.id, c.attempt_count + 1, now()
+				FROM candidate c
+				ON CONFLICT (delivery_id) DO UPDATE
+				    SET attempt_number = EXCLUDED.attempt_number,
+				        claimed_at = now()
+				    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
+				RETURNING delivery_id, attempt_number, claimed_at
+			)%s`, sqlReady, s.staleSQL, sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
+	} else {
+		rows, err = s.db.QueryContext(ctx, fmt.Sprintf(`
+			WITH ready_candidate AS (
+				SELECT d.id, d.attempt_count
+				FROM deliveries d
+				LEFT JOIN delivery_claims dc ON dc.delivery_id = d.id
+				WHERE d.customer_id = $1
+				  AND %s
+				ORDER BY d.next_attempt_at, d.created_at, d.id
+				LIMIT $3
+				FOR UPDATE OF d SKIP LOCKED
+			),
+			candidate AS (
+				SELECT * FROM ready_candidate
+			),
+			claimed AS (
+				INSERT INTO delivery_claims (delivery_id, attempt_number, claimed_at)
+				SELECT c.id, c.attempt_count + 1, now()
+				FROM candidate c
+				ON CONFLICT (delivery_id) DO UPDATE
+				    SET attempt_number = EXCLUDED.attempt_number,
+				        claimed_at = now()
+				    WHERE delivery_claims.claimed_at < now() - ($2 * interval '1 millisecond')
+				RETURNING delivery_id, attempt_number, claimed_at
+			)%s`, sqlReady, sqlClaimedDeliveryProjection), customerID, s.claimLease.Milliseconds(), limit)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("claim without breaker: %w", err)
 	}
@@ -411,7 +617,7 @@ func scanClaimedDeliveries(rows *sql.Rows) ([]Delivery, error) {
 		if err := rows.Scan(
 			&d.ID, &d.EventID, &d.WebhookID, &d.CustomerID,
 			&d.CustomerClass,
-			&d.EventType, &d.Payload, &d.URL, &d.URLHost, &d.Secret,
+			&d.EventType, &d.URL, &d.URLHost, &d.Secret,
 			&d.Status, &d.AttemptNumber, &d.NextAttemptAt, &d.ClaimedAt,
 			&d.LastError, &d.CreatedAt, &d.UpdatedAt,
 			&previousDelayMillis, &d.BreakerProbe,
@@ -427,6 +633,45 @@ func scanClaimedDeliveries(rows *sql.Rows) ([]Delivery, error) {
 		return nil, fmt.Errorf("iterate claimed deliveries: %w", err)
 	}
 	return deliveries, nil
+}
+
+// FetchPayloads batch-loads the events.payload column for the given
+// deliveries. Payload is excluded from the claim query projection because
+// JSONB columns are large, so this explicit fetch is deferred until the
+// worker actually needs the payload to make the webhook POST.
+func (s *Store) FetchPayloads(ctx context.Context, deliveries []Delivery) error {
+	ids := make([]string, len(deliveries))
+	for i, d := range deliveries {
+		ids[i] = d.ID
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT d.id, e.payload
+		FROM unnest($1::text[]) AS delivered(id)
+		JOIN deliveries d ON d.id::uuid = delivered.id::uuid
+		JOIN events e ON e.id = d.event_id
+	`, ids)
+	if err != nil {
+		return fmt.Errorf("fetch payloads: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	byID := make(map[string]*Delivery, len(deliveries))
+	for i := range deliveries {
+		byID[deliveries[i].ID] = &deliveries[i]
+	}
+
+	for rows.Next() {
+		var id string
+		var payload []byte
+		if err := rows.Scan(&id, &payload); err != nil {
+			return fmt.Errorf("scan payload: %w", err)
+		}
+		if d, ok := byID[id]; ok {
+			d.Payload = payload
+		}
+	}
+	return rows.Err()
 }
 
 // DiscoverClaimableCustomers returns up to limit Customer IDs greater than
