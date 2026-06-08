@@ -65,18 +65,22 @@ wait
 echo "    20 whale + 10 small events posted."
 
 # 4. Wait for processing and assert all demo deliveries succeeded.
+# Each customer registration creates 3 webhooks (/hooks/fast, /hooks/slow,
+# /hooks/flaky — see upsertCustomerTx in cmd/notifier/http_handlers.go), so
+# every event fans out to 3 deliveries: 30 events * 3 webhooks = 90 deliveries.
+expected=90
 echo "[4/6] Waiting for delivery processing..."
 for i in $(seq 1 60); do
     succeeded="$("${COMPOSE_CMD[@]}" exec -T postgres psql -U notifier -d notifier -At -c "SELECT COUNT(*) FROM deliveries WHERE customer_id IN ('demo-whale', 'demo-small') AND status = 'succeeded';" | tr -d '[:space:]')"
     total="$("${COMPOSE_CMD[@]}" exec -T postgres psql -U notifier -d notifier -At -c "SELECT COUNT(*) FROM deliveries WHERE customer_id IN ('demo-whale', 'demo-small');" | tr -d '[:space:]')"
-    if [[ "${succeeded}" == "30" && "${total}" == "30" ]]; then
-        echo "    All 30 deliveries succeeded."
+    if [[ "${succeeded}" == "${expected}" && "${total}" == "${expected}" ]]; then
+        echo "    All ${expected} deliveries succeeded."
         break
     fi
     sleep 1
 done
-if [[ "${succeeded:-0}" != "30" || "${total:-0}" != "30" ]]; then
-    echo "    Expected 30 succeeded demo deliveries; got succeeded=${succeeded:-0}, total=${total:-0}." >&2
+if [[ "${succeeded:-0}" != "${expected}" || "${total:-0}" != "${expected}" ]]; then
+    echo "    Expected ${expected} succeeded demo deliveries; got succeeded=${succeeded:-0}, total=${total:-0}." >&2
     exit 1
 fi
 
@@ -101,7 +105,7 @@ SELECT COUNT(*) AS total_attempts FROM delivery_attempts;
 "
 
 echo ""
-echo "Receiver metrics (last 30 deliveries):"
+echo "Receiver metrics (90 deliveries = 30 events x 3 webhooks):"
 curl -fsS http://localhost:9092/metrics 2>/dev/null | grep -E '^webhook_requests_received_total' || echo "    (receiver metrics unavailable)"
 
 echo ""
