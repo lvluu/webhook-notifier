@@ -164,17 +164,18 @@ func persistClosed(ctx context.Context, db *sql.DB, transition Transition) error
 }
 
 func persistOpen(ctx context.Context, db *sql.DB, transition Transition) error {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin breaker open transition: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
+	// Split into two sequential standalone transactions to avoid deadlock with
+	// concurrent worker claim queries.
+	//
+	// Phase 1 — mark the webhook as 'open'. Fast, no delivery-row locks needed.
+	// After this commits, worker claim eligibility filters out this webhook's
+	// deliveries immediately (breaker_state = 'open' in DB), so no new claims
+	// acquire locks on them.
 	nextProbeAt := transition.NextProbeAt
 	if nextProbeAt.IsZero() {
 		nextProbeAt = time.Now().Add(transition.Cooldown)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `
 		UPDATE webhooks
 		SET breaker_state = 'open',
 		    breaker_failure_count = $2,
@@ -186,13 +187,12 @@ func persistOpen(ctx context.Context, db *sql.DB, transition Transition) error {
 	`, transition.WebhookID, transition.FailureCount, nextProbeAt, transition.Cooldown.Milliseconds()); err != nil {
 		return fmt.Errorf("persist breaker open: %w", err)
 	}
-	if err := deferBlockedDeliveries(ctx, tx, []string{transition.WebhookID}); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit breaker open transition: %w", err)
-	}
-	return nil
+
+	// Phase 2 — defer pending deliveries for this webhook. Runs in its own
+	// transaction WITHOUT a webhook-row lock, so there is no lock-order cycle
+	// with in-flight worker claims (workers hold delivery locks, want webhooks;
+	// we want delivery locks but don't hold webhooks → no cycle).
+	return deferBlockedDeliveries(ctx, db, []string{transition.WebhookID})
 }
 
 func persistHalfOpen(ctx context.Context, db *sql.DB, transition Transition) error {
@@ -212,11 +212,11 @@ func persistHalfOpen(ctx context.Context, db *sql.DB, transition Transition) err
 	return nil
 }
 
-func deferBlockedDeliveries(ctx context.Context, tx *sql.Tx, webhookIDs []string) error {
+func deferBlockedDeliveries(ctx context.Context, db *sql.DB, webhookIDs []string) error {
 	if len(webhookIDs) == 0 {
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `
 		UPDATE deliveries d
 		SET next_attempt_at = GREATEST(d.next_attempt_at, w.breaker_next_probe_at),
 		    updated_at = now()
