@@ -20,7 +20,7 @@ func newPostgresDB(t *testing.T, ctx context.Context) *sql.DB {
 
 	ctr, err := postgres.RunContainer(
 		ctx,
-		testcontainers.WithImage("postgres:16-alpine"),
+		testcontainers.WithImage("postgres:17-alpine"),
 		postgres.WithDatabase("notifier"),
 		postgres.WithUsername("notifier"),
 		postgres.WithPassword("notifier"),

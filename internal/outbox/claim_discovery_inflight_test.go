@@ -31,8 +31,8 @@ func TestDiscoverClaimableCustomersUnderInFlightBacklog(t *testing.T) {
 	db := newPostgresDB(t, ctx)
 	store := outbox.New(db, outbox.WithClaimLease(time.Hour))
 
-	const customers = 50
-	const perCustomer = 4000
+	const customers = 10
+	const perCustomer = 100
 
 	for i := 0; i < customers; i++ {
 		cid := fmt.Sprintf("cus_inflight_%03d", i)

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -35,6 +36,74 @@ import (
 )
 
 type integrationStubScheduler struct{}
+
+var (
+	outboxPostgresContainer *postgres.PostgresContainer
+	outboxPostgresAdmin     *sql.DB
+	outboxPostgresURL       *url.URL
+	outboxTestDatabaseID    atomic.Uint64
+)
+
+func TestMain(m *testing.M) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+	ctr, err := postgres.RunContainer(
+		ctx,
+		testcontainers.WithImage("postgres:17-alpine"),
+		postgres.WithDatabase("notifier"),
+		postgres.WithUsername("notifier"),
+		postgres.WithPassword("notifier"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(10*time.Second),
+		),
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "start shared postgres container: %v\n", err)
+		os.Exit(1)
+	}
+	outboxPostgresContainer = ctr
+
+	connString, err := ctr.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "shared postgres connection string: %v\n", err)
+		_ = ctr.Terminate(context.Background())
+		os.Exit(1)
+	}
+	outboxPostgresURL, err = url.Parse(connString)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "parse shared postgres connection string: %v\n", err)
+		_ = ctr.Terminate(context.Background())
+		os.Exit(1)
+	}
+
+	adminURL := *outboxPostgresURL
+	adminURL.Path = "/postgres"
+	outboxPostgresAdmin, err = sql.Open("pgx", adminURL.String())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open shared postgres admin connection: %v\n", err)
+		_ = ctr.Terminate(context.Background())
+		os.Exit(1)
+	}
+	if err := outboxPostgresAdmin.PingContext(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "ping shared postgres admin connection: %v\n", err)
+		_ = outboxPostgresAdmin.Close()
+		_ = ctr.Terminate(context.Background())
+		os.Exit(1)
+	}
+	cancel()
+
+	code := m.Run()
+	_ = outboxPostgresAdmin.Close()
+	if err := outboxPostgresContainer.Terminate(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "terminate shared postgres container: %v\n", err)
+		if code == 0 {
+			code = 1
+		}
+	}
+	os.Exit(code)
+}
 
 func (integrationStubScheduler) Pick(_ context.Context) (scheduler.CustomerID, uint32, bool, error) {
 	return "", 0, false, nil
@@ -1968,39 +2037,24 @@ func TestRequeueBatch_ReturnsInFlightToFailedRetryWithoutAttemptRows(t *testing.
 func newPostgresDB(t *testing.T, ctx context.Context) *sql.DB {
 	t.Helper()
 
-	ctr, err := postgres.RunContainer(
-		ctx,
-		testcontainers.WithImage("postgres:16-alpine"),
-		postgres.WithDatabase("notifier"),
-		postgres.WithUsername("notifier"),
-		postgres.WithPassword("notifier"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).
-				WithStartupTimeout(10*time.Second),
-		),
-	)
-	if err != nil {
-		t.Fatalf("start postgres container: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := ctr.Terminate(ctx); err != nil {
-			t.Errorf("terminate postgres container: %v", err)
-		}
-	})
-
-	connString, err := ctr.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("connection string: %v", err)
+	databaseName := fmt.Sprintf("outbox_test_%d", outboxTestDatabaseID.Add(1))
+	if _, err := outboxPostgresAdmin.ExecContext(ctx, "CREATE DATABASE "+databaseName); err != nil {
+		t.Fatalf("create test database %s: %v", databaseName, err)
 	}
 
-	db, err := sql.Open("pgx", connString)
+	databaseURL := *outboxPostgresURL
+	databaseURL.Path = "/" + databaseName
+
+	db, err := sql.Open("pgx", databaseURL.String())
 	if err != nil {
 		t.Fatalf("open postgres: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := db.Close(); err != nil {
 			t.Errorf("close postgres: %v", err)
+		}
+		if _, err := outboxPostgresAdmin.ExecContext(context.Background(), "DROP DATABASE "+databaseName+" WITH (FORCE)"); err != nil {
+			t.Errorf("drop test database %s: %v", databaseName, err)
 		}
 	})
 
