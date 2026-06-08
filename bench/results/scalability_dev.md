@@ -40,11 +40,11 @@ Outbound attempts include `X-Notifier-Replica` only when replica identity is con
 | Expected Deliveries | 3000 |
 | Terminal Deliveries | 3000 |
 | Duplicate (delivery_id, attempt_number) tuples | 0 |
-| Small P95 first-attempt latency (ms) | 276.48 |
+| Small P95 first-attempt latency (ms) | 275.51 |
 | Small P95 threshold (ms) | 6000.00 |
-| Avg Deliveries per claim query | 1.94 |
-| Avg Deliveries per Customer claim | 0.06 |
-| Empty claim rate | 62.32% |
+| Avg Deliveries per claim query | 2.55 |
+| Avg Deliveries per Customer claim | 0.08 |
+| Empty claim rate | 49.08% |
 
 | Sparse hard gate | Result |
 |---|---|
@@ -57,23 +57,23 @@ Outbound attempts include `X-Notifier-Replica` only when replica identity is con
 
 | Replica | Delivered Attempts |
 |---|---:|
-| replica-1 | 1379 |
-| replica-2 | 1657 |
+| replica-1 | 1583 |
+| replica-2 | 1456 |
 
-Sparse distribution diagnostic: imbalance ratio 1.20x (max/min)
+Sparse distribution diagnostic: imbalance ratio 1.09x (max/min)
 
 ## Dense Phase Summary
 
 | Replicas | Expected Deliveries | Terminal Deliveries | Duration | Throughput (Deliveries/s) | Duplicate Tuples | All Terminal | Duplicates |
 |---:|---:|---:|---:|---:|---:|---|---|
-| 1 | 1000 | 1000 | 253ms | 3953.50 | 0 | **PASS** | **PASS** |
-| 2 | 1000 | 1000 | 1ms | 935808.23 | 0 | **PASS** | **PASS** |
+| 1 | 1000 | 1000 | 809ms | 1236.09 | 0 | **PASS** | **PASS** |
+| 2 | 1000 | 1000 | 709ms | 1409.63 | 0 | **PASS** | **PASS** |
 
 ## Scaling Verdict
 
 | Verdict | Value |
 |---|---|
 | Mode | improvement |
-| Summary | throughput improved 3953.50 -> 935808.23 deliveries/s |
+| Summary | throughput improved 1236.09 -> 1409.63 deliveries/s |
 | Bottleneck (if no improvement/regression) | - |
 | Gate | **PASS** |

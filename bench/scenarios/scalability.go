@@ -302,13 +302,14 @@ func runScalabilityDensePhase(ctx context.Context, db *sql.DB, profile scalabili
 		return scalabilityDenseRun{}, err
 	}
 
+	start := time.Now()
+
 	replicas, err := startScalabilityReplicas(ctx, db, profile, replicaCount)
 	if err != nil {
 		return scalabilityDenseRun{}, err
 	}
 	defer stopScalabilityReplicas(replicas)
 
-	start := time.Now()
 	if err := waitForScalabilityDrain(ctx, db, 12*time.Minute); err != nil {
 		return scalabilityDenseRun{}, err
 	}
