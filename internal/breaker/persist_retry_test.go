@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 
@@ -74,34 +73,18 @@ func newStubDB(t *testing.T, script []error) (*sql.DB, *execStubConn) {
 	return db, conn
 }
 
-func TestDeferBlockedDeliveries_retriesThenSucceeds(t *testing.T) {
+func TestDeferBlockedDeliveries_lockContentionIsBenign(t *testing.T) {
+	// Lock contention (deadlock / lock-not-available) is logged and swallowed,
+	// not retried: Phase 2 is an optimization and the breaker filter already
+	// enforces the open state. Single ExecContext call, nil error returned.
 	deadlock := &pgconn.PgError{Code: "40P01"}
-	db, conn := newStubDB(t, []error{deadlock, deadlock, nil})
+	db, conn := newStubDB(t, []error{deadlock})
 
 	if err := deferBlockedDeliveries(context.Background(), db, []string{"wh_1"}); err != nil {
-		t.Fatalf("expected success after retries, got: %v", err)
+		t.Fatalf("expected lock contention to be swallowed, got: %v", err)
 	}
-	if got := conn.callCount(); got != 3 {
-		t.Fatalf("ExecContext calls = %d, want 3", got)
-	}
-}
-
-func TestDeferBlockedDeliveries_exhaustsRetries(t *testing.T) {
-	deadlock := &pgconn.PgError{Code: "40P01"}
-	db, conn := newStubDB(t, []error{deadlock, deadlock, deadlock})
-
-	err := deferBlockedDeliveries(context.Background(), db, []string{"wh_1"})
-	if err == nil {
-		t.Fatal("expected error after exhausting retries, got nil")
-	}
-	if !errors.Is(err, deadlock) {
-		t.Fatalf("expected wrapped deadlock error, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "after 3 attempts") {
-		t.Fatalf("expected attempt count in message, got: %v", err)
-	}
-	if got := conn.callCount(); got != deferMaxAttempts {
-		t.Fatalf("ExecContext calls = %d, want %d", got, deferMaxAttempts)
+	if got := conn.callCount(); got != 1 {
+		t.Fatalf("ExecContext calls = %d, want 1 (no retry)", got)
 	}
 }
 

@@ -12,15 +12,6 @@ import (
 	"github.com/lvluu/webhook-notifier/internal/observe"
 )
 
-// deferBlockedDeliveries retry policy. Phase 2 of persistOpen can still deadlock
-// (40P01) against in-flight worker completion UPDATEs that touch the same
-// delivery rows; the statement is idempotent and holds no cross-transaction
-// locks, so retrying with exponential backoff (100ms, 200ms) is safe.
-const (
-	deferMaxAttempts = 3
-	deferBaseBackoff = 50 * time.Millisecond
-)
-
 // LoadFromDB loads persisted Webhook Circuit Breaker state.
 func LoadFromDB(ctx context.Context, db *sql.DB) (snapshots map[string]Snapshot, err error) {
 	rows, err := db.QueryContext(ctx, `
@@ -234,34 +225,33 @@ func deferBlockedDeliveries(ctx context.Context, db *sql.DB, webhookIDs []string
 	if len(webhookIDs) == 0 {
 		return nil
 	}
-	var lastErr error
-	for attempt := 0; attempt < deferMaxAttempts; attempt++ {
-		if attempt > 0 {
-			backoff := deferBaseBackoff * time.Duration(1<<attempt)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(backoff):
-			}
+	if _, err := db.ExecContext(ctx, `
+		UPDATE deliveries d
+		SET next_attempt_at = GREATEST(d.next_attempt_at, w.breaker_next_probe_at),
+		    updated_at = now()
+		FROM webhooks w
+		WHERE w.id = ANY($1::uuid[])
+		  AND d.webhook_id = w.id
+		  AND d.status IN ('pending', 'failed_retry')
+		  AND w.breaker_next_probe_at IS NOT NULL
+		  AND d.next_attempt_at < w.breaker_next_probe_at
+	`, webhookIDs); err != nil {
+		// Lock contention here is benign and not retried. This UPDATE is a Phase 2
+		// optimization that merely pushes next_attempt_at past breaker_next_probe_at
+		// so the scheduler stops waking on rows it cannot claim. Phase 1 already
+		// committed breaker_state='open', and the claim-eligibility filter blocks
+		// these deliveries until breaker_next_probe_at <= now() regardless. So on a
+		// deadlock/lock-not-available we log and move on rather than retrying on the
+		// breaker-open hot path; worst case is a few wasted scheduler polls that
+		// self-correct on the next breaker transition.
+		if dberr.IsRetryableLock(err) {
+			slog.Default().Warn("defer blocked deliveries skipped on lock contention; breaker filter still enforced",
+				"webhook_ids", webhookIDs,
+				"error", err,
+			)
+			return nil
 		}
-		if _, err := db.ExecContext(ctx, `
-			UPDATE deliveries d
-			SET next_attempt_at = GREATEST(d.next_attempt_at, w.breaker_next_probe_at),
-			    updated_at = now()
-			FROM webhooks w
-			WHERE w.id = ANY($1::uuid[])
-			  AND d.webhook_id = w.id
-			  AND d.status IN ('pending', 'failed_retry')
-			  AND w.breaker_next_probe_at IS NOT NULL
-			  AND d.next_attempt_at < w.breaker_next_probe_at
-		`, webhookIDs); err != nil {
-			if dberr.IsRetryableLock(err) {
-				lastErr = err
-				continue
-			}
-			return fmt.Errorf("defer blocked deliveries: %w", err)
-		}
-		return nil
+		return fmt.Errorf("defer blocked deliveries: %w", err)
 	}
-	return fmt.Errorf("defer blocked deliveries after %d attempts: %w", deferMaxAttempts, lastErr)
+	return nil
 }

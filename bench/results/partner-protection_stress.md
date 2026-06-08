@@ -22,11 +22,11 @@ stable goroutine count, and healthy-Customer First-Attempt Queue Latency.
 
 | Metric | Control | Dead Partner |
 |---|---:|---:|
-| Duration | 13.856s | 48.236s |
-| Worst healthy Customer p95 First-Attempt Queue Latency | 12229.04 ms | 12975.41 ms |
-| Worst healthy Customer ratio | - | 1.06x |
+| Duration | 13.752s | 48.226s |
+| Worst healthy Customer p95 First-Attempt Queue Latency | 12910.97 ms | 13285.13 ms |
+| Worst healthy Customer ratio | - | 1.03x |
 | Goroutines (baseline to final) | 5 | 5 |
-| Dead-customer Attempts | - | 115 |
+| Dead-customer Attempts | - | 100 |
 | Dead-customer Attempt cap | - | 1000 |
 | Dead-customer pending after breaker open | - | 1000 |
 
