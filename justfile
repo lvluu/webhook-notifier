@@ -210,27 +210,6 @@ stack-status:
     curl -fsS http://localhost:9092/metrics 2>/dev/null | grep '^webhook_requests_received_total' || echo "unavailable"
 
     echo
-    echo "Notifier breaker/retry metrics:"
-    metrics="$(curl -fsS http://localhost:9090/metrics 2>/dev/null || true)"
-    if [[ -z "$metrics" ]]; then
-      echo "  notifier metrics unavailable"
-    else
-      awk '
-        /^webhook_breaker_state\{/ ||
-        /^webhook_breaker_trips_total\{/ ||
-        /^webhook_attempt_total\{/ ||
-        /^webhook_deliveries_total\{/ ||
-        /^webhook_dlq_total\{/ ||
-        /^webhook_pending_deliveries\{/ ||
-        /^webhook_pending_oldest_age_seconds / ||
-        /^webhook_claim_empty_total / ||
-        /^webhook_worker_transient_db_errors_total\{/ {
-          print
-        }
-      ' <<<"$metrics"
-    fi
-
-    echo
     echo "Retry DB snapshot:"
     {{compose}} exec -T postgres psql -U notifier -d notifier -P pager=off -P border=2 -c "
     SELECT
