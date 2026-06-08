@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/lvluu/webhook-notifier/internal/dberr"
 	"github.com/lvluu/webhook-notifier/internal/observe"
 )
 
@@ -164,17 +165,18 @@ func persistClosed(ctx context.Context, db *sql.DB, transition Transition) error
 }
 
 func persistOpen(ctx context.Context, db *sql.DB, transition Transition) error {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin breaker open transition: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
+	// Split into two sequential standalone transactions to avoid deadlock with
+	// concurrent worker claim queries.
+	//
+	// Phase 1 — mark the webhook as 'open'. Fast, no delivery-row locks needed.
+	// After this commits, worker claim eligibility filters out this webhook's
+	// deliveries immediately (breaker_state = 'open' in DB), so no new claims
+	// acquire locks on them.
 	nextProbeAt := transition.NextProbeAt
 	if nextProbeAt.IsZero() {
 		nextProbeAt = time.Now().Add(transition.Cooldown)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `
 		UPDATE webhooks
 		SET breaker_state = 'open',
 		    breaker_failure_count = $2,
@@ -186,13 +188,20 @@ func persistOpen(ctx context.Context, db *sql.DB, transition Transition) error {
 	`, transition.WebhookID, transition.FailureCount, nextProbeAt, transition.Cooldown.Milliseconds()); err != nil {
 		return fmt.Errorf("persist breaker open: %w", err)
 	}
-	if err := deferBlockedDeliveries(ctx, tx, []string{transition.WebhookID}); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit breaker open transition: %w", err)
-	}
-	return nil
+
+	// Phase 2 — defer pending deliveries for this webhook. Runs in its own
+	// transaction WITHOUT a webhook-row lock, so there is no lock-order cycle
+	// with in-flight worker claims (workers hold delivery locks, want webhooks;
+	// we want delivery locks but don't hold webhooks → no cycle).
+	//
+	// Phase 2 is an optimization, not a correctness requirement: after Phase 1
+	// commits, the claim-eligibility filter already excludes this webhook's
+	// deliveries until breaker_next_probe_at (open deliveries are claimable only
+	// when breaker_next_probe_at <= now()). Deferring next_attempt_at merely
+	// stops the scheduler from waking on rows it cannot claim. A Phase 2 failure
+	// is therefore benign — the breaker is already open and enforced — so the
+	// returned error is advisory for observability rather than a rollback signal.
+	return deferBlockedDeliveries(ctx, db, []string{transition.WebhookID})
 }
 
 func persistHalfOpen(ctx context.Context, db *sql.DB, transition Transition) error {
@@ -212,11 +221,11 @@ func persistHalfOpen(ctx context.Context, db *sql.DB, transition Transition) err
 	return nil
 }
 
-func deferBlockedDeliveries(ctx context.Context, tx *sql.Tx, webhookIDs []string) error {
+func deferBlockedDeliveries(ctx context.Context, db *sql.DB, webhookIDs []string) error {
 	if len(webhookIDs) == 0 {
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `
 		UPDATE deliveries d
 		SET next_attempt_at = GREATEST(d.next_attempt_at, w.breaker_next_probe_at),
 		    updated_at = now()
@@ -227,6 +236,21 @@ func deferBlockedDeliveries(ctx context.Context, tx *sql.Tx, webhookIDs []string
 		  AND w.breaker_next_probe_at IS NOT NULL
 		  AND d.next_attempt_at < w.breaker_next_probe_at
 	`, webhookIDs); err != nil {
+		// Lock contention here is benign and not retried. This UPDATE is a Phase 2
+		// optimization that merely pushes next_attempt_at past breaker_next_probe_at
+		// so the scheduler stops waking on rows it cannot claim. Phase 1 already
+		// committed breaker_state='open', and the claim-eligibility filter blocks
+		// these deliveries until breaker_next_probe_at <= now() regardless. So on a
+		// deadlock/lock-not-available we log and move on rather than retrying on the
+		// breaker-open hot path; worst case is a few wasted scheduler polls that
+		// self-correct on the next breaker transition.
+		if dberr.IsRetryableLock(err) {
+			slog.Default().Warn("defer blocked deliveries skipped on lock contention; breaker filter still enforced",
+				"webhook_ids", webhookIDs,
+				"error", err,
+			)
+			return nil
+		}
 		return fmt.Errorf("defer blocked deliveries: %w", err)
 	}
 	return nil
