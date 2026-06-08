@@ -62,7 +62,11 @@ func (r *roundRobin) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bo
 		r.cursor = r.list.Front()
 	}
 
-	customerID := r.cursor.Value.(scheduler.CustomerID)
+	customerID, ok := r.cursor.Value.(scheduler.CustomerID)
+	if !ok {
+		r.cursor = r.cursor.Next()
+		return "", 0, false, nil
+	}
 	r.cursor = r.cursor.Next()
 
 	return customerID, ClaimBatchSize, true, nil

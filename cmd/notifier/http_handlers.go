@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/lvluu/webhook-notifier/internal/ingest"
 )
+
+const maxEventBodySize = 1 << 20 // 1 MB
 
 type ingestSubmitter interface {
 	Submit(context.Context, ingest.Event) (ingest.SubmittedEvent, error)
@@ -31,8 +34,14 @@ func newBusinessHandler(logger *slog.Logger, ing ingestSubmitter, db *sql.DB) ht
 			return
 		}
 
+		r.Body = http.MaxBytesReader(w, r.Body, maxEventBodySize)
 		var raw map[string]json.RawMessage
 		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "invalid json body", http.StatusBadRequest)
 			return
 		}

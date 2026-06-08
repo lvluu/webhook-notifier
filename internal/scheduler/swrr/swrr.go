@@ -90,7 +90,12 @@ func (s *swrr) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bool, er
 
 	for elem := s.active.Front(); elem != nil; {
 		next := elem.Next()
-		id := elem.Value.(scheduler.CustomerID)
+		id, ok := elem.Value.(scheduler.CustomerID)
+		if !ok {
+			s.active.Remove(elem)
+			elem = next
+			continue
+		}
 		w := s.weights.Weight(id)
 		if w == 0 {
 			// Paused customer — evict without touching the entries map.

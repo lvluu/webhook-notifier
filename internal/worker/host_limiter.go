@@ -61,9 +61,12 @@ func NewHostLimiter(cfg HostLimiterConfig) *HostLimiter {
 
 func (h *HostLimiter) semFor(host string) *hostEntry {
 	if v, ok := h.sems.Load(host); ok {
-		entry := v.(*hostEntry)
-		entry.touch()
-		return entry
+		if entry, ok := v.(*hostEntry); ok {
+			entry.touch()
+			return entry
+		}
+		// Unexpected type in semaphore map — delete and fall through to create new entry.
+		h.sems.Delete(host)
 	}
 	entry := &hostEntry{
 		sem: semaphore.NewWeighted(int64(h.cfg.MaxPerHost)),
@@ -71,8 +74,11 @@ func (h *HostLimiter) semFor(host string) *hostEntry {
 	entry.touch()
 	actual, loaded := h.sems.LoadOrStore(host, entry)
 	if loaded {
-		actual.(*hostEntry).touch()
-		return actual.(*hostEntry)
+		if e, ok := actual.(*hostEntry); ok {
+			e.touch()
+			return e
+		}
+		return entry
 	}
 	return entry
 }
@@ -140,9 +146,10 @@ func (h *HostLimiter) RequeueDelay() time.Duration {
 // to prevent unbounded growth in the sems map.
 func (h *HostLimiter) Cleanup(maxAge time.Duration) {
 	h.sems.Range(func(key, value any) bool {
-		entry := value.(*hostEntry)
-		if entry.staleSince(maxAge) {
-			h.sems.Delete(key)
+		if entry, ok := value.(*hostEntry); ok {
+			if entry.staleSince(maxAge) {
+				h.sems.Delete(key)
+			}
 		}
 		return true
 	})

@@ -83,7 +83,11 @@ func (s *DBWeightSource) Weight(customerID scheduler.CustomerID) uint32 {
 		s.mu.Unlock()
 		return w, nil
 	})
-	return v.(uint32)
+	w, ok := v.(uint32)
+	if !ok {
+		return 0
+	}
+	return w
 }
 
 // Refresh invalidates the cache entry for customerID and reloads from DB.
