@@ -1,5 +1,9 @@
 # Repository Guidelines
 
+> **👋 Human reader?** This file configures AI agents (Claude Code). If you just
+> want to build, test, and run the service, read [README.md](README.md) instead.
+> It has the quick-start, commands, and troubleshooting you need.
+
 Webhook Notifier is a Go service that accepts business Events and POSTs
 Webhook Deliveries to Integration Partners with reliability, horizontal
 scalability, and per-Customer fairness.

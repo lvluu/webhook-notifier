@@ -2,16 +2,22 @@
 
 A reliable, horizontally scalable webhook delivery service with per-tenant fair scheduling. Receives business Events from a multi-tenant platform and POSTs them to Integration Partners' configured URLs, with retries, signing, and protection against any one Customer monopolising delivery capacity.
 
+## The Scenario
+
+Your platform has Customers (e.g., an email marketing SaaS). Each Customer uses
+Integration Partners (Slack, Mailchimp, custom APIs) to receive webhook
+notifications when things happen — a subscriber joins, a campaign ends, a
+payment fails. **Webhook Notifier** ensures every partner URL gets a reliable,
+signed HTTP POST, with fair scheduling so one high-volume Customer can't starve
+the others. It also handles retries, circuit breakers for dead partners, and
+per-host concurrency limits.
+
 Design: [docs/DESIGN.md](docs/DESIGN.md) · Requirements: [REQUIREMENTS.md](REQUIREMENTS.md) · Configuration: [docs/CONFIGURATION.md](docs/CONFIGURATION.md) · Vocabulary: [CONTEXT.md](CONTEXT.md) · Decisions: [docs/adr/](docs/adr/)
 
 ## Status
 
 PoC complete. Four dashboard-aligned benchmarks validate Reliability,
 Fairness, Scalability, and Partner Protection.
-
-```bash
-gh issue list --label ready-for-agent --state open
-```
 
 The PRD lives at [#1](https://github.com/lvluu/webhook-notifier/issues/1).
 
@@ -42,16 +48,19 @@ just migrate
 # 4. Build everything
 just build
 
-# 5. Run tests
+# 5. Run unit tests (fast, no Docker needed)
+just test-unit
+
+# 6. Run all tests (including integration, requires Docker running)
 just test
 
-# 6. Lint
+# 7. Lint
 just lint
 
-# 7. Run the e2e demo
+# 8. Run the e2e demo
 just demo
 
-# 8. Tear down
+# 9. Tear down
 just down
 ```
 
@@ -191,8 +200,11 @@ DATABASE_URL=postgres://notifier:notifier@localhost:5432/notifier?sslmode=disabl
 
 ## Demo
 
-`just demo` starts the full dev stack, registers a Whale and Small Customer,
-posts Events, and verifies delivery — all in under 2 minutes.
+`just demo` starts the full dev stack (Docker Compose), registers a Whale and
+Small Customer, posts Events, and verifies delivery — all in under 2 minutes.
+
+Prerequisites: Docker, Docker Compose, and `just` must be installed. No manual
+`just up` or `just migrate` needed — the demo handles everything.
 
 ```
 just demo
@@ -228,6 +240,25 @@ Grafana: `http://localhost:3000` (admin/admin) with the pre-built notifier dashb
 - Strict per-Customer FIFO and multi-region delivery are intentionally out of
   scope.
 
+## Troubleshooting
+
+| Symptom | Likely Cause | Fix |
+|---------|-------------|-----|
+| `just test` hangs or fails with container errors | Docker not running or Postgres already on port 5432 | Start Docker; check `lsof -i :5432` for conflicts |
+| `just migrate` fails with `connection refused` | Postgres not started yet | Run `just up` first and wait for "done" |
+| `just demo` exits with `curl: connection refused` | Docker daemon not running | `docker ps` to verify; start Docker first |
+| `just build` fails with missing packages | Stale `go.mod` | Run `just tidy` to sync dependencies |
+| `just lint` is slow on first run | golangci-lint downloading | First run is normal; subsequent runs are fast |
+| Integration tests flake | Testcontainers pulling Postgres image | Pull manually: `docker pull postgres:16-alpine` |
+
+### Quick health check
+
+```bash
+docker ps | grep notifier     # services running?
+curl -sf localhost:9090/health # notifier alive?
+curl -sf localhost:8080/       # Caddy ingress up?
+```
+
 ## Working across machines
 
 This repo is intentionally machine-portable:
@@ -242,28 +273,25 @@ To pick up work on a new machine:
 ```bash
 git clone <repo>
 cd webhook-notifier
-git config user.name "lvluu"
-git config user.email "luuvanloi@duck.com"
-
-# Optional: restore the agent skill set used in this project from skills-lock.json
-# (only needed if you want the same Matt Pocock skills available to your agent here)
-npx -y skills@latest experimental_install
-
-just up && just migrate && just test
-gh issue list --label ready-for-agent --state open   # see what's next
+just up && just migrate && just test-unit
 ```
 
-### Agent skills
+### See what needs work
 
-This repo uses a pinned set of Matt Pocock engineering/productivity skills (`to-prd`, `to-issues`, `grill-with-docs`, `triage`, `tdd`, etc.) declared in `skills-lock.json`. The lockfile pins each skill's source repo, path, and content hash so the same set is reproducible across machines.
+```bash
+gh issue list --label ready-for-agent --state open
+```
+
+## AI Agent Setup (Claude Code only)
+
+This repo uses a pinned set of agent skills (`to-prd`, `to-issues`, `grill-with-docs`, `triage`, `tdd`, etc.) declared in `skills-lock.json`. Only needed if you use Claude Code with this repo.
 
 ```bash
 npx -y skills@latest experimental_install   # restore from skills-lock.json
 npx -y skills@latest list                   # see what's installed
-npx -y skills@latest update                 # bump to latest + refresh lock
 ```
 
-Per-repo agent configuration (issue tracker, triage labels, domain doc layout) lives in [CLAUDE.md](CLAUDE.md) and [docs/agents/](docs/agents/). Re-run `/setup-matt-pocock-skills` only if you want to switch issue tracker or label vocabulary.
+Agent configuration (issue tracker, triage labels, domain docs) lives in [CLAUDE.md](CLAUDE.md) and [docs/agents/](docs/agents/). Humans can ignore these files.
 
 ## CI
 
