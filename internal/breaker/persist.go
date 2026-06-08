@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/lvluu/webhook-notifier/internal/observe"
@@ -216,18 +217,39 @@ func deferBlockedDeliveries(ctx context.Context, db *sql.DB, webhookIDs []string
 	if len(webhookIDs) == 0 {
 		return nil
 	}
-	if _, err := db.ExecContext(ctx, `
-		UPDATE deliveries d
-		SET next_attempt_at = GREATEST(d.next_attempt_at, w.breaker_next_probe_at),
-		    updated_at = now()
-		FROM webhooks w
-		WHERE w.id = ANY($1::uuid[])
-		  AND d.webhook_id = w.id
-		  AND d.status IN ('pending', 'failed_retry')
-		  AND w.breaker_next_probe_at IS NOT NULL
-		  AND d.next_attempt_at < w.breaker_next_probe_at
-	`, webhookIDs); err != nil {
-		return fmt.Errorf("defer blocked deliveries: %w", err)
+	var lastErr error
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(50*(1<<attempt)) * time.Millisecond):
+			}
+		}
+		if _, err := db.ExecContext(ctx, `
+			UPDATE deliveries d
+			SET next_attempt_at = GREATEST(d.next_attempt_at, w.breaker_next_probe_at),
+			    updated_at = now()
+			FROM webhooks w
+			WHERE w.id = ANY($1::uuid[])
+			  AND d.webhook_id = w.id
+			  AND d.status IN ('pending', 'failed_retry')
+			  AND w.breaker_next_probe_at IS NOT NULL
+			  AND d.next_attempt_at < w.breaker_next_probe_at
+		`, webhookIDs); err != nil {
+			if isRetryableLockError(err) {
+				lastErr = err
+				continue
+			}
+			return fmt.Errorf("defer blocked deliveries: %w", err)
+		}
+		return nil
 	}
-	return nil
+	return fmt.Errorf("defer blocked deliveries after %d attempts: %w", maxAttempts, lastErr)
+}
+
+func isRetryableLockError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "40P01") || strings.Contains(msg, "55P03")
 }
