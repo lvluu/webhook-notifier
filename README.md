@@ -15,6 +15,24 @@ signed HTTP POST, with fair scheduling so one high-volume Customer can't starve
 the others. It also handles retries, circuit breakers for dead partners, and
 per-host concurrency limits.
 
+## Core Vocabulary
+
+Five terms carry the whole design; the rest of the docs build on them:
+
+- **Event** — a business fact for a Customer (e.g. `subscriber.created`). One
+  Event fans out to many Deliveries.
+- **Webhook** — a Customer-owned destination: a POST URL plus the Event types it
+  wants.
+- **Delivery** — the unit of scheduled work: one `(Event × Webhook)` pair, sent
+  as one signed HTTP POST.
+- **Customer** — owner of Webhooks and **the unit of fairness**: scheduling is
+  per-Customer, not per-Webhook.
+- **Integration Partner** — the external system behind a Webhook URL that
+  receives the POST.
+
+Full glossary, including Attempt, Circuit Breaker, and Delivery Expiration, is in
+[CONTEXT.md](CONTEXT.md).
+
 ## Interview Review Path
 
 For a first review, follow this order:

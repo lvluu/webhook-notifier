@@ -105,7 +105,7 @@ SELECT COUNT(*) AS total_attempts FROM delivery_attempts;
 "
 
 echo ""
-echo "Receiver metrics (90 deliveries = 30 events x 3 webhooks):"
+echo "Receiver metrics — total HTTP POSTs received (>= 90; 30 events x 3 webhooks, plus any at-least-once retries):"
 curl -fsS http://localhost:9092/metrics 2>/dev/null | grep -E '^webhook_requests_received_total' || echo "    (receiver metrics unavailable)"
 
 echo ""
