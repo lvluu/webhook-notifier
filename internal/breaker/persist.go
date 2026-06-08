@@ -6,10 +6,19 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
+	"github.com/lvluu/webhook-notifier/internal/dberr"
 	"github.com/lvluu/webhook-notifier/internal/observe"
+)
+
+// deferBlockedDeliveries retry policy. Phase 2 of persistOpen can still deadlock
+// (40P01) against in-flight worker completion UPDATEs that touch the same
+// delivery rows; the statement is idempotent and holds no cross-transaction
+// locks, so retrying with exponential backoff (100ms, 200ms) is safe.
+const (
+	deferMaxAttempts = 3
+	deferBaseBackoff = 50 * time.Millisecond
 )
 
 // LoadFromDB loads persisted Webhook Circuit Breaker state.
@@ -193,6 +202,14 @@ func persistOpen(ctx context.Context, db *sql.DB, transition Transition) error {
 	// transaction WITHOUT a webhook-row lock, so there is no lock-order cycle
 	// with in-flight worker claims (workers hold delivery locks, want webhooks;
 	// we want delivery locks but don't hold webhooks → no cycle).
+	//
+	// Phase 2 is an optimization, not a correctness requirement: after Phase 1
+	// commits, the claim-eligibility filter already excludes this webhook's
+	// deliveries until breaker_next_probe_at (open deliveries are claimable only
+	// when breaker_next_probe_at <= now()). Deferring next_attempt_at merely
+	// stops the scheduler from waking on rows it cannot claim. A Phase 2 failure
+	// is therefore benign — the breaker is already open and enforced — so the
+	// returned error is advisory for observability rather than a rollback signal.
 	return deferBlockedDeliveries(ctx, db, []string{transition.WebhookID})
 }
 
@@ -218,13 +235,13 @@ func deferBlockedDeliveries(ctx context.Context, db *sql.DB, webhookIDs []string
 		return nil
 	}
 	var lastErr error
-	const maxAttempts = 3
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := 0; attempt < deferMaxAttempts; attempt++ {
 		if attempt > 0 {
+			backoff := deferBaseBackoff * time.Duration(1<<attempt)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(time.Duration(50*(1<<attempt)) * time.Millisecond):
+			case <-time.After(backoff):
 			}
 		}
 		if _, err := db.ExecContext(ctx, `
@@ -238,7 +255,7 @@ func deferBlockedDeliveries(ctx context.Context, db *sql.DB, webhookIDs []string
 			  AND w.breaker_next_probe_at IS NOT NULL
 			  AND d.next_attempt_at < w.breaker_next_probe_at
 		`, webhookIDs); err != nil {
-			if isRetryableLockError(err) {
+			if dberr.IsRetryableLock(err) {
 				lastErr = err
 				continue
 			}
@@ -246,10 +263,5 @@ func deferBlockedDeliveries(ctx context.Context, db *sql.DB, webhookIDs []string
 		}
 		return nil
 	}
-	return fmt.Errorf("defer blocked deliveries after %d attempts: %w", maxAttempts, lastErr)
-}
-
-func isRetryableLockError(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "40P01") || strings.Contains(msg, "55P03")
+	return fmt.Errorf("defer blocked deliveries after %d attempts: %w", deferMaxAttempts, lastErr)
 }
