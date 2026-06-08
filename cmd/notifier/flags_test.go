@@ -45,6 +45,9 @@ func TestParseCLIConfig_Defaults(t *testing.T) {
 	if cfg.Runtime.Breaker.MaxCooldown != 15*time.Minute {
 		t.Errorf("Breaker.MaxCooldown: got %s, want 15m", cfg.Runtime.Breaker.MaxCooldown)
 	}
+	if cfg.Pprof {
+		t.Errorf("Pprof: got true, want false (default)")
+	}
 	// The two flags this change adds — defaults must match worker.DefaultConfig
 	// so out-of-the-box behavior is unchanged.
 	if cfg.Runtime.Worker.RequestTimeout != 30*time.Second {
@@ -105,6 +108,15 @@ func TestParseCLIConfig_ParsedWorkerConfigValidates(t *testing.T) {
 		if err := cfg.Runtime.Worker.Validate(); err != nil {
 			t.Errorf("Worker.Validate() for args %v: %v", args, err)
 		}
+	}
+}
+
+func TestParseCLIConfig_Pprof(t *testing.T) {
+	t.Parallel()
+
+	cfg := parseForTest(t, []string{"--pprof"})
+	if !cfg.Pprof {
+		t.Errorf("Pprof: got false, want true after --pprof")
 	}
 }
 

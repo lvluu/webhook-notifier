@@ -89,7 +89,7 @@ func main() {
 	infra := observe.NewInfraServer(observe.InfraServerConfig{
 		Addr:      cliCfg.MetricsAddr,
 		DB:        dbConn,
-		Pprof:     false,
+		Pprof:     cliCfg.Pprof,
 		Collector: promRegistry,
 	})
 	infraErrCh := infra.Start()

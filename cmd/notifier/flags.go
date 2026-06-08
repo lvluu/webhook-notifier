@@ -16,6 +16,7 @@ type cliConfig struct {
 	MetricsAddr string
 	ReplicaID   string
 	MaxConns    int
+	Pprof       bool
 	Runtime     workerRuntimeConfig
 }
 
@@ -45,6 +46,7 @@ func parseCLIConfig(fs *flag.FlagSet, args []string) (cliConfig, error) {
 	breakerThreshold := fs.Int("breaker-threshold", 20, "consecutive Webhook failures before opening the circuit breaker; 0 disables breaker filtering")
 	breakerInitialCooldown := fs.Duration("breaker-initial-cooldown", 5*time.Minute, "initial Webhook circuit breaker cooldown before probe")
 	breakerMaxCooldown := fs.Duration("breaker-max-cooldown", 15*time.Minute, "maximum Webhook circuit breaker cooldown after failed probes")
+	pprofEnable := fs.Bool("pprof", false, "enable pprof debug endpoints on the metrics server")
 
 	if err := fs.Parse(args); err != nil {
 		return cliConfig{}, err
@@ -76,6 +78,7 @@ func parseCLIConfig(fs *flag.FlagSet, args []string) (cliConfig, error) {
 		MetricsAddr: *metricsAddr,
 		ReplicaID:   *replicaID,
 		MaxConns:    *maxConns,
+		Pprof:       *pprofEnable,
 		Runtime:     runtimeCfg,
 	}, nil
 }
