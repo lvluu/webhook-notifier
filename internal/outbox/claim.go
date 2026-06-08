@@ -646,9 +646,10 @@ func (s *Store) FetchPayloads(ctx context.Context, deliveries []Delivery) error 
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT delivered.id, e.payload
-		FROM events e
-		JOIN unnest($1::text[]) AS delivered(id) ON delivered.id::uuid = e.id
+		SELECT d.id, e.payload
+		FROM unnest($1::text[]) AS delivered(id)
+		JOIN deliveries d ON d.id::uuid = delivered.id::uuid
+		JOIN events e ON e.id = d.event_id
 	`, ids)
 	if err != nil {
 		return fmt.Errorf("fetch payloads: %w", err)

@@ -131,13 +131,22 @@ func TestIngestClaimDeliverHappyPath(t *testing.T) {
 		t.Fatalf("delivery count: got %d, want 1", len(submitted.DeliveryIDs))
 	}
 
-	claimed, ok, err := outbox.New(db).ClaimNext(ctx, "cus_1")
+	store := outbox.New(db)
+	claimed, ok, err := store.ClaimNext(ctx, "cus_1")
 	if err != nil {
 		t.Fatalf("ClaimNext: %v", err)
 	}
 	if !ok {
 		t.Fatal("ClaimNext: got no delivery, want one")
 	}
+	// FetchPayloads populates Payload in-place on slice elements (lazy loading
+	// optimization — the claim query no longer projects events.payload). Wrap
+	// the single value in a slice so FetchPayloads can modify it, then extract.
+	claimedSlice := []outbox.Delivery{claimed}
+	if err := store.FetchPayloads(ctx, claimedSlice); err != nil {
+		t.Fatalf("FetchPayloads: %v", err)
+	}
+	claimed = claimedSlice[0]
 	if claimed.Status != outbox.StatusInFlight {
 		t.Fatalf("claimed status: got %q, want %q", claimed.Status, outbox.StatusInFlight)
 	}
