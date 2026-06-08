@@ -117,6 +117,30 @@ func TestBusinessHandler_RequiresExpectedEventShape(t *testing.T) {
 	}
 }
 
+func TestBusinessHandler_RejectsOversizedBody(t *testing.T) {
+	t.Parallel()
+
+	logger := slogDiscard()
+	handler := newBusinessHandler(logger, stubIngestSubmitter{
+		submitFn: func(_ context.Context, _ ingest.Event) (ingest.SubmittedEvent, error) {
+			return ingest.SubmittedEvent{}, nil
+		},
+	}, nil)
+
+	// Build valid JSON body slightly larger than maxEventBodySize (1 MB).
+	oversizeValue := maxEventBodySize + 1024
+	body := `{"customer_id":"cus_1","event_name":"subscriber.created","event_time":"2026-06-08T00:00:00Z","data":"` +
+		strings.Repeat("x", oversizeValue) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/events", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status: got %d, want %d", rr.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
 func TestBusinessHandler_RejectsMissingEventName(t *testing.T) {
 	t.Parallel()
 
@@ -284,6 +308,34 @@ func TestRuntimeGroup_ReportsLabeledErrorsAndRunsCleanup(t *testing.T) {
 	case <-cleaned:
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for runtime group cleanup")
+	}
+
+	select {
+	case <-group.done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for runtime group done")
+	}
+}
+
+func TestRuntimeGroup_PanicRecoveryReportsError(t *testing.T) {
+	t.Parallel()
+
+	group := newRuntimeGroup(context.Background(), slogDiscard(), 1)
+	group.Go("panicking task", func(context.Context) error {
+		panic("something went terribly wrong")
+	})
+	group.Finish()
+
+	select {
+	case err, ok := <-group.errCh:
+		if !ok {
+			t.Fatal("runtime group error channel closed before reporting panic")
+		}
+		if !strings.Contains(err.Error(), "panicking task: panic: something went terribly wrong") {
+			t.Fatalf("runtime group error for panic: got %q, want labeled panic error", err.Error())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for panic recovery error")
 	}
 
 	select {

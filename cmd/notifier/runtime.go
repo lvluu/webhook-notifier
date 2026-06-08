@@ -62,6 +62,11 @@ func (g *runtimeGroup) Go(label string, run func(context.Context) error) {
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				g.report(fmt.Errorf("%s: panic: %v", label, r))
+			}
+		}()
 		err := run(g.ctx)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			g.report(fmt.Errorf("%s: %w", label, err))

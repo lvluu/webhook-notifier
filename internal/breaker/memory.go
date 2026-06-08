@@ -100,11 +100,11 @@ func (m *Memory) RecordFailure(webhookID string, reason string) {
 	case HalfOpen:
 		b.failureCount++
 		cooldown := nextCooldown(b.cooldown, m.config)
-		transition = b.openLocked(webhookID, b.failureCount, cooldown, reason)
+		transition = b.openLocked(webhookID, b.failureCount, cooldown, reason, m.now())
 	case Closed:
 		b.failureCount++
 		if b.failureCount >= m.config.FailureThreshold {
-			transition = b.openLocked(webhookID, b.failureCount, m.config.InitialCooldown, reason)
+			transition = b.openLocked(webhookID, b.failureCount, m.config.InitialCooldown, reason, m.now())
 		}
 	case Open:
 		// Already open: the state transition has been emitted, so avoid making
@@ -166,7 +166,11 @@ func (m *Memory) SetProbeDelivery(webhookID, deliveryID string) {
 func (m *Memory) acquire(webhookID string) *webhookBreaker {
 	for {
 		if existing, ok := m.items.Load(webhookID); ok {
-			b := existing.(*webhookBreaker)
+			b, ok := existing.(*webhookBreaker)
+			if !ok {
+				m.items.Delete(webhookID)
+				continue
+			}
 			b.mu.Lock()
 			if b.deleted {
 				b.mu.Unlock()
@@ -186,7 +190,11 @@ func (m *Memory) acquire(webhookID string) *webhookBreaker {
 		if !loaded {
 			return created
 		}
-		b := actual.(*webhookBreaker)
+		b, ok := actual.(*webhookBreaker)
+		if !ok {
+			m.items.Delete(webhookID)
+			continue
+		}
 		b.mu.Lock()
 		if b.deleted {
 			b.mu.Unlock()
@@ -221,7 +229,10 @@ func (m *Memory) now() time.Time {
 // periodically to prevent unbounded growth in the items map.
 func (m *Memory) Cleanup() {
 	m.items.Range(func(key, value any) bool {
-		b := value.(*webhookBreaker)
+		b, ok := value.(*webhookBreaker)
+		if !ok {
+			return true
+		}
 		b.mu.Lock()
 		// Any idle closed breaker can be evicted safely. Failure history is only
 		// needed while the entry is live; once a webhook has gone idle, recreating
@@ -263,11 +274,11 @@ func (b *webhookBreaker) advanceLocked(now time.Time) {
 	}
 }
 
-func (b *webhookBreaker) openLocked(webhookID string, failureCount int, cooldown time.Duration, reason string) *Transition {
+func (b *webhookBreaker) openLocked(webhookID string, failureCount int, cooldown time.Duration, reason string, now time.Time) *Transition {
 	b.state = Open
 	b.failureCount = failureCount
 	b.cooldown = cooldown
-	b.nextProbeAt = time.Now().Add(cooldown)
+	b.nextProbeAt = now.Add(cooldown)
 	b.probeDeliveryID = ""
 	return &Transition{
 		WebhookID:    webhookID,

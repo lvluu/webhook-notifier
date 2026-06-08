@@ -43,7 +43,11 @@ func (w *Worker) classifyDelivery(ctx context.Context, d outbox.Delivery) delive
 		host := d.URLHost
 		if host == "" {
 			if cached, ok := w.urlHostCache.Load(d.URL); ok {
-				host = cached.(string)
+				if s, ok := cached.(string); ok {
+					host = s
+				} else {
+					w.Logger.Warn("unexpected type in URL host cache", "url", d.URL, "type", fmt.Sprintf("%T", cached))
+				}
 			} else {
 				u, parseErr := url.Parse(d.URL)
 				if parseErr != nil {
@@ -103,7 +107,10 @@ func (w *Worker) classifyDelivery(ctx context.Context, d outbox.Delivery) delive
 	if resp != nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		if closeErr := resp.Body.Close(); closeErr != nil && err == nil {
-			err = fmt.Errorf("close response body: %w", closeErr)
+			w.Logger.Warn("discarding response body close error after successful send",
+				"delivery_id", d.ID,
+				"error", closeErr,
+			)
 		}
 	}
 

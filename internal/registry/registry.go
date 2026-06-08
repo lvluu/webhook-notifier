@@ -127,9 +127,7 @@ func (r *Registry) queryDB(ctx context.Context, customerID string, eventType str
 		}
 		hooks = append(hooks, h)
 	}
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("close webhook rows: %w", err)
-	}
+	defer rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate webhooks: %w", err)
 	}
