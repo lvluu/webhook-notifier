@@ -37,8 +37,8 @@ func TestClaimPayloadLatency(t *testing.T) {
 
 	// Collect query plan stats — with and without payload.
 	type planRow struct {
-		plan     string
-		analyze  string
+		plan    string
+		analyze string
 	}
 	var withPlan, withoutPlan planRow
 
@@ -159,13 +159,6 @@ func TestClaimPayloadLatency(t *testing.T) {
 		(elapsedA / iterations).Round(time.Microsecond))
 }
 
-func formatPerClaim(elapsed time.Duration, count int) string {
-	if count == 0 {
-		return "N/A"
-	}
-	return (elapsed / time.Duration(count)).Round(time.Microsecond).String()
-}
-
 func seedPayloadBenchData(t *testing.T, ctx context.Context, db *sql.DB, customerID string, n int, payloadSize int) string {
 	t.Helper()
 
@@ -209,5 +202,3 @@ func webhookIDForCustomer(t *testing.T, ctx context.Context, db *sql.DB, custome
 func newOutboxStore(db *sql.DB) *outbox.Store {
 	return outbox.New(db, outbox.WithBreakerFiltering(false))
 }
-
-var defaultClaimLeaseMS = int64(5 * time.Minute / time.Millisecond)
