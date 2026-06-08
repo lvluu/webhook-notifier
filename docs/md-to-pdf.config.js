@@ -2,7 +2,7 @@
 // print stylesheet tuned so wide tables wrap inside A4 instead of overflowing.
 module.exports = {
   stylesheet: ['docs/design-pdf.css'],
-  css: '',
+  body_class: 'markdown-body',
   pdf_options: {
     format: 'A4',
     landscape: true,
