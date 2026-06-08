@@ -79,6 +79,7 @@ func TestWeight_KnownCustomer(t *testing.T) {
 	seedCustomer(t, ctx, db, "small", 1)
 
 	ws := dbweights.New(db)
+	t.Cleanup(ws.Stop)
 
 	if w := ws.Weight("whale"); w != 3 {
 		t.Errorf("whale weight = %d, want 3", w)
@@ -94,6 +95,7 @@ func TestWeight_UnknownCustomerDefaultsToOne(t *testing.T) {
 	db := newTestDB(t, ctx)
 
 	ws := dbweights.New(db)
+	t.Cleanup(ws.Stop)
 
 	if w := ws.Weight("nonexistent"); w != 1 {
 		t.Errorf("unknown customer weight = %d, want 1", w)
@@ -107,6 +109,7 @@ func TestWeight_ZeroWeight(t *testing.T) {
 	seedCustomer(t, ctx, db, "paused", 0)
 
 	ws := dbweights.New(db)
+	t.Cleanup(ws.Stop)
 
 	if w := ws.Weight("paused"); w != 0 {
 		t.Errorf("paused customer weight = %d, want 0", w)
@@ -120,6 +123,7 @@ func TestWeight_CachesResult(t *testing.T) {
 	seedCustomer(t, ctx, db, "cached", 5)
 
 	ws := dbweights.New(db)
+	t.Cleanup(ws.Stop)
 
 	// First call hits DB and caches.
 	if w := ws.Weight("cached"); w != 5 {
@@ -141,6 +145,7 @@ func TestWeight_ReloadsAfterCacheTTL(t *testing.T) {
 	seedCustomer(t, ctx, db, "ttl", 5)
 
 	ws := dbweights.New(db, dbweights.WithCacheTTL(time.Millisecond))
+	t.Cleanup(ws.Stop)
 
 	if w := ws.Weight("ttl"); w != 5 {
 		t.Fatalf("first weight = %d, want 5", w)
@@ -161,6 +166,7 @@ func TestWeight_RefreshInvalidatesCache(t *testing.T) {
 	seedCustomer(t, ctx, db, "refreshme", 7)
 
 	ws := dbweights.New(db)
+	t.Cleanup(ws.Stop)
 
 	if w := ws.Weight("refreshme"); w != 7 {
 		t.Fatalf("first weight = %d, want 7", w)
@@ -181,6 +187,7 @@ func TestWeight_EmptyID(t *testing.T) {
 	db := newTestDB(t, ctx)
 
 	ws := dbweights.New(db)
+	t.Cleanup(ws.Stop)
 
 	if w := ws.Weight(""); w != 1 {
 		t.Errorf("empty id weight = %d, want 1", w)
@@ -194,6 +201,7 @@ func TestWeight_ConcurrentAccess(t *testing.T) {
 	seedCustomer(t, ctx, db, "concurrent", 8)
 
 	ws := dbweights.New(db)
+	t.Cleanup(ws.Stop)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {

@@ -38,25 +38,43 @@ func WithCacheTTL(ttl time.Duration) Option {
 // DBWeightSource resolves Customer fairness weights from the customers table,
 // caching results in memory to avoid per-Pick DB queries. Unknown customers
 // default to weight 1. Use Refresh to re-read changed classes.
+//
+// A background goroutine evicts expired cache entries every ttl/4 so the map
+// does not grow unboundedly under high Customer churn. Call Stop to shut the
+// goroutine down cleanly.
 type DBWeightSource struct {
 	db     *sql.DB
 	mu     sync.RWMutex
 	cache  map[scheduler.CustomerID]cachedEntry
 	flight singleflight.Group
 	ttl    time.Duration
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
-// New returns a DBWeightSource backed by db.
+// New returns a DBWeightSource backed by db and starts its background eviction
+// goroutine. Call Stop to shut the goroutine down cleanly.
 func New(db *sql.DB, opts ...Option) *DBWeightSource {
+	ctx, cancel := context.WithCancel(context.Background())
 	s := &DBWeightSource{
-		db:    db,
-		cache: make(map[scheduler.CustomerID]cachedEntry),
-		ttl:   defaultCacheTTL,
+		db:     db,
+		cache:  make(map[scheduler.CustomerID]cachedEntry),
+		ttl:    defaultCacheTTL,
+		ctx:    ctx,
+		cancel: cancel,
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
+	go s.evictLoop()
 	return s
+}
+
+// Stop shuts down the background eviction goroutine. The cache is not flushed;
+// subsequent Weight calls still work but will not evict expired entries until a
+// new DBWeightSource is created.
+func (s *DBWeightSource) Stop() {
+	s.cancel()
 }
 
 // Weight returns the cached or freshly loaded class value for customerID.
@@ -101,6 +119,36 @@ func (s *DBWeightSource) Refresh(customerID scheduler.CustomerID) {
 	s.mu.Lock()
 	s.cache[customerID] = cachedEntry{value: w, fetchedAt: time.Now()}
 	s.mu.Unlock()
+}
+
+// evictLoop periodically removes expired cache entries so the map does not
+// grow unboundedly. Runs at ttl/4 intervals so eviction delay is bounded.
+func (s *DBWeightSource) evictLoop() {
+	interval := s.ttl / 4
+	if interval < time.Second {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			s.evict()
+		}
+	}
+}
+
+func (s *DBWeightSource) evict() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for id, entry := range s.cache {
+		if now.Sub(entry.fetchedAt) >= s.ttl {
+			delete(s.cache, id)
+		}
+	}
 }
 
 func (s *DBWeightSource) loadWeight(customerID scheduler.CustomerID) uint32 {

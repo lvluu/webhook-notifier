@@ -5,6 +5,7 @@ import (
 	"context"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/lvluu/webhook-notifier/internal/scheduler"
 	"github.com/lvluu/webhook-notifier/internal/scheduler/swrr"
@@ -383,6 +384,50 @@ func TestSWRR_ConcurrentNotifyAndPick(t *testing.T) {
 	}
 
 	<-done
+}
+
+// slowWeights simulates a WeightSource backed by a slow store (e.g. DB cache
+// miss) by introducing a delay on every call.
+type slowWeights struct {
+	delay time.Duration
+}
+
+func (s slowWeights) Weight(id scheduler.CustomerID) uint32 {
+	time.Sleep(s.delay)
+	return 1
+}
+
+func TestSWRR_PickDoesNotBlockOnSlowWeightSource(t *testing.T) {
+	t.Parallel()
+
+	// With a slow WeightSource (e.g. DB cache miss in DBWeightSource), Pick
+	// must not call Weight inside the scheduler lock because that stalls all
+	// concurrent Notify/Remove calls. The fix caches the weight on the entry
+	// struct so Pick reads from cache instead of calling Weight for every
+	// active customer.
+	ws := slowWeights{delay: 100 * time.Millisecond}
+	s := swrr.New(ws)
+	s.Notify("cus_A")
+	s.Notify("cus_B")
+
+	ctx := context.Background()
+	start := time.Now()
+	_, _, ok, err := s.Pick(ctx)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Pick: %v", err)
+	}
+	if !ok {
+		t.Fatal("Pick: expected ok=true")
+	}
+
+	// Without the fix, Pick calls Weight(id) for each of 2 active customers
+	// inside s.mu — 2 × 100ms = 200ms minimum.
+	// With the fix, weight is read from cache — << 100ms.
+	if elapsed >= 100*time.Millisecond {
+		t.Errorf("Pick took %v — Weight was likely called inside the scheduler lock", elapsed)
+	}
 }
 
 func TestSWRR_WeightZeroNeverPickedWhilePending(t *testing.T) {

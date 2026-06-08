@@ -1,0 +1,86 @@
+/* Print stylesheet for docs/DESIGN.md -> docs/DESIGN.pdf (md-to-pdf).
+   Layered on top of md-to-pdf's default github-markdown-css. Goal: wide
+   multi-column tables wrap cleanly inside A4 instead of overflowing. */
+
+.markdown-body {
+  font-size: 11px;
+  line-height: 1.45;
+  max-width: none;
+  padding: 0;
+}
+
+.markdown-body h1 { font-size: 22px; }
+.markdown-body h2 {
+  font-size: 16px;
+  margin-top: 1.4em;
+  border-bottom: 1px solid #d0d7de;
+  padding-bottom: 0.2em;
+}
+.markdown-body h3 { font-size: 13px; }
+
+/* Tables: fixed layout + word wrap so long cells never overflow the page. */
+.markdown-body table {
+  display: table;
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 10.5px;
+  line-height: 1.4;
+  margin: 0.8em 0;
+}
+
+.markdown-body table th,
+.markdown-body table td {
+  border: 1px solid #ccc;
+  padding: 5px 8px;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  hyphens: auto;
+}
+
+.markdown-body table th {
+  background: #f2f3f5;
+  font-weight: 600;
+}
+
+.markdown-body table tr:nth-child(2n) {
+  background: #fafbfc;
+}
+
+/* Inline code inside cells must wrap, not force the column wide. */
+.markdown-body table code {
+  font-size: 9.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  background: rgba(175, 184, 193, 0.2);
+  padding: 0.1em 0.3em;
+}
+
+/* Fenced code blocks: wrap long lines instead of clipping. */
+.markdown-body pre {
+  font-size: 9px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.markdown-body pre code { white-space: pre-wrap; }
+
+/* Avoid awkward splits. */
+.markdown-body table,
+.markdown-body tr,
+.markdown-body img,
+.markdown-body pre {
+  page-break-inside: avoid;
+}
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3 {
+  page-break-after: avoid;
+}
+
+.markdown-body img {
+  max-width: 100%;
+  height: auto;
+}

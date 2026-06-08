@@ -89,6 +89,10 @@ diagrams:
           -i "$source" -o "${source%.mmd}.svg"
     done
 
+# generate docs/DESIGN.pdf from docs/DESIGN.md
+design-pdf:
+    npx -y md-to-pdf --config-file docs/md-to-pdf.config.js docs/DESIGN.md
+
 # verify committed SVG diagrams match their Mermaid sources
 diagrams-check:
     #!/usr/bin/env bash

@@ -44,6 +44,7 @@ type swrr struct {
 
 type entry struct {
 	currentWeight int64
+	weight        uint32 // cached from WeightSource; set at Notify time, read by Pick
 	order         uint64
 }
 
@@ -96,16 +97,16 @@ func (s *swrr) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bool, er
 			elem = next
 			continue
 		}
-		w := s.weights.Weight(id)
+		e := s.entryFor(id)
+		w := e.weight
 		if w == 0 {
-			// Paused customer — evict without touching the entries map.
 			s.active.Remove(elem)
 			delete(s.activeIdx, id)
+			delete(s.entries, id)
 			elem = next
 			continue
 		}
 		totalWeight += int64(w)
-		e := s.entryFor(id)
 		e.currentWeight += int64(w)
 		if winnerElem == nil ||
 			e.currentWeight > winnerCW ||
@@ -158,15 +159,21 @@ func (s *swrr) Notify(customerID scheduler.CustomerID) {
 	if customerID == "" {
 		return
 	}
+	// Read weight outside the lock so a slow WeightSource (e.g. DB cache miss
+	// in DBWeightSource) does not stall concurrent Pick, Notify, or Remove.
+	w := s.weights.Weight(customerID)
+	if w == 0 {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.weights.Weight(customerID) == 0 {
-		return
-	}
 	if _, ok := s.activeIdx[customerID]; ok {
+		// Already active — just refresh the cached weight.
+		s.entries[customerID].weight = w
 		return
 	}
-	s.entryFor(customerID)
+	e := s.entryFor(customerID)
+	e.weight = w
 	elem := s.active.PushBack(customerID)
 	s.activeIdx[customerID] = elem
 }
