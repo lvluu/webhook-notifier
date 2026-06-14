@@ -46,6 +46,7 @@ func parseCLIConfig(fs *flag.FlagSet, args []string) (cliConfig, error) {
 	breakerThreshold := fs.Int("breaker-threshold", 20, "consecutive Webhook failures before opening the circuit breaker; 0 disables breaker filtering")
 	breakerInitialCooldown := fs.Duration("breaker-initial-cooldown", 5*time.Minute, "initial Webhook circuit breaker cooldown before probe")
 	breakerMaxCooldown := fs.Duration("breaker-max-cooldown", 15*time.Minute, "maximum Webhook circuit breaker cooldown after failed probes")
+	enableWeightedSched := fs.Bool("enable-weighted-scheduler", false, "use SWRR scheduler with DB-backed customer weights instead of plain round-robin")
 	pprofEnable := fs.Bool("pprof", false, "enable pprof debug endpoints on the metrics server")
 
 	if err := fs.Parse(args); err != nil {
@@ -66,6 +67,7 @@ func parseCLIConfig(fs *flag.FlagSet, args []string) (cliConfig, error) {
 	runtimeCfg.PgNotifyDSN = *pgNotifyDSN
 	runtimeCfg.PgNotifyChannel = *pgNotifyChannel
 	runtimeCfg.Discovery.Interval = *discoveryInterval
+	runtimeCfg.EnableWeightedScheduler = *enableWeightedSched
 	runtimeCfg.Breaker = breaker.NormalizeConfig(breaker.Config{
 		FailureThreshold: *breakerThreshold,
 		InitialCooldown:  *breakerInitialCooldown,
