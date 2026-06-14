@@ -24,13 +24,13 @@ func (s *Store) withInFlightDelivery(ctx context.Context, deliveryID string, mut
 			SELECT id, webhook_id::text
 			FROM deliveries
 			WHERE id = $1
-			FOR UPDATE
+			FOR UPDATE SKIP LOCKED
 		),
 		locked_claim AS (
 			SELECT dc.attempt_number, ld.webhook_id
 			FROM locked_delivery ld
 			JOIN delivery_claims dc ON dc.delivery_id = ld.id
-			FOR UPDATE OF dc
+			FOR UPDATE OF dc SKIP LOCKED
 		)
 		SELECT attempt_number, webhook_id
 		FROM locked_claim

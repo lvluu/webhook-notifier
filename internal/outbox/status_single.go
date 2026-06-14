@@ -208,7 +208,7 @@ func (s *Store) RequeueBatch(ctx context.Context, deliveryIDs []string, delay ti
 			FROM deliveries d
 			JOIN delivery_claims dc ON dc.delivery_id = d.id
 			WHERE d.id = ANY($1)
-			FOR UPDATE OF d, dc
+			FOR UPDATE OF d, dc SKIP LOCKED
 		),
 		deleted AS (
 			DELETE FROM delivery_claims

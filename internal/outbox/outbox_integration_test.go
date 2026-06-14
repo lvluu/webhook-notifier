@@ -2179,6 +2179,60 @@ func appendDeliveryForExistingWebhook(t *testing.T, ctx context.Context, db *sql
 	return deliveryID, nil
 }
 
+// TestMarkOutcomesBatchSkipsLockedDeliveries verifies that the batch mark path
+// uses SKIP LOCKED so it fails fast (count mismatch error) instead of blocking
+// when another transaction (e.g. a stale-claim reclaim) holds a delivery row
+// lock. Without SKIP LOCKED the call blocks until context deadline.
+func TestMarkOutcomesBatchSkipsLockedDeliveries(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	d1 := submitOneDelivery(t, ctx, db, "cus_batch_skip_1")
+
+	store := outbox.New(db, outbox.WithClaimLease(time.Hour))
+
+	_, ok, err := store.ClaimNext(ctx, "cus_batch_skip_1")
+	if err != nil || !ok {
+		t.Fatalf("claim d1: ok=%v err=%v", ok, err)
+	}
+
+	// Simulate another transaction holding the lock on d1's delivery row.
+	blockingTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin blocking tx: %v", err)
+	}
+	defer func() { _ = blockingTx.Rollback() }()
+
+	_, err = blockingTx.ExecContext(ctx, `
+		SELECT 1 FROM deliveries WHERE id = $1 FOR UPDATE
+	`, d1)
+	if err != nil {
+		t.Fatalf("lock delivery row: %v", err)
+	}
+
+	// MarkOutcomesBatch should return a count-mismatch error immediately
+	// (SKIP LOCKED skips the locked row) rather than blocking until deadline.
+	start := time.Now()
+	shortCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	items := []outbox.BatchMarkItem{
+		{DeliveryID: d1, StatusCode: 200, Duration: 50 * time.Millisecond},
+	}
+	err = store.MarkOutcomesBatch(shortCtx, items, nil, nil)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("MarkOutcomesBatch should return count-mismatch error for skipped locked row")
+	}
+	if strings.Contains(err.Error(), "deadline exceeded") || strings.Contains(err.Error(), "timeout") {
+		t.Fatalf("MarkOutcomesBatch blocked instead of failing fast: %v", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("MarkOutcomesBatch took %v; expected immediate return with SKIP LOCKED", elapsed)
+	}
+}
+
 func assertWebhookBreaker(t *testing.T, ctx context.Context, db *sql.DB, deliveryID, wantState string, wantFailures int) {
 	t.Helper()
 
