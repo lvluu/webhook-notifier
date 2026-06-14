@@ -70,7 +70,7 @@ func (s *Store) MarkSucceededBatch(ctx context.Context, items []BatchMarkItem) e
 			FROM deliveries d
 			JOIN batch b ON d.id = b.id::uuid
 			ORDER BY d.id
-			FOR UPDATE OF d
+			FOR UPDATE OF d SKIP LOCKED
 		),
 		deleted_claims AS (
 			DELETE FROM delivery_claims dc
@@ -134,7 +134,7 @@ func (s *Store) MarkRetryBatch(ctx context.Context, items []BatchMarkItem) error
 			FROM deliveries d
 			JOIN batch b ON d.id = b.id::uuid
 			ORDER BY d.id
-			FOR UPDATE OF d
+			FOR UPDATE OF d SKIP LOCKED
 		),
 		deleted_claims AS (
 			DELETE FROM delivery_claims dc
@@ -201,7 +201,7 @@ func (s *Store) MarkDeadBatch(ctx context.Context, items []BatchMarkItem) error 
 			FROM deliveries d
 			JOIN batch b ON d.id = b.id::uuid
 			ORDER BY d.id
-			FOR UPDATE OF d
+			FOR UPDATE OF d SKIP LOCKED
 		),
 		deleted_claims AS (
 			DELETE FROM delivery_claims dc
@@ -387,7 +387,7 @@ func (s *Store) MarkOutcomesBatch(ctx context.Context, succeeded, retries, dead 
 			FROM deliveries d
 			JOIN batch b ON d.id = b.id
 			ORDER BY d.id
-			FOR UPDATE OF d
+			FOR UPDATE OF d SKIP LOCKED
 		),
 		deleted_claims AS (
 			DELETE FROM delivery_claims dc
