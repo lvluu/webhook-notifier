@@ -2179,6 +2179,56 @@ func appendDeliveryForExistingWebhook(t *testing.T, ctx context.Context, db *sql
 	return deliveryID, nil
 }
 
+// TestWithInFlightDeliverySkipsLockedClaim verifies that withInFlightDelivery
+// uses SKIP LOCKED so that a MarkSucceeded call does not block when another
+// transaction (e.g. a stale-claim reclaim) holds the delivery_claims row lock.
+// Instead it should return immediately with "delivery is not in flight".
+func TestWithInFlightDeliverySkipsLockedClaim(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	deliveryID := submitOneDelivery(t, ctx, db, "cus_skip_locked")
+
+	store := outbox.New(db, outbox.WithClaimLease(time.Hour))
+	claimed, ok, err := store.ClaimNext(ctx, "cus_skip_locked")
+	if err != nil {
+		t.Fatalf("ClaimNext: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNext: got no delivery")
+	}
+	if claimed.ID != deliveryID {
+		t.Fatalf("claimed wrong delivery: got %s, want %s", claimed.ID, deliveryID)
+	}
+
+	// Simulate Worker B holding the claim row lock (stale reclaim in progress).
+	blockingTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin blocking tx: %v", err)
+	}
+	defer func() { _ = blockingTx.Rollback() }()
+
+	_, err = blockingTx.ExecContext(ctx, `
+		SELECT 1 FROM delivery_claims WHERE delivery_id = $1 FOR UPDATE
+	`, deliveryID)
+	if err != nil {
+		t.Fatalf("lock claim row: %v", err)
+	}
+
+	// MarkSucceeded (Worker A) should not block. Use a tight deadline so the
+	// test fails fast if the code still uses plain FOR UPDATE.
+	shortCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+
+	err = store.MarkSucceeded(shortCtx, deliveryID, 200, 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("MarkSucceeded should fail when claim row is locked by another txn")
+	}
+	if !strings.Contains(err.Error(), "not in flight") {
+		t.Fatalf("expected 'not in flight' error, got: %v", err)
+	}
+}
+
 func assertWebhookBreaker(t *testing.T, ctx context.Context, db *sql.DB, deliveryID, wantState string, wantFailures int) {
 	t.Helper()
 
