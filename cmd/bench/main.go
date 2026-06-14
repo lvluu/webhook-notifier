@@ -32,6 +32,8 @@ func main() {
 		err = scenarios.RunFairness(ctx)
 	case "scalability":
 		err = scenarios.RunScalability(ctx)
+	case "tuning":
+		err = scenarios.RunTuning(ctx)
 	case "partner-protection":
 		err = scenarios.RunPartnerProtection(ctx)
 	default:

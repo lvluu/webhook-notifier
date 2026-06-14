@@ -59,6 +59,11 @@ type benchProfileConfig struct {
 	RetryBaseDelay             durationValue `yaml:"retry_base_delay"`
 	RetryCapDelay              durationValue `yaml:"retry_cap_delay"`
 	FairnessRatioLimit         float64       `yaml:"fairness_ratio_limit"`
+
+	DeliveryConcurrencyValues []int `yaml:"delivery_concurrency_values"`
+	MinBatchHintValues        []int `yaml:"min_batch_hint_values"`
+	MaxBatchHintValues        []int `yaml:"max_batch_hint_values"`
+	Customers                 int   `yaml:"customers"`
 }
 
 type durationValue time.Duration

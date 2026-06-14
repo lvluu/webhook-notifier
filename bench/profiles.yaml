@@ -88,6 +88,33 @@ scenarios:
       breaker_failure_threshold: 2
       breaker_initial_cooldown: 15s
       breaker_max_cooldown: 15s
+  tuning:
+    dev:
+      worker_counts: [16, 32]
+      delivery_concurrency_values: [8, 16]
+      min_batch_hint_values: [8, 32]
+      max_batch_hint_values: [32, 128]
+      customers: 50
+      deliveries_per_customer: 200
+      submit_interval: 5ms
+      request_timeout: 1500ms
+      retry_max_attempts: 10
+      retry_base_delay: 25ms
+      retry_cap_delay: 2s
+      breaker_failure_threshold: 0
+    stress:
+      worker_counts: [16, 32]
+      delivery_concurrency_values: [8, 16]
+      min_batch_hint_values: [8, 32]
+      max_batch_hint_values: [32, 128]
+      customers: 500
+      deliveries_per_customer: 100
+      submit_interval: 1ms
+      request_timeout: 1500ms
+      retry_max_attempts: 10
+      retry_base_delay: 25ms
+      retry_cap_delay: 2s
+      breaker_failure_threshold: 0
   partner_protection:
     dev:
       worker_count: 8
