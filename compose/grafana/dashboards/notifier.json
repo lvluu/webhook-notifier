@@ -228,6 +228,79 @@
               "unit": "s"
             }
           }
+        },
+        {
+          "title": "Attempts Per Delivery",
+          "description": "Average and P95 attempts per delivery at terminal state. Values well above 1 indicate retry amplification — more HTTP POSTs per logical delivery.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 26
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(webhook_attempts_per_delivery_bucket[$__rate_interval])))",
+              "legendFormat": "p95"
+            },
+            {
+              "expr": "sum(rate(webhook_attempts_per_delivery_sum[$__rate_interval])) / clamp_min(sum(rate(webhook_attempts_per_delivery_count[$__rate_interval])), 1)",
+              "legendFormat": "avg"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "thresholdsStyle": {
+                  "mode": "line"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 3 },
+                  { "color": "red", "value": 6 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "title": "Worker Transient DB Errors",
+          "description": "Transient database errors absorbed by workers (backed off and retried), by loop phase. Sustained non-zero rates indicate database instability.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 26
+          },
+          "targets": [
+            {
+              "expr": "sum by (phase) (rate(webhook_worker_transient_db_errors_total[$__rate_interval])) or vector(0)",
+              "legendFormat": "{{phase}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "thresholdsStyle": {
+                  "mode": "line"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "red", "value": 0.1 }
+                ]
+              }
+            }
+          }
         }
       ]
     },
@@ -305,6 +378,28 @@
           "fieldConfig": {
             "defaults": {
               "unit": "s"
+            }
+          }
+        },
+        {
+          "title": "Active Customers",
+          "description": "Number of customers with pending deliveries in the scheduler. Compare against queue wait to distinguish 'many customers, fair latency' from 'few customers monopolising workers'.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 27
+          },
+          "targets": [
+            {
+              "expr": "max(webhook_active_customers)",
+              "legendFormat": "active customers"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short"
             }
           }
         }
@@ -552,6 +647,75 @@
               "unit": "ops"
             }
           }
+        },
+        {
+          "title": "Scheduler Pick Duration",
+          "description": "Latency of Scheduler.Pick() calls (p50/p95/p99). Should stay sub-millisecond; rising values indicate O(n) regression in round-robin or stale customer list.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 44
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.5, sum by (le) (rate(webhook_scheduler_pick_duration_seconds_bucket[$__rate_interval])))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(webhook_scheduler_pick_duration_seconds_bucket[$__rate_interval])))",
+              "legendFormat": "p95"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(webhook_scheduler_pick_duration_seconds_bucket[$__rate_interval])))",
+              "legendFormat": "p99"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "thresholdsStyle": {
+                  "mode": "line"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 0.001 },
+                  { "color": "red", "value": 0.01 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "title": "Ingest Fanout Per Event",
+          "description": "Average webhooks created per ingested event. Higher values mean more delivery amplification from a single business event; useful for capacity planning.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 44
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(webhook_ingest_fanout_per_event_sum[$__rate_interval])) / clamp_min(sum(rate(webhook_ingest_fanout_per_event_count[$__rate_interval])), 1)",
+              "legendFormat": "avg fanout"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(webhook_ingest_fanout_per_event_bucket[$__rate_interval])))",
+              "legendFormat": "p95 fanout"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short"
+            }
+          }
         }
       ]
     },
@@ -629,6 +793,84 @@
                   }
                 ]
               }
+            }
+          }
+        },
+        {
+          "title": "Circuit Breaker State",
+          "description": "Current circuit breaker state per webhook. Value 1 marks the active state (closed/open/half-open). Open breakers protect downstream partners from overload.",
+          "type": "state-timeline",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 29
+          },
+          "targets": [
+            {
+              "expr": "webhook_breaker_state == 1",
+              "legendFormat": "{{webhook_id}} {{state}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short"
+            }
+          }
+        },
+        {
+          "title": "Circuit Breaker Trips",
+          "description": "Rate of circuit breaker trips by reason. Non-zero rates indicate downstream partners failing consistently enough to trigger protection.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 29
+          },
+          "targets": [
+            {
+              "expr": "sum by (reason) (rate(webhook_breaker_trips_total[$__rate_interval])) or vector(0)",
+              "legendFormat": "{{reason}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "thresholdsStyle": {
+                  "mode": "line"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "red", "value": 0.01 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "title": "Breaker Sync Fallback",
+          "description": "Rate of breaker persistence queue overflows forcing synchronous DB writes. Non-zero indicates the async queue is undersized or DB persistence is too slow.",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 37
+          },
+          "targets": [
+            {
+              "expr": "rate(webhook_breaker_sync_fallback_total[$__rate_interval]) or vector(0)",
+              "legendFormat": "sync fallback"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops"
             }
           }
         }

@@ -5,7 +5,9 @@ import (
 	"container/list"
 	"context"
 	"sync"
+	"time"
 
+	"github.com/lvluu/webhook-notifier/internal/observe"
 	"github.com/lvluu/webhook-notifier/internal/scheduler"
 )
 
@@ -51,10 +53,14 @@ func (r *roundRobin) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bo
 		return "", 0, false, err
 	}
 
+	start := time.Now()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.list.Len() == 0 {
+		observe.ObserveSchedulerPick(time.Since(start).Seconds())
+		observe.SetActiveCustomers(0)
 		return "", 0, false, nil
 	}
 
@@ -65,10 +71,14 @@ func (r *roundRobin) Pick(ctx context.Context) (scheduler.CustomerID, uint32, bo
 	customerID, ok := r.cursor.Value.(scheduler.CustomerID)
 	if !ok {
 		r.cursor = r.cursor.Next()
+		observe.ObserveSchedulerPick(time.Since(start).Seconds())
+		observe.SetActiveCustomers(float64(r.list.Len()))
 		return "", 0, false, nil
 	}
 	r.cursor = r.cursor.Next()
 
+	observe.ObserveSchedulerPick(time.Since(start).Seconds())
+	observe.SetActiveCustomers(float64(r.list.Len()))
 	return customerID, ClaimBatchSize, true, nil
 }
 
