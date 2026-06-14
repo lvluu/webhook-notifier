@@ -211,6 +211,10 @@ bench-scalability profile="dev":
 bench-partner-protection profile="dev":
     BENCH_PROFILE='{{profile}}' go run ./cmd/bench partner-protection
 
+# Configuration tuning grid: workers × delivery-concurrency × batch hints
+bench-tuning profile="dev":
+    BENCH_PROFILE='{{profile}}' go run ./cmd/bench tuning
+
 # retain terminal deliveries into delivery_history
 delivery-history-retention:
     go run ./cmd/delivery-history-retention
