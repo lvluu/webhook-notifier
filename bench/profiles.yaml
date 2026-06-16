@@ -115,6 +115,31 @@ scenarios:
       retry_base_delay: 25ms
       retry_cap_delay: 2s
       breaker_failure_threshold: 0
+  scheduler_compare:
+    dev:
+      worker_counts: [8, 16]
+      customers: 20
+      deliveries_per_customer: 50
+      request_timeout: 1500ms
+      min_batch_hint: 8
+      multi_pick_count: 32
+      swrr_multi_pick_values: [8, 16, 32]
+      retry_max_attempts: 3
+      retry_base_delay: 25ms
+      retry_cap_delay: 2s
+      breaker_failure_threshold: 0
+    stress:
+      worker_counts: [16, 32, 64]
+      customers: 500
+      deliveries_per_customer: 100
+      request_timeout: 1500ms
+      min_batch_hint: 8
+      multi_pick_count: 32
+      swrr_multi_pick_values: [8, 16, 32]
+      retry_max_attempts: 3
+      retry_base_delay: 25ms
+      retry_cap_delay: 2s
+      breaker_failure_threshold: 0
   partner_protection:
     dev:
       worker_count: 8

@@ -34,6 +34,8 @@ func main() {
 		err = scenarios.RunScalability(ctx)
 	case "tuning":
 		err = scenarios.RunTuning(ctx)
+	case "scheduler-compare":
+		err = scenarios.RunSchedulerCompare(ctx)
 	case "partner-protection":
 		err = scenarios.RunPartnerProtection(ctx)
 	default:

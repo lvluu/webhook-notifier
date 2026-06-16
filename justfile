@@ -215,6 +215,10 @@ bench-partner-protection profile="dev":
 bench-tuning profile="dev":
     BENCH_PROFILE='{{profile}}' go run ./cmd/bench tuning
 
+# round-robin (O(1)) vs SWRR (O(n)) scheduler comparison
+bench-scheduler-compare profile="dev":
+    BENCH_PROFILE='{{profile}}' go run ./cmd/bench scheduler-compare
+
 # retain terminal deliveries into delivery_history
 delivery-history-retention:
     go run ./cmd/delivery-history-retention

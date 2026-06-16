@@ -1,0 +1,1199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Webhook Notifier - Pair Session Presentation</title>
+  <style>
+    /* ===========================================
+       VIEWPORT FITTING: MANDATORY BASE STYLES
+       =========================================== */
+    html, body {
+      height: 100%;
+      overflow-x: hidden;
+    }
+
+    html {
+      scroll-snap-type: y mandatory;
+      scroll-behavior: smooth;
+    }
+
+    .slide {
+      width: 100vw;
+      height: 100vh;
+      height: 100dvh;
+      overflow: hidden;
+      scroll-snap-align: start;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    .slide-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      max-height: 100%;
+      overflow: hidden;
+      padding: var(--slide-padding);
+    }
+
+    :root {
+      --title-size: clamp(1.5rem, 5vw, 4rem);
+      --h2-size: clamp(1.25rem, 3.5vw, 2.5rem);
+      --h3-size: clamp(1rem, 2.5vw, 1.75rem);
+      --body-size: clamp(0.75rem, 1.5vw, 1.125rem);
+      --small-size: clamp(0.65rem, 1vw, 0.875rem);
+
+      --slide-padding: clamp(1rem, 4vw, 4rem);
+      --content-gap: clamp(0.5rem, 2vw, 2rem);
+      --element-gap: clamp(0.25rem, 1vw, 1rem);
+
+      --bg: #f7f8fb;
+      --paper: #ffffff;
+      --ink: #111827;
+      --muted: #5b6472;
+      --line: #d9dee8;
+      --accent: #c1121f;
+      --accent-soft: #fff1f2;
+      --blue: #1f4e79;
+      --green: #16784b;
+      --amber: #b45309;
+      --shadow: 0 18px 45px rgba(17, 24, 39, 0.12);
+    }
+
+    .card, .container, .content-box {
+      max-width: min(90vw, 1000px);
+      max-height: min(80vh, 700px);
+    }
+
+    .feature-list, .bullet-list {
+      gap: clamp(0.4rem, 1vh, 1rem);
+    }
+
+    .feature-list li, .bullet-list li {
+      font-size: var(--body-size);
+      line-height: 1.4;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr));
+      gap: clamp(0.5rem, 1.5vw, 1rem);
+    }
+
+    img, .image-container {
+      max-width: 100%;
+      max-height: min(50vh, 400px);
+      object-fit: contain;
+    }
+
+    @media (max-height: 700px) {
+      :root {
+        --slide-padding: clamp(0.75rem, 3vw, 2rem);
+        --content-gap: clamp(0.4rem, 1.5vw, 1rem);
+        --title-size: clamp(1.25rem, 4.5vw, 2.5rem);
+        --h2-size: clamp(1rem, 3vw, 1.75rem);
+      }
+    }
+
+    @media (max-height: 600px) {
+      :root {
+        --slide-padding: clamp(0.5rem, 2.5vw, 1.5rem);
+        --content-gap: clamp(0.3rem, 1vw, 0.75rem);
+        --title-size: clamp(1.1rem, 4vw, 2rem);
+        --body-size: clamp(0.7rem, 1.2vw, 0.95rem);
+      }
+
+      .nav-dots, .keyboard-hint, .decorative {
+        display: none;
+      }
+    }
+
+    @media (max-height: 500px) {
+      :root {
+        --slide-padding: clamp(0.4rem, 2vw, 1rem);
+        --title-size: clamp(1rem, 3.5vw, 1.5rem);
+        --h2-size: clamp(0.9rem, 2.5vw, 1.25rem);
+        --body-size: clamp(0.65rem, 1vw, 0.85rem);
+      }
+    }
+
+    @media (max-width: 600px) {
+      :root {
+        --title-size: clamp(1.25rem, 7vw, 2.5rem);
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.2s !important;
+      }
+
+      html {
+        scroll-behavior: auto;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Aptos, "Segoe UI", system-ui, -apple-system, sans-serif;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(17, 24, 39, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(17, 24, 39, 0.035) 1px, transparent 1px);
+      background-size: 48px 48px;
+    }
+
+    main {
+      height: 100vh;
+      height: 100dvh;
+      transition: transform 280ms ease;
+      will-change: transform;
+    }
+
+    h1, h2, h3, p {
+      margin: 0;
+    }
+
+    h1 {
+      max-width: 14ch;
+      font-size: var(--title-size);
+      line-height: 0.98;
+      letter-spacing: 0;
+      font-weight: 760;
+    }
+
+    h2 {
+      font-size: var(--h2-size);
+      line-height: 1.05;
+      letter-spacing: 0;
+      font-weight: 760;
+    }
+
+    h3 {
+      font-size: var(--h3-size);
+      line-height: 1.12;
+      letter-spacing: 0;
+      font-weight: 720;
+    }
+
+    p, li {
+      font-size: var(--body-size);
+      line-height: 1.42;
+    }
+
+    ul {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    code {
+      font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      font-size: 0.92em;
+      background: #f1f5f9;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 0.04em 0.3em;
+    }
+
+    strong {
+      font-weight: 820;
+      color: var(--ink);
+    }
+
+    .lead strong,
+    .signal-row p strong,
+    .bullets strong,
+    .card span strong,
+    .table td strong {
+      font-weight: inherit;
+      color: inherit;
+    }
+
+    .slide {
+      background: linear-gradient(180deg, #ffffff 0%, #f7f8fb 100%);
+    }
+
+    .slide::after {
+      content: attr(data-kicker);
+      position: absolute;
+      top: clamp(0.7rem, 2vw, 1.5rem);
+      right: var(--slide-padding);
+      color: var(--muted);
+      font-size: var(--small-size);
+      font-weight: 650;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .eyebrow {
+      color: var(--accent);
+      font-size: var(--small-size);
+      font-weight: 760;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .lead {
+      max-width: 64ch;
+      color: var(--muted);
+      font-size: clamp(0.9rem, 1.7vw, 1.3rem);
+      line-height: 1.35;
+    }
+
+    .title-layout {
+      display: grid;
+      grid-template-columns: 1.05fr 0.95fr;
+      gap: var(--content-gap);
+      align-items: center;
+      height: 100%;
+    }
+
+    .title-panel {
+      display: flex;
+      flex-direction: column;
+      gap: clamp(0.9rem, 2.2vw, 1.8rem);
+    }
+
+    .signal-box {
+      border: 1px solid var(--line);
+      background: var(--paper);
+      box-shadow: var(--shadow);
+      padding: clamp(1rem, 2vw, 1.6rem);
+      display: grid;
+      gap: clamp(0.75rem, 1.5vw, 1rem);
+    }
+
+    .signal-row {
+      display: grid;
+      grid-template-columns: 3.2rem 1fr;
+      gap: clamp(0.7rem, 1.2vw, 1rem);
+      align-items: center;
+      padding-bottom: clamp(0.5rem, 1vw, 0.8rem);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .signal-row:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .num {
+      display: grid;
+      place-items: center;
+      width: clamp(2.1rem, 4vw, 3.1rem);
+      aspect-ratio: 1;
+      border: 2px solid var(--ink);
+      color: var(--ink);
+      font-weight: 780;
+      font-size: var(--body-size);
+      background: white;
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.25fr);
+      gap: var(--content-gap);
+      align-items: center;
+      height: 100%;
+    }
+
+    .copy {
+      display: flex;
+      flex-direction: column;
+      gap: clamp(0.75rem, 1.8vw, 1.4rem);
+    }
+
+    .bullets {
+      display: grid;
+      gap: clamp(0.5rem, 1.1vw, 0.85rem);
+    }
+
+    .bullets li {
+      display: grid;
+      grid-template-columns: 0.75rem 1fr;
+      gap: 0.65rem;
+      color: #263241;
+    }
+
+    .bullets li::before {
+      content: "";
+      width: 0.55rem;
+      height: 0.55rem;
+      margin-top: 0.45em;
+      background: var(--accent);
+    }
+
+    .diagram-frame {
+      width: 100%;
+      min-height: 0;
+      height: min(68vh, 690px);
+      border: 1px solid var(--line);
+      background: var(--paper);
+      box-shadow: var(--shadow);
+      padding: clamp(0.5rem, 1.2vw, 1rem);
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+    }
+
+    .diagram-frame img {
+      width: 100%;
+      height: 100%;
+      max-height: none;
+      object-fit: contain;
+      display: block;
+      min-height: 0;
+    }
+
+    .diagram-first {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: clamp(0.5rem, 1.2vw, 1rem);
+      height: 100%;
+    }
+
+    .diagram-first .diagram-frame {
+      height: auto;
+      min-height: 0;
+    }
+
+    .diagram-first.wide-diagram {
+      grid-template-rows: auto minmax(0, 1fr);
+      gap: clamp(0.35rem, 0.9vw, 0.7rem);
+    }
+
+    .wide-diagram .diagram-frame {
+      max-height: none;
+      padding: clamp(0.25rem, 0.7vw, 0.55rem);
+    }
+
+    .wide-diagram .caption-line h2 {
+      font-size: clamp(1.05rem, 2.4vw, 2rem);
+    }
+
+    .caption-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      align-items: center;
+      color: var(--muted);
+      font-size: var(--small-size);
+    }
+
+    .tag {
+      border: 1px solid var(--line);
+      background: white;
+      padding: 0.35rem 0.55rem;
+      font-size: var(--small-size);
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: clamp(0.7rem, 1.5vw, 1.1rem);
+    }
+
+    .card {
+      max-width: none;
+      border: 1px solid var(--line);
+      background: white;
+      padding: clamp(0.85rem, 1.6vw, 1.25rem);
+      min-height: clamp(7rem, 16vh, 10rem);
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+    }
+
+    .card strong {
+      color: var(--ink);
+      font-size: clamp(0.95rem, 1.6vw, 1.3rem);
+    }
+
+    .card span {
+      color: var(--muted);
+      font-size: var(--body-size);
+      line-height: 1.35;
+    }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: clamp(0.6rem, 1.2vw, 1rem);
+    }
+
+    .metric {
+      border-left: 5px solid var(--accent);
+      background: white;
+      padding: clamp(0.75rem, 1.4vw, 1.1rem);
+      box-shadow: 0 10px 24px rgba(17, 24, 39, 0.08);
+    }
+
+    .metric b {
+      display: block;
+      font-size: clamp(1rem, 2vw, 1.65rem);
+      line-height: 1;
+      margin-bottom: 0.4rem;
+    }
+
+    .metric span {
+      color: var(--muted);
+      font-size: var(--small-size);
+      line-height: 1.25;
+    }
+
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      background: white;
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      font-size: var(--body-size);
+    }
+
+    .table th,
+    .table td {
+      border-bottom: 1px solid var(--line);
+      padding: clamp(0.45rem, 1vw, 0.75rem);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .table th {
+      background: #f1f5f9;
+      font-size: var(--small-size);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .table tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .quote {
+      border-left: 8px solid var(--accent);
+      padding-left: clamp(1rem, 2vw, 1.8rem);
+      max-width: 26ch;
+      font-size: clamp(1.3rem, 3.5vw, 3rem);
+      line-height: 1.08;
+      font-weight: 760;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: clamp(0.45rem, 1vw, 0.8rem);
+      align-items: stretch;
+    }
+
+    .flow div {
+      position: relative;
+      background: white;
+      border: 1px solid var(--line);
+      padding: clamp(0.6rem, 1.2vw, 0.9rem);
+      min-height: clamp(4.5rem, 11vh, 7rem);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      font-weight: 720;
+      font-size: var(--body-size);
+    }
+
+    .flow div:not(:last-child)::after {
+      content: ">";
+      position: absolute;
+      right: calc(-1 * clamp(0.55rem, 1.2vw, 0.9rem));
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--accent);
+      font-weight: 800;
+    }
+
+    .split-hero {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: var(--content-gap);
+      align-items: center;
+      height: 100%;
+    }
+
+    .big-number {
+      font-size: clamp(5rem, 20vw, 15rem);
+      line-height: 0.85;
+      font-weight: 820;
+      color: #e5e7eb;
+    }
+
+    .progress {
+      position: fixed;
+      left: 0;
+      bottom: 0;
+      height: 5px;
+      width: 100%;
+      background: rgba(17, 24, 39, 0.08);
+      z-index: 20;
+    }
+
+    .progress span {
+      display: block;
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      transition: width 220ms ease;
+    }
+
+    .counter {
+      position: fixed;
+      right: clamp(0.8rem, 2vw, 1.4rem);
+      bottom: clamp(0.7rem, 2vw, 1.2rem);
+      z-index: 21;
+      color: var(--muted);
+      font-size: var(--small-size);
+      background: rgba(255, 255, 255, 0.86);
+      border: 1px solid var(--line);
+      padding: 0.25rem 0.45rem;
+    }
+
+    .keyboard-hint {
+      position: fixed;
+      left: clamp(0.8rem, 2vw, 1.4rem);
+      bottom: clamp(0.7rem, 2vw, 1.2rem);
+      z-index: 21;
+      color: var(--muted);
+      font-size: var(--small-size);
+      background: rgba(255, 255, 255, 0.86);
+      border: 1px solid var(--line);
+      padding: 0.25rem 0.45rem;
+    }
+
+    .reveal {
+      opacity: 0;
+      transform: translateY(10px);
+      transition: opacity 320ms ease, transform 320ms ease;
+    }
+
+    .slide.active .reveal.shown {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .slide.active .reveal:nth-child(2) { transition-delay: 60ms; }
+    .slide.active .reveal:nth-child(3) { transition-delay: 120ms; }
+    .slide.active .reveal:nth-child(4) { transition-delay: 180ms; }
+
+    .notes {
+      display: none;
+    }
+
+    @media (max-width: 900px) {
+      .title-layout,
+      .two-col,
+      .split-hero {
+        grid-template-columns: 1fr;
+      }
+
+      .diagram-frame {
+        height: min(52vh, 520px);
+      }
+
+      .cards,
+      .metric-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .flow {
+        grid-template-columns: repeat(3, 1fr);
+      }
+    }
+
+    @media (max-width: 620px) {
+      .cards,
+      .metric-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .card {
+        min-height: auto;
+      }
+
+      .flow {
+        grid-template-columns: 1fr;
+      }
+
+      .flow div {
+        min-height: auto;
+      }
+
+      .flow div:not(:last-child)::after {
+        display: none;
+      }
+
+      .table th,
+      .table td {
+        padding: 0.35rem;
+      }
+    }
+
+    @media (max-height: 560px) and (orientation: landscape) {
+      .lead,
+      .bullets li,
+      .card span,
+      .table {
+        font-size: clamp(0.6rem, 1vw, 0.78rem);
+      }
+
+      .diagram-frame {
+        height: min(58vh, 310px);
+      }
+
+      .card {
+        min-height: clamp(3.8rem, 18vh, 5.5rem);
+        padding: 0.5rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main id="deck" aria-live="polite">
+    <section class="slide active" data-kicker="01 / 15" aria-label="Title">
+      <div class="slide-content title-layout">
+        <div class="title-panel">
+          <p class="eyebrow reveal">Pair session presentation ⚙️</p>
+          <h1 class="reveal">Webhook Notifier</h1>
+          <p class="lead reveal">A webhook delivery system where <strong>reliability</strong>, <strong>scale</strong>, and <strong>fairness</strong> are designed together.</p>
+          <p class="lead reveal"><strong>Go + Postgres.</strong> No broker. Horizontal workers. Queue bullies not invited.</p>
+        </div>
+        <div class="signal-box reveal" aria-label="Presentation thesis">
+          <div class="signal-row"><div class="num">1</div><p><strong>Fairness</strong> is the design center, not an add-on.</p></div>
+          <div class="signal-row"><div class="num">2</div><p><strong>Postgres</strong> handles durable work and worker coordination.</p></div>
+          <div class="signal-row"><div class="num">3</div><p><strong>Benchmarks</strong> prove the trade-offs instead of hiding them.</p></div>
+        </div>
+      </div>
+      <aside class="notes"><ol><li><strong>The easy version of this project is a retry worker.</strong> I built the harder version: a multi-tenant delivery system.</li><li><strong>The main constraint is fairness.</strong> One Whale Customer should not bury Small Customers.</li><li><strong>My design bet is simple:</strong> Go workers, Postgres for durable coordination, no broker for this PoC.</li><li><strong>The talk arc is:</strong> problem, architecture, fairness, reliability, proof, operations, and what I learned.</li></ol></aside>
+    </section>
+
+    <section class="slide" data-kicker="02 / 15" aria-label="Problem">
+      <div class="slide-content">
+        <div class="copy">
+          <p class="eyebrow reveal">The actual problem</p>
+          <h2 class="reveal">Sending HTTP is easy. Keeping tenants fair under load is the hard part.</h2>
+          <div class="cards">
+            <div class="card reveal"><strong>Reliability 🛡️</strong><span>Accepted Events cannot be <strong>silently lost</strong>. Crashed workers cannot orphan Deliveries.</span></div>
+            <div class="card reveal"><strong>Scalability 📈</strong><span>Add replicas without <strong>leader election</strong>, partition assignment, or local durable state.</span></div>
+            <div class="card reveal"><strong>Fairness ⚖️</strong><span>A Whale Customer burst must not <strong>starve</strong> Small Customer Deliveries.</span></div>
+          </div>
+        </div>
+      </div>
+      <aside class="notes"><ol><li><strong>The brief asks for three things:</strong> reliability, horizontal scale, and fair processing.</li><li><strong>Reliability means:</strong> accepted Events cannot silently disappear, even if a worker crashes.</li><li><strong>Scalability means:</strong> I can add replicas without leader election or local durable state.</li><li><strong>Fairness is the hard part:</strong> a Whale Customer burst cannot turn Small Customers into background noise.</li></ol></aside>
+    </section>
+
+    <section class="slide" data-kicker="03 / 15" aria-label="High-level architecture">
+      <div class="slide-content diagram-first wide-diagram">
+        <div class="caption-line reveal"><h2>The system shape</h2><span class="tag">Postgres = queue + coordination point</span></div>
+        <div class="diagram-frame reveal"><img src="animations/excalidraw/01-high-level-arch.png" alt="High-level architecture diagram"></div>
+      </div>
+      <aside class="notes"><ol><li><strong>Start left to right:</strong> an Event enters, ingest fans it out into Delivery rows, workers send HTTP Attempts.</li><li><strong>Postgres is doing two jobs:</strong> durable queue and coordination point.</li><li><strong>Workers are disposable:</strong> if one dies, the durable state is still in Postgres.</li><li><strong>The next question is the key:</strong> how do multiple workers claim work without duplicates or blocking?</li></ol></aside>
+    </section>
+
+    <section class="slide" data-kicker="04 / 15" aria-label="SKIP LOCKED">
+      <div class="slide-content two-col">
+        <div class="copy">
+          <p class="eyebrow reveal">The keystone 🔑</p>
+          <h2 class="reveal">The design bet: let Postgres coordinate workers atomically.</h2>
+          <ul class="bullets reveal">
+            <li>Plain SELECT duplicates work.</li>
+            <li>FOR UPDATE is correct but blocks.</li>
+            <li>SKIP LOCKED skips busy rows and keeps workers moving.</li>
+            <li>Claim rows let stale workers recover atomically.</li>
+          </ul>
+        </div>
+        <div class="diagram-frame reveal"><img src="animations/excalidraw/09-skip-locked-comparison.png" alt="Comparison of SELECT, FOR UPDATE, and SKIP LOCKED"></div>
+      </div>
+      <aside class="notes"><ol><li><strong>This is the keystone slide.</strong> SKIP LOCKED is why Postgres can coordinate workers for this PoC.</li><li><strong>Plain SELECT is broken:</strong> two workers can pick the same Delivery.</li><li><strong>FOR UPDATE is safe but slow:</strong> another worker waits instead of doing useful work.</li><li><strong>SKIP LOCKED is the useful middle:</strong> skip busy rows, claim different work, and keep parallelism.</li></ol></aside>
+    </section>
+
+    <section class="slide" data-kicker="05 / 15" aria-label="Delivery lifecycle">
+      <div class="slide-content diagram-first">
+        <div class="caption-line reveal"><h2>One Event becomes durable work</h2><span class="tag">At-least-once</span></div>
+        <div class="diagram-frame reveal"><img src="animations/excalidraw/02-delivery-lifecycle.png" alt="Delivery lifecycle diagram"></div>
+        <div class="flow reveal" aria-label="Delivery flow">
+          <div>Event accepted</div>
+          <div>Fan-out creates Deliveries</div>
+          <div>Worker claims</div>
+          <div>POST Attempt</div>
+          <div>Success, retry, or DLQ</div>
+        </div>
+      </div>
+      <aside class="notes"><ol><li><strong>Now make the design concrete:</strong> one accepted Event becomes one or more Delivery rows.</li><li><strong>The guarantee is at-least-once:</strong> retries can happen, so partners dedupe with stable Event and Delivery IDs.</li><li><strong>Claimed is not a Delivery status:</strong> claim ownership lives separately in delivery_claims.</li><li><strong>That separation matters:</strong> lifecycle state and worker lease state do not fight each other.</li></ol></aside>
+    </section>
+
+    <section class="slide" data-kicker="06 / 15" aria-label="Fair scheduling">
+      <div class="slide-content two-col">
+        <div class="copy">
+          <p class="eyebrow reveal">Core insight ⚖️</p>
+          <h2 class="reveal">The fairness move: schedule Customers, not individual Deliveries.</h2>
+          <ul class="bullets reveal">
+            <li>Global FIFO lets Whale traffic dominate the room.</li>
+            <li>Customer round-robin gives each Customer a turn.</li>
+            <li>More Webhooks increase backlog, not scheduling share.</li>
+            <li>Measure fairness with Small-vs-Whale P95 first-attempt latency.</li>
+          </ul>
+        </div>
+        <div class="diagram-frame reveal"><img src="animations/excalidraw/03-fairness.png" alt="Customer-based fairness diagram"></div>
+      </div>
+      <aside class="notes"><ol><li><strong>This is the core insight:</strong> fairness is per Customer, not per Delivery.</li><li><strong>Global FIFO is unfair:</strong> a Whale Customer can occupy the front of the queue for a long time.</li><li><strong>Customer round-robin changes the game:</strong> every Customer gets turns, regardless of backlog depth.</li><li><strong>This is what I later prove:</strong> Small Customer first-attempt latency stays protected under Whale load.</li></ol></aside>
+    </section>
+
+    <section class="slide" data-kicker="07 / 15" aria-label="Scalability">
+      <div class="slide-content two-col">
+        <div class="diagram-frame reveal"><img src="animations/excalidraw/07-scalability.png" alt="Stateless replicas diagram"></div>
+        <div class="copy">
+          <p class="eyebrow reveal">Horizontal scaling</p>
+          <h2 class="reveal">Scale-out stays boring: add replicas, keep state in Postgres.</h2>
+          <ul class="bullets reveal">
+            <li>No leader election.</li>
+            <li>No partition ownership transfer.</li>
+            <li>Scheduler membership rebuilds from DB discovery.</li>
+            <li>In-flight Claims recover through lease expiry.</li>
+          </ul>
+        </div>
+      </div>
+      <aside class="notes"><ol><li><strong>Scale-out stays simple because state is not local.</strong> Replicas can come and go.</li><li><strong>There is no leader election story here.</strong> Each replica runs the same scheduler and worker code.</li><li><strong>The database resolves collision:</strong> workers issue the same claim query and skip locked rows.</li><li><strong>The operational point is boring on purpose:</strong> add replicas, observe pressure, tune from metrics.</li></ol></aside>
+    </section>
+
+    <section class="slide" data-kicker="08 / 15" aria-label="Claim mechanics">
+      <div class="slide-content two-col">
+        <div class="copy">
+          <p class="eyebrow reveal">Reliability mechanics</p>
+          <h2 class="reveal">Reliability comes from the claim boundary, not a background sweeper.</h2>
+          <ul class="bullets reveal">
+            <li>Select candidates with SKIP LOCKED.</li>
+            <li>Insert ownership into delivery_claims.</li>
+            <li>Reclaim stale Claims only when the lease expired.</li>
+            <li>No sweeper, lock service, or coordinator.</li>
+          </ul>
+        </div>
+        <div class="diagram-frame reveal"><img src="animations/excalidraw/04-claim-mechanics.png" alt="Claim mechanics diagram"></div>
+      </div>
+      <aside class="notes"><ol><li><strong>Reliability lives at the claim boundary.</strong> The worker either owns a Delivery lease, or it does not.</li><li><strong>The same query selects candidates and records ownership.</strong> That avoids a gap between “I saw work” and “I own work.”</li><li><strong>Stale recovery is built into claiming.</strong> A crashed worker does not need a separate sweeper process.</li><li><strong>This keeps the system small:</strong> no external lock service, no orphan scanner, no coordinator.</li></ol></aside>
+    </section>
+
+    <section class="slide" data-kicker="09 / 15" aria-label="Failure scenarios">
+      <div class="slide-content">
+        <div class="copy">
+          <p class="eyebrow reveal">Reliability in practice</p>
+          <h2 class="reveal">Now apply the design to real failure modes.</h2>
+          <div class="cards">
+            <div class="card reveal"><strong>Worker dies mid-delivery</strong><span>The Claim lease expires. Another worker reclaims the Delivery atomically.</span></div>
+            <div class="card reveal"><strong>Partner endpoint fails</strong><span>The Attempt is recorded, classified, and retried with bounded backoff.</span></div>
+            <div class="card reveal"><strong>Whale Customer floods queue</strong><span>Scheduler rotates by Customer, so Small Customers keep getting turns.</span></div>
+          </div>
+          <p class="lead reveal">This is the main reliability story: no silent loss, no duplicate claim ownership, and no fairness collapse under burst load.</p>
+        </div>
+      </div>
+      <aside class="notes"><ol><li><strong>Here is the practical reliability story.</strong> If a worker dies, the Claim lease expires and another worker can take over.</li><li><strong>If a partner fails,</strong> the Attempt is recorded and classified, then retried or sent to the DLQ.</li><li><strong>If a Whale Customer floods the queue,</strong> Small Customers still get scheduling turns.</li><li><strong>So the design protects three things:</strong> work durability, partner correctness, and tenant fairness.</li></ol></aside>
+    </section>
+
+    <section class="slide" data-kicker="10 / 15" aria-label="Partner protection">
+      <div class="slide-content diagram-first">
+        <div class="caption-line reveal"><h2>Protect the Integration Partner too</h2><span class="tag">Retry + breaker + limiter</span></div>
+        <div class="diagram-frame reveal"><img src="animations/excalidraw/06-partner-protection.png" alt="Partner protection diagram"></div>
+        <div class="cards">
+          <div class="card reveal"><strong>Retry</strong><span>Decorrelated jitter, terminal 4xx, Retry-After support.</span></div>
+          <div class="card reveal"><strong>Breaker</strong><span>Per-Webhook state prevents broken destinations consuming capacity.</span></div>
+          <div class="card reveal"><strong>Limiter</strong><span>Per-host process-local cap; cap miss is a Requeue, not an Attempt.</span></div>
+        </div>
+      </div>
+      <aside class="notes"><ol><li><strong>Reliability is not only about my database.</strong> The receiving partner also needs protection.</li><li><strong>Retry handles transient failure</strong> without hammering a recovering endpoint.</li><li><strong>The breaker handles persistent failure</strong> so broken Webhooks stop burning worker capacity.</li><li><strong>The HostLimiter protects hostnames:</strong> if capacity is full, I Requeue instead of pretending an Attempt happened.</li></ol></aside>
+    </section>
+
+    <section class="slide" data-kicker="11 / 15" aria-label="Benchmark evidence">
+      <div class="slide-content">
+        <div class="copy">
+          <p class="eyebrow reveal">Stress profile evidence ✅</p>
+          <h2 class="reveal">The claims are measurable, not just architectural.</h2>
+          <div class="metric-grid reveal">
+            <div class="metric"><b>PASS</b><span>Reliability: retries, DLQ paths, no silent loss</span></div>
+            <div class="metric"><b>PASS</b><span>Scalability: workers and replicas scale against shared Postgres</span></div>
+            <div class="metric"><b>PASS</b><span>Fairness: Small Customers stay protected under Whale load</span></div>
+            <div class="metric"><b>PASS</b><span>Partner protection: breaker, retry, and limiter behavior</span></div>
+          </div>
+          <table class="table reveal" aria-label="Benchmark evidence by requirement">
+            <tr><th>Area</th><th>Stress volume</th><th>Gate / observed result</th></tr>
+            <tr><td>Reliability</td><td>1,000 Events -> 3,000 Deliveries; plus 100 terminal-4xx Events</td><td>3,000 / 3,000 terminal; 740 / 740 recovered; 0 retry waste on bad Webhook</td></tr>
+            <tr><td>Scalability</td><td>4 real notifier replicas; 60,000 sparse + 100,000 dense Deliveries</td><td>0 duplicate tuples; dense throughput 6,192 -> 20,506 Deliveries/s from 1 -> 4 replicas</td></tr>
+            <tr><td>Fairness</td><td>135,000 Deliveries; 20,000 Small Customers + 1 Whale</td><td>Small P95 first-attempt latency stays ahead of Whale; 0 duplicate tuples; PASS at 16/32/64 Workers</td></tr>
+            <tr><td>Partner protection</td><td>Dead Integration Partner + healthy Customers; 1,000 Deliveries per Customer</td><td>Healthy p95 ratio 1.03x vs control; breaker opened and re-opened; goroutines stable 5 -> 5</td></tr>
+          </table>
+        </div>
+      </div>
+      <aside class="notes"><ol><li><strong>This is where I stop asking you to trust the diagram.</strong> The benchmark suite is the proof surface.</li><li><strong>Reliability stress:</strong> thousands of Deliveries reach terminal state, and transient failures recover.</li><li><strong>Scalability stress:</strong> real notifier replicas share one Postgres database with zero duplicate Attempt tuples.</li><li><strong>Fairness stress is the headline:</strong> 20k Small Customers plus one Whale, and the starvation gate still passes.</li></ol></aside>
+    </section>
+
+    <section class="slide" data-kicker="12 / 15" aria-label="Observability">
+      <div class="slide-content">
+        <div class="copy">
+          <p class="eyebrow reveal">Operate it 🧭</p>
+          <h2 class="reveal">If this runs in production, Grafana tells us where to look first.</h2>
+          <div class="cards">
+            <div class="card reveal"><strong>Overview</strong><span>Terminal Success Rate, Throughput by Customer Class, Queue Wait P95.</span></div>
+            <div class="card reveal"><strong>Reliability</strong><span>DLQ Rate, Attempt Outcome Breakdown, Oldest Pending Delivery.</span></div>
+            <div class="card reveal"><strong>Fairness</strong><span>Delivery Latency P95, POST Duration P95, Active Customers.</span></div>
+            <div class="card reveal"><strong>Scalability</strong><span>In-flight Deliveries, instances/workers, Claim Duration, Empty Claim Rate.</span></div>
+            <div class="card reveal"><strong>Database / wakeups</strong><span>Claim Batch Size, Database Pool, Remote Wake Hints, Scheduler Pick Duration.</span></div>
+            <div class="card reveal"><strong>Partner protection</strong><span>Host Limiter Wait, Circuit Breaker State, Trips, Sync Fallback.</span></div>
+          </div>
+          <p class="lead reveal">The dashboard is a map, not Christmas lights: first check queue wait, backlog age, DLQ rate, empty claims, and breaker growth.</p>
+        </div>
+      </div>
+      <aside class="notes"><ol><li><strong>If we open Grafana later,</strong> these names line up with compose/grafana/dashboards/notifier.json.</li><li><strong>I would start with Overview:</strong> success rate, throughput, and queue wait tell the first story.</li><li><strong>Then I branch by symptom:</strong> Reliability, Fairness, Scalability, Database/wakeups, or Partner protection.</li><li><strong>The dashboard is a map, not Christmas lights:</strong> every panel should help answer “where do I look first?”</li></ol></aside>
+    </section>
+
+    <section class="slide" data-kicker="13 / 15" aria-label="Operational readiness">
+      <div class="slide-content">
+        <div class="copy">
+          <p class="eyebrow reveal">Operational readiness 🛠️</p>
+          <h2 class="reveal">The dashboard becomes a runbook, not a wall of charts.</h2>
+          <div class="cards">
+            <div class="card reveal"><strong>Small p95 queue wait rises</strong><span>Check Active Customers, Claim Duration, Empty Claim Rate. Is this fairness, DB, or stale discovery?</span></div>
+            <div class="card reveal"><strong>Oldest pending age climbs</strong><span>Check Terminal Success Rate, DLQ Rate, Attempts per Delivery. Is work stuck or retry-amplified?</span></div>
+            <div class="card reveal"><strong>Partner panels light up</strong><span>Check Host Limiter Wait, Breaker State, Trips. Is the platform overloaded, or is one partner having a bad day?</span></div>
+          </div>
+          <p class="lead reveal">That is the ops loop: symptom → panel → hypothesis → tuning change. Less guessing, fewer “it works on my machine” rituals.</p>
+        </div>
+      </div>
+      <aside class="notes"><ol><li><strong>This is how I want operations to feel:</strong> symptom, panel, hypothesis, tuning change.</li><li><strong>If Small Customer queue wait rises,</strong> I check Active Customers, Claim Duration, and Empty Claim Rate.</li><li><strong>If oldest pending age climbs,</strong> I check Terminal Success Rate, DLQ Rate, and Attempts per Delivery.</li><li><strong>If partner panels light up,</strong> I separate platform overload from one partner having a bad day.</li></ol></aside>
+    </section>
+
+    <section class="slide" data-kicker="14 / 15" aria-label="Trade-offs and production path">
+      <div class="slide-content two-col">
+        <div class="copy">
+          <p class="eyebrow reveal">Scale-up plan 🚀</p>
+          <h2 class="reveal">The roadmap is data-driven: scale only when the signals justify it.</h2>
+          <ul class="bullets reveal">
+            <li>Use production traffic shape to tune Worker count, batch size, and discovery cadence.</li>
+            <li>Watch Small Customer P95 queue wait as the fairness guardrail.</li>
+            <li>Use claim latency and empty-claim rate to detect the Postgres ceiling.</li>
+            <li>Use host pressure and breaker-open counts to separate partner pain from platform load.</li>
+          </ul>
+        </div>
+        <div class="signal-box reveal">
+          <h3>Next upgrades</h3>
+          <ul class="bullets">
+            <li>Encrypt secrets at rest.</li>
+            <li>Add a distributed HostLimiter when partner pressure spans replicas.</li>
+            <li>Partition deliveries by customer_id when claim contention becomes dominant.</li>
+            <li>Move to Redis Streams or Kafka only after measured throughput needs exceed Postgres.</li>
+          </ul>
+        </div>
+      </div>
+      <aside class="notes"><ol><li><strong>This roadmap is not an apology.</strong> It is how I would evolve the system from measured traffic.</li><li><strong>The fairness guardrail is Small Customer P95 queue wait.</strong> If that moves, the system is not serving its goal.</li><li><strong>The throughput trigger is claim latency plus empty claims.</strong> That tells me when Postgres is becoming the ceiling.</li><li><strong>The partner trigger is cross-replica host pressure.</strong> That is when I would add a distributed HostLimiter.</li></ol></aside>
+    </section>
+
+    <section class="slide" data-kicker="15 / 15" aria-label="Closing receipt">
+      <div class="slide-content">
+        <div class="copy">
+          <p class="eyebrow reveal">Close 🧾</p>
+          <h2 class="reveal">What I shipped matters. What I learned matters more.</h2>
+          <div class="metric-grid reveal">
+            <div class="metric"><b>34</b><span>Go test files covering domain logic, integration paths, and benchmarks</span></div>
+            <div class="metric"><b>215</b><span>Test / benchmark entrypoints; TDD was the steering wheel</span></div>
+            <div class="metric"><b>67</b><span>Closed GitHub Issues from scaffold through perf hardening</span></div>
+            <div class="metric"><b>81</b><span>Merged PRs; small receipts, not one giant mystery diff</span></div>
+          </div>
+          <table class="table reveal" aria-label="What I learned">
+            <tr><th>What I learned</th><th>How it changed the system</th></tr>
+            <tr><td>Fairness has to be designed in early</td><td>The scheduler, claim path, and benchmark suite all use Customer as the fairness unit.</td></tr>
+            <tr><td>Load tests teach different lessons than unit tests</td><td>Stress runs exposed claim contention, empty-claim churn, and the real Postgres ceiling.</td></tr>
+            <tr><td>Operational metrics must answer diagnosis questions</td><td>Dashboards separate scheduler pressure, partner failure, and platform overload.</td></tr>
+            <tr><td>Simple architecture still needs proof</td><td>Go + Postgres is defensible because it has ADRs, tests, benchmarks, and known production gaps.</td></tr>
+          </table>
+        </div>
+      </div>
+      <aside class="notes"><ol><li><strong>I want to close on learning, not just output.</strong> I shipped a lot, but the judgment is the important part.</li><li><strong>TDD and benchmarks were not cleanup.</strong> They were how I steered the design.</li><li><strong>The biggest lesson is fairness:</strong> it has to be designed into the scheduler, data model, metrics, and tests.</li><li><strong>Final line:</strong> I can defend the architecture, show the proof, and operate the system.</li></ol></aside>
+    </section>
+  </main>
+
+  <div class="progress" aria-hidden="true"><span id="progress"></span></div>
+  <div class="counter" aria-live="polite"><span id="current">1</span>/<span id="total">15</span></div>
+
+  <script>
+    class PresentationController {
+      constructor() {
+        this.deck = document.getElementById("deck");
+        this.slides = Array.from(document.querySelectorAll(".slide"));
+        this.progress = document.getElementById("progress");
+        this.current = document.getElementById("current");
+        this.total = document.getElementById("total");
+        this.presenter = null;
+        this.startedAt = Date.now();
+        this.index = 0;
+        this.lastWheel = 0;
+        this.touchStartY = 0;
+        this.total.textContent = String(this.slides.length);
+        this.bind();
+        this.observe();
+        this.goTo(0);
+      }
+
+      bind() {
+        window.addEventListener("keydown", (event) => {
+          if (["ArrowRight", "ArrowDown", "PageDown", " "].includes(event.key)) {
+            event.preventDefault();
+            this.next();
+          }
+          if (["ArrowLeft", "ArrowUp", "PageUp"].includes(event.key)) {
+            event.preventDefault();
+            this.prev();
+          }
+          if (event.key === "Home") this.goTo(0);
+          if (event.key === "End") this.goTo(this.slides.length - 1);
+          if (event.key.toLowerCase() === "s") {
+            event.preventDefault();
+            this.openPresenter();
+          }
+        });
+
+        window.addEventListener("message", (event) => {
+          if (event.source !== this.presenter) return;
+          if (event.data === "next") this.next();
+          if (event.data === "prev") this.prev();
+          if (event.data === "first") this.goTo(0);
+          if (event.data === "last") this.goTo(this.slides.length - 1);
+        });
+
+        window.addEventListener("wheel", (event) => {
+          const now = Date.now();
+          if (now - this.lastWheel < 420 || Math.abs(event.deltaY) < 20) return;
+          this.lastWheel = now;
+          event.deltaY > 0 ? this.next() : this.prev();
+        }, { passive: true });
+
+        window.addEventListener("touchstart", (event) => {
+          this.touchStartY = event.changedTouches[0].clientY;
+        }, { passive: true });
+
+        window.addEventListener("touchend", (event) => {
+          const delta = this.touchStartY - event.changedTouches[0].clientY;
+          if (Math.abs(delta) < 40) return;
+          delta > 0 ? this.next() : this.prev();
+        }, { passive: true });
+
+        window.addEventListener("resize", () => this.applyTransform());
+      }
+
+      observe() {
+        this.observer = new IntersectionObserver((entries) => {
+          entries.forEach((entry) => {
+            if (entry.isIntersecting) entry.target.classList.add("seen");
+          });
+        }, { threshold: 0.4 });
+        this.slides.forEach((slide) => this.observer.observe(slide));
+      }
+
+      next() {
+        if (this.revealNext()) return;
+        this.goTo(this.index + 1);
+      }
+
+      prev() {
+        if (this.hideLastReveal()) return;
+        this.goTo(this.index - 1);
+      }
+
+      goTo(target) {
+        this.index = Math.max(0, Math.min(this.slides.length - 1, target));
+        this.slides.forEach((slide, idx) => {
+          slide.classList.toggle("active", idx === this.index);
+        });
+        this.prepareReveals();
+        this.applyTransform();
+        this.current.textContent = String(this.index + 1);
+        this.progress.style.width = `${((this.index + 1) / this.slides.length) * 100}%`;
+        this.renderPresenter();
+        const baseUrl = location.href.split("#")[0];
+        history.replaceState(null, "", `${baseUrl}#${this.index + 1}`);
+      }
+
+      applyTransform() {
+        this.deck.style.transform = `translateY(calc(-${this.index} * 100dvh))`;
+      }
+
+      activeReveals() {
+        return Array.from(this.slides[this.index].querySelectorAll(".reveal"));
+      }
+
+      prepareReveals() {
+        this.slides.forEach((slide) => {
+          slide.querySelectorAll(".reveal").forEach((element) => element.classList.remove("shown"));
+        });
+        const reveals = this.activeReveals();
+        const initiallyVisible = Math.min(4, reveals.length);
+        reveals.slice(0, initiallyVisible).forEach((element) => element.classList.add("shown"));
+      }
+
+      revealNext() {
+        const next = this.activeReveals().find((element) => !element.classList.contains("shown"));
+        if (!next) return false;
+        next.classList.add("shown");
+        this.renderPresenter();
+        return true;
+      }
+
+      hideLastReveal() {
+        const shown = this.activeReveals().filter((element) => element.classList.contains("shown"));
+        if (shown.length <= Math.min(4, this.activeReveals().length)) return false;
+        shown[shown.length - 1].classList.remove("shown");
+        this.renderPresenter();
+        return true;
+      }
+
+      openPresenter() {
+        if (this.presenter && !this.presenter.closed) {
+          this.presenter.focus();
+          this.renderPresenter();
+          return;
+        }
+        this.presenter = window.open("", "webhook-notifier-presenter", "width=980,height=720");
+        if (!this.presenter) {
+          window.alert("Presenter notes were blocked. Allow popups for this file, then press S again.");
+          return;
+        }
+        this.presenter.document.open();
+        this.presenter.document.write(this.presenterShell());
+        this.presenter.document.close();
+        this.renderPresenter();
+      }
+
+      renderPresenter() {
+        if (!this.presenter || this.presenter.closed || !this.presenter.document.body) return;
+        const slide = this.slides[this.index];
+        const title = slide.getAttribute("aria-label") || `Slide ${this.index + 1}`;
+        const notes = slide.querySelector(".notes");
+        const next = this.slides[this.index + 1];
+        const reveals = this.activeReveals();
+        const revealCount = reveals.filter((element) => element.classList.contains("shown")).length;
+        const initialRevealCount = Math.min(4, reveals.length);
+        const noteIndex = Math.max(0, revealCount - initialRevealCount);
+        const elapsed = this.formatElapsed(Date.now() - this.startedAt);
+        const doc = this.presenter.document;
+        doc.querySelector(".count").textContent = `${this.index + 1} / ${this.slides.length}`;
+        doc.querySelector(".timer").textContent = elapsed;
+        doc.querySelector(".bar").style.width = `${((this.index + 1) / this.slides.length) * 100}%`;
+        doc.querySelector(".notes").innerHTML = `
+          <p class="eyebrow">Slide ${String(this.index + 1).padStart(2, "0")}</p>
+          <h1>${this.escape(title)}</h1>
+          <h2>Talk Track</h2>
+          ${notes ? notes.innerHTML : "<ol><li>No notes for this slide.</li></ol>"}
+          <aside>Next: ${next ? this.escape(next.getAttribute("aria-label") || `Slide ${this.index + 2}`) : "End"}</aside>
+        `;
+        const noteItems = Array.from(doc.querySelectorAll(".notes li"));
+        noteItems.forEach((item) => item.classList.remove("current"));
+        const activeNote = noteItems[Math.max(0, Math.min(noteItems.length - 1, noteIndex))];
+        if (activeNote) activeNote.classList.add("current");
+      }
+
+      formatElapsed(ms) {
+        const total = Math.floor(ms / 1000);
+        const minutes = String(Math.floor(total / 60)).padStart(2, "0");
+        const seconds = String(total % 60).padStart(2, "0");
+        return `${minutes}:${seconds}`;
+      }
+
+      escape(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      presenterShell() {
+        return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Presenter Notes | Webhook Notifier</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0f172a; --panel:#111827; --ink:#f8fafc; --muted:#cbd5e1; --dim:#94a3b8; --line:rgba(248,250,252,.14); --accent:#f43f5e; --blue:#38bdf8; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink); font-family:Aptos, Segoe UI, system-ui, sans-serif; }
+    header { position:sticky; top:0; z-index:2; display:flex; justify-content:space-between; align-items:center; gap:16px; padding:14px 18px; background:rgba(15,23,42,.94); border-bottom:1px solid var(--line); }
+    .meta { display:flex; gap:14px; color:var(--muted); font-family:Cascadia Code, SFMono-Regular, Consolas, monospace; font-size:13px; }
+    .controls { display:flex; gap:8px; }
+    button { border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:6px; padding:8px 11px; font-weight:800; cursor:pointer; }
+    button:hover { border-color:var(--blue); }
+    .progress { height:4px; background:rgba(248,250,252,.12); }
+    .bar { height:100%; width:0; background:linear-gradient(90deg,var(--accent),var(--blue)); transition:width .18s ease; }
+    main { max-width:980px; margin:0 auto; padding:26px 24px 40px; }
+    .notes { background:linear-gradient(180deg,rgba(248,250,252,.08),rgba(248,250,252,.04)); border:1px solid var(--line); border-radius:10px; padding:24px; box-shadow:0 24px 80px rgba(0,0,0,.28); }
+    .eyebrow { margin:0 0 10px; color:var(--blue); font-family:Cascadia Code, SFMono-Regular, Consolas, monospace; text-transform:uppercase; font-size:13px; font-weight:900; }
+    h1 { margin:0 0 22px; font-size:42px; line-height:1; letter-spacing:0; }
+    h2 { margin:24px 0 10px; font-size:15px; color:var(--accent); text-transform:uppercase; letter-spacing:.08em; }
+    ol { margin:0; padding-left:26px; display:grid; gap:12px; }
+    li { color:var(--muted); font-size:20px; line-height:1.42; }
+    li.current { color:var(--ink); background:rgba(56,189,248,.12); border-left:4px solid var(--blue); padding:8px 10px; margin-left:-14px; }
+    strong { color:var(--ink); }
+    aside { margin-top:24px; padding:14px 16px; border-left:4px solid var(--blue); color:var(--dim); background:rgba(56,189,248,.08); }
+    .hint { color:var(--dim); font-size:13px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="meta"><span class="count">1 / 15</span><span class="timer">00:00</span></div>
+    <div class="controls">
+      <button onclick="opener.postMessage('prev', '*')">Prev</button>
+      <button onclick="opener.postMessage('next', '*')">Next</button>
+    </div>
+  </header>
+  <div class="progress"><div class="bar"></div></div>
+  <main>
+    <section class="notes"></section>
+    <p class="hint">Keys: ArrowRight/Space next, ArrowLeft previous, Home/End first/last. Keep this window private.</p>
+  </main>
+  <script>
+    window.addEventListener("keydown", (event) => {
+      if (["ArrowRight", "ArrowDown", "PageDown", " "].includes(event.key)) { event.preventDefault(); opener.postMessage("next", "*"); }
+      if (["ArrowLeft", "ArrowUp", "PageUp"].includes(event.key)) { event.preventDefault(); opener.postMessage("prev", "*"); }
+      if (event.key === "Home") { event.preventDefault(); opener.postMessage("first", "*"); }
+      if (event.key === "End") { event.preventDefault(); opener.postMessage("last", "*"); }
+    });
+  <\/script>
+</body>
+</html>`;
+      }
+    }
+
+    const controller = new PresentationController();
+    const initial = Number.parseInt(location.hash.replace("#", ""), 10);
+    if (Number.isFinite(initial)) controller.goTo(initial - 1);
+    window.presentation = controller;
+  </script>
+</body>
+</html>
