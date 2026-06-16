@@ -693,7 +693,7 @@
           <div class="signal-row"><div class="num">3</div><p><strong>Benchmarks</strong> prove the trade-offs instead of hiding them.</p></div>
         </div>
       </div>
-      <aside class="notes"><ol><li><strong>The easy version of this project is a retry worker.</strong> I built the harder version: a multi-tenant delivery system.</li><li><strong>The main constraint is fairness.</strong> One Whale Customer should not bury Small Customers.</li><li><strong>My design bet is simple:</strong> Go workers, Postgres for durable coordination, no broker for this PoC.</li><li><strong>The talk arc is:</strong> problem, architecture, fairness, reliability, proof, operations, and what I learned.</li></ol></aside>
+      <aside class="notes"><ol><li><strong>The easy version of this project is a retry worker.</strong> I built the harder version: a multi-tenant delivery system.</li><li><strong>The main constraint is fairness.</strong> One Whale Customer should not bury Small Customers.</li><li><strong>My design bet is simple:</strong> Go workers, Postgres for durable coordination, no broker for this PoC.</li><li><strong>Why Postgres and not a broker?</strong> The system of record is already Postgres, so I can keep work durability and worker coordination in one place, and I can use ACID transactions to make claim, retry, and recovery happen atomically instead of stitching those guarantees across multiple systems.</li><li><strong>The talk arc is:</strong> problem, architecture, fairness, reliability, proof, operations, and what I learned.</li></ol></aside>
     </section>
 
     <section class="slide" data-kicker="02 / 15" aria-label="Problem">
@@ -716,7 +716,7 @@
         <div class="caption-line reveal"><h2>The system shape</h2><span class="tag">Postgres = queue + coordination point</span></div>
         <div class="diagram-frame reveal"><img src="animations/excalidraw/01-high-level-arch.png" alt="High-level architecture diagram"></div>
       </div>
-      <aside class="notes"><ol><li><strong>Start left to right:</strong> an Event enters, ingest fans it out into Delivery rows, workers send HTTP Attempts.</li><li><strong>Postgres is doing two jobs:</strong> durable queue and coordination point.</li><li><strong>Workers are disposable:</strong> if one dies, the durable state is still in Postgres.</li><li><strong>The next question is the key:</strong> how do multiple workers claim work without duplicates or blocking?</li></ol></aside>
+      <aside class="notes"><ol><li><strong>Start left to right:</strong> an Event enters, ingest fans it out into Delivery rows, workers send HTTP Attempts.</li><li><strong>Postgres is doing two jobs:</strong> durable queue and coordination point.</li><li><strong>Why not a broker?</strong> For this PoC, adding Kafka or Redis Streams would add operational surface without solving fairness by itself. Postgres is already the source of truth, and ACID gives me atomic claims, atomic retries, and atomic recovery with one transaction boundary.</li><li><strong>Workers are disposable:</strong> if one dies, the durable state is still in Postgres.</li><li><strong>The next question is the key:</strong> how do multiple workers claim work without duplicates or blocking?</li></ol></aside>
     </section>
 
     <section class="slide" data-kicker="04 / 15" aria-label="SKIP LOCKED">

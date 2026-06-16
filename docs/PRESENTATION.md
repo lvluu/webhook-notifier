@@ -51,6 +51,7 @@ Closing thesis:
 - State the problem — don't read the slide
 - Emphasize fairness as the non-obvious challenge driving most design decisions
 - "I chose Go + Postgres, no message broker — let me show you why that's enough"
+- Postgres ACID matters here: one transaction can make work durable, claim it, and recover it without splitting those guarantees across systems
 - Candidate signal: I am not just showing features; I am showing the chain from requirement → design choice → proof → trade-off
 - Avoid apologizing for PoC scope. Say "intentional scope decision" and immediately name the production path.
 
@@ -75,6 +76,8 @@ Closing thesis:
 | **Fairness** | Whale Customer's burst must not starve Small Customer's Deliveries. This one drives most design decisions. |
 
 **Our approach:** Go + Postgres, no message broker. For this PoC, Postgres row claiming covers the worker-coordination role we would otherwise need a broker or lock service for. Per-Customer scheduling replaces global FIFO. One CTE replaces sweeper processes.
+
+**Why Postgres works here:** ACID transactions let claim, retry, and crash recovery stay atomic inside the same system of record. That is the leverage you lose when you split durability and coordination across multiple moving parts too early.
 
 **What we'll prove (roadmap):**
 1. Architecture walk — how the pieces fit (slides 3-4)
