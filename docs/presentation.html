@@ -445,6 +445,10 @@
       gap: clamp(0.6rem, 1.2vw, 1rem);
     }
 
+    .metric-grid.closing-metrics {
+      grid-template-columns: repeat(5, 1fr);
+    }
+
     .metric {
       border-left: 5px solid var(--accent);
       background: white;
@@ -919,11 +923,12 @@
         <div class="copy">
           <p class="eyebrow reveal">Close 🧾</p>
           <h2 class="reveal">What I shipped matters. What I learned matters more.</h2>
-          <div class="metric-grid reveal">
+          <div class="metric-grid closing-metrics reveal">
             <div class="metric"><b>34</b><span>Go test files covering domain logic, integration paths, and benchmarks</span></div>
             <div class="metric"><b>215</b><span>Test / benchmark entrypoints; TDD was the steering wheel</span></div>
             <div class="metric"><b>67</b><span>Closed GitHub Issues from scaffold through perf hardening</span></div>
             <div class="metric"><b>81</b><span>Merged PRs; small receipts, not one giant mystery diff</span></div>
+            <div class="metric"><b>14</b><span>ADRs capturing architectural trade-offs and production evolution path</span></div>
           </div>
           <table class="table reveal" aria-label="What I learned">
             <tr><th>What I learned</th><th>How it changed the system</th></tr>
@@ -934,7 +939,7 @@
           </table>
         </div>
       </div>
-      <aside class="notes"><ol><li><strong>I want to close on learning, not just output.</strong> I shipped a lot, but the judgment is the important part.</li><li><strong>TDD and benchmarks were not cleanup.</strong> They were how I steered the design.</li><li><strong>The biggest lesson is fairness:</strong> it has to be designed into the scheduler, data model, metrics, and tests.</li><li><strong>Final line:</strong> I can defend the architecture, show the proof, and operate the system.</li></ol></aside>
+      <aside class="notes"><ol><li><strong>I want to close on learning, not just output.</strong> I shipped a lot, but the judgment is the important part.</li><li><strong>TDD and benchmarks were not cleanup.</strong> They were how I steered the design.</li><li><strong>The biggest lesson is fairness:</strong> it has to be designed into the scheduler, data model, metrics, and tests.</li><li><strong>The ADR count matters:</strong> those 14 ADRs are the design memory that explain why this system is shaped this way.</li><li><strong>Final line:</strong> I can defend the architecture, show the proof, and operate the system.</li></ol></aside>
     </section>
   </main>
 
