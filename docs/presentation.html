@@ -693,7 +693,7 @@
           <div class="signal-row"><div class="num">3</div><p><strong>Benchmarks</strong> prove the trade-offs instead of hiding them.</p></div>
         </div>
       </div>
-      <aside class="notes"><ol><li><strong>The easy version of this project is a retry worker.</strong> I built the harder version: a multi-tenant delivery system.</li><li><strong>The main constraint is fairness.</strong> One Whale Customer should not bury Small Customers.</li><li><strong>My design bet is simple:</strong> Go workers, Postgres for durable coordination, no broker for this PoC.</li><li><strong>Why Postgres and not a broker?</strong> The system of record is already Postgres, so I can keep work durability and worker coordination in one place, and I can use ACID transactions to make claim, retry, and recovery happen atomically instead of stitching those guarantees across multiple systems.</li><li><strong>The talk arc is:</strong> problem, architecture, fairness, reliability, proof, operations, and what I learned.</li></ol></aside>
+      <aside class="notes"><ol><li><strong>The easy version of this project is a retry worker.</strong> I built the harder version: a multi-tenant delivery system.</li><li><strong>The main constraint is fairness.</strong> One Whale Customer should not bury Small Customers.</li><li><strong>My design bet is simple:</strong> Go workers, Postgres for durable coordination, no broker for this PoC.</li><li><strong>Why Postgres and not a broker?</strong> The system of record is already Postgres, so I can keep work durability and worker coordination in one place, and I can use ACID transactions to make claim, retry, and recovery happen atomically instead of stitching those guarantees across multiple systems.</li><li><strong>The talk arc is:</strong> problem, architecture, fairness, reliability, proof, operations, and what I learned.</li><li class="bridge">So let me start with the problem that makes this interesting — and why "just retry" is not enough.</li></ol></aside>
     </section>
 
     <section class="slide" data-kicker="02 / 15" aria-label="Problem">
@@ -708,7 +708,7 @@
           </div>
         </div>
       </div>
-      <aside class="notes"><ol><li><strong>The brief asks for three things:</strong> reliability, horizontal scale, and fair processing.</li><li><strong>Reliability means:</strong> accepted Events cannot silently disappear, even if a worker crashes.</li><li><strong>Scalability means:</strong> I can add replicas without leader election or local durable state.</li><li><strong>Fairness is the hard part:</strong> a Whale Customer burst cannot turn Small Customers into background noise.</li></ol></aside>
+      <aside class="notes"><ol><li><strong>The brief asks for three things:</strong> reliability, horizontal scale, and fair processing.</li><li><strong>Reliability means:</strong> accepted Events cannot silently disappear, even if a worker crashes.</li><li><strong>Scalability means:</strong> I can add replicas without leader election or local durable state.</li><li><strong>Fairness is the hard part:</strong> a Whale Customer burst cannot turn Small Customers into background noise.</li><li class="bridge">Now that we see the constraints, let me show you the system shape I chose to satisfy all three.</li></ol></aside>
     </section>
 
     <section class="slide" data-kicker="03 / 15" aria-label="High-level architecture">
@@ -716,7 +716,7 @@
         <div class="caption-line reveal"><h2>The system shape</h2><span class="tag">Postgres = queue + coordination point</span></div>
         <div class="diagram-frame reveal"><img src="animations/excalidraw/01-high-level-arch.png" alt="High-level architecture diagram"></div>
       </div>
-      <aside class="notes"><ol><li><strong>Start left to right:</strong> an Event enters, ingest fans it out into Delivery rows, workers send HTTP Attempts.</li><li><strong>Postgres is doing two jobs:</strong> durable queue and coordination point.</li><li><strong>Why not a broker?</strong> For this PoC, adding Kafka or Redis Streams would add operational surface without solving fairness by itself. Postgres is already the source of truth, and ACID gives me atomic claims, atomic retries, and atomic recovery with one transaction boundary.</li><li><strong>Workers are disposable:</strong> if one dies, the durable state is still in Postgres.</li><li><strong>The next question is the key:</strong> how do multiple workers claim work without duplicates or blocking?</li></ol></aside>
+      <aside class="notes"><ol><li><strong>Start left to right:</strong> an Event enters, ingest fans it out into Delivery rows, workers send HTTP Attempts.</li><li><strong>Postgres is doing two jobs:</strong> durable queue and coordination point.</li><li><strong>Why not a broker?</strong> For this PoC, adding Kafka or Redis Streams would add operational surface without solving fairness by itself. Postgres is already the source of truth, and ACID gives me atomic claims, atomic retries, and atomic recovery with one transaction boundary.</li><li><strong>Workers are disposable:</strong> if one dies, the durable state is still in Postgres.</li><li class="bridge">The next question is obvious: how do multiple workers claim work without duplicates or blocking? That is the keystone of the design.</li></ol></aside>
     </section>
 
     <section class="slide" data-kicker="04 / 15" aria-label="SKIP LOCKED">
@@ -733,7 +733,7 @@
         </div>
         <div class="diagram-frame reveal"><img src="animations/excalidraw/09-skip-locked-comparison.png" alt="Comparison of SELECT, FOR UPDATE, and SKIP LOCKED"></div>
       </div>
-      <aside class="notes"><ol><li><strong>This is the keystone slide.</strong> SKIP LOCKED is why Postgres can coordinate workers for this PoC.</li><li><strong>Plain SELECT is broken:</strong> two workers can pick the same Delivery.</li><li><strong>FOR UPDATE is safe but slow:</strong> another worker waits instead of doing useful work.</li><li><strong>SKIP LOCKED is the useful middle:</strong> skip busy rows, claim different work, and keep parallelism.</li></ol></aside>
+      <aside class="notes"><ol><li><strong>This is the keystone slide.</strong> SKIP LOCKED is why Postgres can coordinate workers for this PoC.</li><li><strong>Plain SELECT is broken:</strong> two workers can pick the same Delivery.</li><li><strong>FOR UPDATE is safe but slow:</strong> another worker waits instead of doing useful work.</li><li><strong>SKIP LOCKED is the useful middle:</strong> skip busy rows, claim different work, and keep parallelism.</li><li class="bridge">With that coordination in place, let me show you how one Event actually becomes durable work — the Delivery lifecycle.</li></ol></aside>
     </section>
 
     <section class="slide" data-kicker="05 / 15" aria-label="Delivery lifecycle">
@@ -748,7 +748,7 @@
           <div>Success, retry, or DLQ</div>
         </div>
       </div>
-      <aside class="notes"><ol><li><strong>Now make the design concrete:</strong> one accepted Event becomes one or more Delivery rows.</li><li><strong>The guarantee is at-least-once:</strong> retries can happen, so partners dedupe with stable Event and Delivery IDs.</li><li><strong>Claimed is not a Delivery status:</strong> claim ownership lives separately in delivery_claims.</li><li><strong>That separation matters:</strong> lifecycle state and worker lease state do not fight each other.</li></ol></aside>
+      <aside class="notes"><ol><li><strong>Now make the design concrete:</strong> one accepted Event becomes one or more Delivery rows.</li><li><strong>The guarantee is at-least-once:</strong> retries can happen, so partners dedupe with stable Event and Delivery IDs.</li><li><strong>Claimed is not a Delivery status:</strong> claim ownership lives separately in delivery_claims.</li><li><strong>That separation matters:</strong> lifecycle state and worker lease state do not fight each other.</li><li class="bridge">Now I have durable Deliveries flowing through the system. The next question is: who gets served first? That is where fairness lives.</li></ol></aside>
     </section>
 
     <section class="slide" data-kicker="06 / 15" aria-label="Fair scheduling">
@@ -765,7 +765,7 @@
         </div>
         <div class="diagram-frame reveal"><img src="animations/excalidraw/03-fairness.png" alt="Customer-based fairness diagram"></div>
       </div>
-      <aside class="notes"><ol><li><strong>This is the core insight:</strong> fairness is per Customer, not per Delivery.</li><li><strong>Global FIFO is unfair:</strong> a Whale Customer can occupy the front of the queue for a long time.</li><li><strong>Customer round-robin changes the game:</strong> every Customer gets turns, regardless of backlog depth.</li><li><strong>This is what I later prove:</strong> Small Customer first-attempt latency stays protected under Whale load.</li></ol></aside>
+      <aside class="notes"><ol><li><strong>This is the core insight:</strong> fairness is per Customer, not per Delivery.</li><li><strong>Global FIFO is unfair:</strong> a Whale Customer can occupy the front of the queue for a long time.</li><li><strong>Customer round-robin changes the game:</strong> every Customer gets turns, regardless of backlog depth.</li><li><strong>This is what I later prove:</strong> Small Customer first-attempt latency stays protected under Whale load.</li><li class="bridge">And the good news: this fairness model does not fight horizontal scaling. Let me show you why adding replicas stays boring.</li></ol></aside>
     </section>
 
     <section class="slide" data-kicker="07 / 15" aria-label="Scalability">
@@ -782,7 +782,7 @@
           </ul>
         </div>
       </div>
-      <aside class="notes"><ol><li><strong>Scale-out stays simple because state is not local.</strong> Replicas can come and go.</li><li><strong>There is no leader election story here.</strong> Each replica runs the same scheduler and worker code.</li><li><strong>The database resolves collision:</strong> workers issue the same claim query and skip locked rows.</li><li><strong>The operational point is boring on purpose:</strong> add replicas, observe pressure, tune from metrics.</li></ol></aside>
+      <aside class="notes"><ol><li><strong>Scale-out stays simple because state is not local.</strong> Replicas can come and go.</li><li><strong>There is no leader election story here.</strong> Each replica runs the same scheduler and worker code.</li><li><strong>The database resolves collision:</strong> workers issue the same claim query and skip locked rows.</li><li><strong>The operational point is boring on purpose:</strong> add replicas, observe pressure, tune from metrics.</li><li class="bridge">Let me zoom in on how the claim boundary actually makes reliability concrete — not just scalable, but crash-safe.</li></ol></aside>
     </section>
 
     <section class="slide" data-kicker="08 / 15" aria-label="Claim mechanics">
@@ -799,7 +799,7 @@
         </div>
         <div class="diagram-frame reveal"><img src="animations/excalidraw/04-claim-mechanics.png" alt="Claim mechanics diagram"></div>
       </div>
-      <aside class="notes"><ol><li><strong>Reliability lives at the claim boundary.</strong> The worker either owns a Delivery lease, or it does not.</li><li><strong>The same query selects candidates and records ownership.</strong> That avoids a gap between “I saw work” and “I own work.”</li><li><strong>Stale recovery is built into claiming.</strong> A crashed worker does not need a separate sweeper process.</li><li><strong>This keeps the system small:</strong> no external lock service, no orphan scanner, no coordinator.</li></ol></aside>
+      <aside class="notes"><ol><li><strong>Reliability lives at the claim boundary.</strong> The worker either owns a Delivery lease, or it does not.</li><li><strong>The same query selects candidates and records ownership.</strong> That avoids a gap between “I saw work” and “I own work.”</li><li><strong>Stale recovery is built into claiming.</strong> A crashed worker does not need a separate sweeper process.</li><li><strong>This keeps the system small:</strong> no external lock service, no orphan scanner, no coordinator.</li><li class="bridge">So that is the mechanism. Now let me show you what happens when things actually go wrong — the failure scenarios this design handles.</li></ol></aside>
     </section>
 
     <section class="slide" data-kicker="09 / 15" aria-label="Failure scenarios">
@@ -815,7 +815,7 @@
           <p class="lead reveal">This is the main reliability story: no silent loss, no duplicate claim ownership, and no fairness collapse under burst load.</p>
         </div>
       </div>
-      <aside class="notes"><ol><li><strong>Here is the practical reliability story.</strong> If a worker dies, the Claim lease expires and another worker can take over.</li><li><strong>If a partner fails,</strong> the Attempt is recorded and classified, then retried or sent to the DLQ.</li><li><strong>If a Whale Customer floods the queue,</strong> Small Customers still get scheduling turns.</li><li><strong>So the design protects three things:</strong> work durability, partner correctness, and tenant fairness.</li></ol></aside>
+      <aside class="notes"><ol><li><strong>Here is the practical reliability story.</strong> If a worker dies, the Claim lease expires and another worker can take over.</li><li><strong>If a partner fails,</strong> the Attempt is recorded and classified, then retried or sent to the DLQ.</li><li><strong>If a Whale Customer floods the queue,</strong> Small Customers still get scheduling turns.</li><li><strong>So the design protects three things:</strong> work durability, partner correctness, and tenant fairness.</li><li class="bridge">Of course, reliability is not one-sided — the receiving partner also needs protection from our traffic.</li></ol></aside>
     </section>
 
     <section class="slide" data-kicker="10 / 15" aria-label="Partner protection">
@@ -828,7 +828,7 @@
           <div class="card reveal"><strong>Limiter</strong><span>Per-host process-local cap; cap miss is a Requeue, not an Attempt.</span></div>
         </div>
       </div>
-      <aside class="notes"><ol><li><strong>Reliability is not only about my database.</strong> The receiving partner also needs protection.</li><li><strong>Retry handles transient failure</strong> without hammering a recovering endpoint.</li><li><strong>The breaker handles persistent failure</strong> so broken Webhooks stop burning worker capacity.</li><li><strong>The HostLimiter protects hostnames:</strong> if capacity is full, I Requeue instead of pretending an Attempt happened.</li></ol></aside>
+      <aside class="notes"><ol><li><strong>Reliability is not only about my database.</strong> The receiving partner also needs protection.</li><li><strong>Retry handles transient failure</strong> without hammering a recovering endpoint.</li><li><strong>The breaker handles persistent failure</strong> so broken Webhooks stop burning worker capacity.</li><li><strong>The HostLimiter protects hostnames:</strong> if capacity is full, I Requeue instead of pretending an Attempt happened.</li><li class="bridge">I have talked a lot about claims. Now let me show you the numbers that back them up.</li></ol></aside>
     </section>
 
     <section class="slide" data-kicker="11 / 15" aria-label="Benchmark evidence">
@@ -851,7 +851,7 @@
           </table>
         </div>
       </div>
-      <aside class="notes"><ol><li><strong>This is where I stop asking you to trust the diagram.</strong> The benchmark suite is the proof surface.</li><li><strong>Reliability stress:</strong> thousands of Deliveries reach terminal state, and transient failures recover.</li><li><strong>Scalability stress:</strong> real notifier replicas share one Postgres database with zero duplicate Attempt tuples.</li><li><strong>Fairness stress is the headline:</strong> 20k Small Customers plus one Whale, and the starvation gate still passes.</li></ol></aside>
+      <aside class="notes"><ol><li><strong>This is where I stop asking you to trust the diagram.</strong> The benchmark suite is the proof surface.</li><li><strong>Reliability stress:</strong> thousands of Deliveries reach terminal state, and transient failures recover.</li><li><strong>Scalability stress:</strong> real notifier replicas share one Postgres database with zero duplicate Attempt tuples.</li><li><strong>Fairness stress is the headline:</strong> 20k Small Customers plus one Whale, and the starvation gate still passes.</li><li class="bridge">So the system works under stress. But once it runs in production, how do you know where to look first?</li></ol></aside>
     </section>
 
     <section class="slide" data-kicker="12 / 15" aria-label="Observability">
@@ -870,7 +870,7 @@
           <p class="lead reveal">The dashboard is a map, not Christmas lights: first check queue wait, backlog age, DLQ rate, empty claims, and breaker growth.</p>
         </div>
       </div>
-      <aside class="notes"><ol><li><strong>If we open Grafana later,</strong> these names line up with compose/grafana/dashboards/notifier.json.</li><li><strong>I would start with Overview:</strong> success rate, throughput, and queue wait tell the first story.</li><li><strong>Then I branch by symptom:</strong> Reliability, Fairness, Scalability, Database/wakeups, or Partner protection.</li><li><strong>The dashboard is a map, not Christmas lights:</strong> every panel should help answer “where do I look first?”</li></ol></aside>
+      <aside class="notes"><ol><li><strong>If we open Grafana later,</strong> these names line up with compose/grafana/dashboards/notifier.json.</li><li><strong>I would start with Overview:</strong> success rate, throughput, and queue wait tell the first story.</li><li><strong>Then I branch by symptom:</strong> Reliability, Fairness, Scalability, Database/wakeups, or Partner protection.</li><li><strong>The dashboard is a map, not Christmas lights:</strong> every panel should help answer “where do I look first?”</li><li class="bridge">Now let me show you how those panels become a runbook — symptom, panel, hypothesis, action.</li></ol></aside>
     </section>
 
     <section class="slide" data-kicker="13 / 15" aria-label="Operational readiness">
@@ -886,7 +886,7 @@
           <p class="lead reveal">That is the ops loop: symptom → panel → hypothesis → tuning change. Less guessing, fewer “it works on my machine” rituals.</p>
         </div>
       </div>
-      <aside class="notes"><ol><li><strong>This is how I want operations to feel:</strong> symptom, panel, hypothesis, tuning change.</li><li><strong>If Small Customer queue wait rises,</strong> I check Active Customers, Claim Duration, and Empty Claim Rate.</li><li><strong>If oldest pending age climbs,</strong> I check Terminal Success Rate, DLQ Rate, and Attempts per Delivery.</li><li><strong>If partner panels light up,</strong> I separate platform overload from one partner having a bad day.</li></ol></aside>
+      <aside class="notes"><ol><li><strong>This is how I want operations to feel:</strong> symptom, panel, hypothesis, tuning change.</li><li><strong>If Small Customer queue wait rises,</strong> I check Active Customers, Claim Duration, and Empty Claim Rate.</li><li><strong>If oldest pending age climbs,</strong> I check Terminal Success Rate, DLQ Rate, and Attempts per Delivery.</li><li><strong>If partner panels light up,</strong> I separate platform overload from one partner having a bad day.</li><li class="bridge">That is the loop. And here is the honest part — where I would take this next and why.</li></ol></aside>
     </section>
 
     <section class="slide" data-kicker="14 / 15" aria-label="Trade-offs and production path">
@@ -911,7 +911,7 @@
           </ul>
         </div>
       </div>
-      <aside class="notes"><ol><li><strong>This roadmap is not an apology.</strong> It is how I would evolve the system from measured traffic.</li><li><strong>The fairness guardrail is Small Customer P95 queue wait.</strong> If that moves, the system is not serving its goal.</li><li><strong>The throughput trigger is claim latency plus empty claims.</strong> That tells me when Postgres is becoming the ceiling.</li><li><strong>The partner trigger is cross-replica host pressure.</strong> That is when I would add a distributed HostLimiter.</li></ol></aside>
+      <aside class="notes"><ol><li><strong>This roadmap is not an apology.</strong> It is how I would evolve the system from measured traffic.</li><li><strong>The fairness guardrail is Small Customer P95 queue wait.</strong> If that moves, the system is not serving its goal.</li><li><strong>The throughput trigger is claim latency plus empty claims.</strong> That tells me when Postgres is becoming the ceiling.</li><li><strong>The partner trigger is cross-replica host pressure.</strong> That is when I would add a distributed HostLimiter.</li><li class="bridge">And that brings me to the close — what I shipped, what I learned, and why that distinction matters.</li></ol></aside>
     </section>
 
     <section class="slide" data-kicker="15 / 15" aria-label="Closing receipt">
@@ -1141,26 +1141,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Presenter Notes | Webhook Notifier</title>
   <style>
-    :root { color-scheme: dark; --bg:#0f172a; --panel:#111827; --ink:#f8fafc; --muted:#cbd5e1; --dim:#94a3b8; --line:rgba(248,250,252,.14); --accent:#f43f5e; --blue:#38bdf8; }
+    :root { color-scheme: light; --bg:#f7f8fb; --panel:#ffffff; --ink:#111827; --muted:#5b6472; --dim:#6b7280; --line:#d9dee8; --accent:#c1121f; --blue:#1f4e79; }
     * { box-sizing:border-box; }
-    body { margin:0; background:var(--bg); color:var(--ink); font-family:Aptos, Segoe UI, system-ui, sans-serif; }
-    header { position:sticky; top:0; z-index:2; display:flex; justify-content:space-between; align-items:center; gap:16px; padding:14px 18px; background:rgba(15,23,42,.94); border-bottom:1px solid var(--line); }
-    .meta { display:flex; gap:14px; color:var(--muted); font-family:Cascadia Code, SFMono-Regular, Consolas, monospace; font-size:13px; }
+    body { margin:0; background:var(--bg); color:var(--ink); font-family:Aptos, "Segoe UI", system-ui, -apple-system, sans-serif; }
+    body::before { content:""; position:fixed; inset:0; pointer-events:none; background-image:linear-gradient(rgba(17,24,39,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(17,24,39,.035) 1px,transparent 1px); background-size:48px 48px; }
+    header { position:sticky; top:0; z-index:2; display:flex; justify-content:space-between; align-items:center; gap:16px; padding:14px 18px; background:rgba(255,255,255,.94); border-bottom:1px solid var(--line); backdrop-filter:blur(6px); }
+    .meta { display:flex; gap:14px; color:var(--muted); font-family:"Cascadia Code", SFMono-Regular, Consolas, monospace; font-size:13px; font-weight:650; }
     .controls { display:flex; gap:8px; }
-    button { border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:6px; padding:8px 11px; font-weight:800; cursor:pointer; }
-    button:hover { border-color:var(--blue); }
-    .progress { height:4px; background:rgba(248,250,252,.12); }
-    .bar { height:100%; width:0; background:linear-gradient(90deg,var(--accent),var(--blue)); transition:width .18s ease; }
+    button { border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:0; padding:8px 11px; font-weight:800; cursor:pointer; box-shadow:0 2px 6px rgba(17,24,39,.06); }
+    button:hover { border-color:var(--accent); color:var(--accent); }
+    .progress { height:5px; background:rgba(17,24,39,.08); }
+    .bar { height:100%; width:0; background:var(--accent); transition:width .22s ease; }
     main { max-width:980px; margin:0 auto; padding:26px 24px 40px; }
-    .notes { background:linear-gradient(180deg,rgba(248,250,252,.08),rgba(248,250,252,.04)); border:1px solid var(--line); border-radius:10px; padding:24px; box-shadow:0 24px 80px rgba(0,0,0,.28); }
-    .eyebrow { margin:0 0 10px; color:var(--blue); font-family:Cascadia Code, SFMono-Regular, Consolas, monospace; text-transform:uppercase; font-size:13px; font-weight:900; }
-    h1 { margin:0 0 22px; font-size:42px; line-height:1; letter-spacing:0; }
-    h2 { margin:24px 0 10px; font-size:15px; color:var(--accent); text-transform:uppercase; letter-spacing:.08em; }
+    .notes { background:var(--panel); border:1px solid var(--line); border-radius:0; padding:28px; box-shadow:0 18px 45px rgba(17,24,39,.12); }
+    .eyebrow { margin:0 0 10px; color:var(--accent); font-family:"Cascadia Code", SFMono-Regular, Consolas, monospace; text-transform:uppercase; font-size:12px; font-weight:760; letter-spacing:.12em; }
+    h1 { margin:0 0 22px; font-size:38px; line-height:1; letter-spacing:0; font-weight:760; }
+    h2 { margin:24px 0 10px; font-size:14px; color:var(--accent); text-transform:uppercase; letter-spacing:.08em; font-weight:760; }
     ol { margin:0; padding-left:26px; display:grid; gap:12px; }
-    li { color:var(--muted); font-size:20px; line-height:1.42; }
-    li.current { color:var(--ink); background:rgba(56,189,248,.12); border-left:4px solid var(--blue); padding:8px 10px; margin-left:-14px; }
-    strong { color:var(--ink); }
-    aside { margin-top:24px; padding:14px 16px; border-left:4px solid var(--blue); color:var(--dim); background:rgba(56,189,248,.08); }
+    li { color:var(--muted); font-size:19px; line-height:1.42; }
+    li.current { color:var(--ink); background:var(--bg); border-left:5px solid var(--accent); padding:8px 12px; margin-left:-14px; }
+    li.bridge { color:var(--blue); font-style:italic; border-left:3px solid var(--blue); padding-left:10px; margin-left:-10px; }
+    strong { color:var(--ink); font-weight:820; }
+    aside { margin-top:24px; padding:14px 16px; border-left:4px solid var(--blue); color:var(--dim); background:rgba(31,78,121,.06); }
     .hint { color:var(--dim); font-size:13px; }
   </style>
 </head>
