@@ -959,10 +959,17 @@
         this.index = 0;
         this.lastWheel = 0;
         this.touchStartY = 0;
+        this.presenterTicker = null;
         this.total.textContent = String(this.slides.length);
         this.bind();
         this.observe();
+        this.startPresenterTicker();
         this.goTo(0);
+      }
+
+      startPresenterTicker() {
+        if (this.presenterTicker) return;
+        this.presenterTicker = window.setInterval(() => this.renderPresenter(), 1000);
       }
 
       bind() {
