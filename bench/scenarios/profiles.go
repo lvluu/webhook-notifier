@@ -64,6 +64,7 @@ type benchProfileConfig struct {
 	MinBatchHintValues        []int `yaml:"min_batch_hint_values"`
 	MaxBatchHintValues        []int `yaml:"max_batch_hint_values"`
 	Customers                 int   `yaml:"customers"`
+	SWRRMultiPickValues       []int `yaml:"swrr_multi_pick_values"`
 }
 
 type durationValue time.Duration

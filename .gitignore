@@ -21,6 +21,9 @@ coverage.*
 # Env
 .env
 .env.local
+# Node.js
+node_modules/
+
 # Built binaries (anchored to repo root)
 /chaos
 /notifier
@@ -29,3 +32,5 @@ coverage.*
 !/bench/**
 /delivery-history-retention
 /webhook-receiver
+package.json
+package-lock.json

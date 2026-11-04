@@ -121,11 +121,11 @@ type                  webhook_id             attempt_number         attempt_numb
 payload (jsonb)       customer_id            claimed_at             status_code            reason
 created_at            status                                        error_class            final_at
                       attempt_count                                 duration_ms
-	                      next_attempt_at                               sent_at
-	                      last_error
-	                      last_delay_millis
-	                      created_at
-	                      updated_at
+                      next_attempt_at                               sent_at
+                      last_error
+                      last_delay_millis
+                      created_at
+                      updated_at
 
 webhooks
 ───────────
