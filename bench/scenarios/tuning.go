@@ -66,6 +66,7 @@ type tuningRunResult struct {
 	P95LatencyMs  float64
 	Duplicates    int
 	ReliabilityOK bool
+	BucketBatches []float64
 }
 
 func tuningProfileFromEnv() (tuningProfile, error) {
@@ -201,7 +202,8 @@ func runTuningOnce(ctx context.Context, db *sql.DB, profile tuningProfile, cfg t
 	}
 
 	sched := roundrobin.New()
-	outboxStore := newTuningInstrumentedStore(outbox.New(db, outbox.WithBreakerFiltering(profile.BreakerFailureThreshold > 0)))
+	totalDeliveries := int64(profile.Customers) * int64(profile.DeliveriesPerCustomer) * 3
+	outboxStore := newTuningInstrumentedStore(outbox.New(db, outbox.WithBreakerFiltering(profile.BreakerFailureThreshold > 0)), totalDeliveries)
 
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()
@@ -277,6 +279,7 @@ func runTuningOnce(ctx context.Context, db *sql.DB, profile tuningProfile, cfg t
 	duplicates := countDuplicateAttemptTuples(rs.Recorded())
 	throughput := float64(total) / duration.Seconds()
 	claimStats := outboxStore.ClaimStats()
+	bucketBatches := outboxStore.BucketBatches()
 
 	return tuningRunResult{
 		Config:        cfg,
@@ -291,18 +294,62 @@ func runTuningOnce(ctx context.Context, db *sql.DB, profile tuningProfile, cfg t
 		P95LatencyMs:  p95,
 		Duplicates:    duplicates,
 		ReliabilityOK: duplicates == 0 && deadRate <= 1.0,
+		BucketBatches: bucketBatches,
 	}, nil
+}
+
+const tuningNumBuckets = 10
+
+type tuningBucket struct {
+	Calls int64
+	Rows  int64
 }
 
 type tuningInstrumentedStore struct {
 	*outbox.Store
-	claimCalls  atomic.Int64
-	claimRows   atomic.Int64
-	emptyClaims atomic.Int64
+	claimCalls      atomic.Int64
+	claimRows       atomic.Int64
+	emptyClaims     atomic.Int64
+	totalDeliveries int64
+	mu              sync.Mutex
+	buckets         [tuningNumBuckets]tuningBucket
 }
 
-func newTuningInstrumentedStore(store *outbox.Store) *tuningInstrumentedStore {
-	return &tuningInstrumentedStore{Store: store}
+func newTuningInstrumentedStore(store *outbox.Store, totalDeliveries int64) *tuningInstrumentedStore {
+	return &tuningInstrumentedStore{
+		Store:           store,
+		totalDeliveries: totalDeliveries,
+	}
+}
+
+func (s *tuningInstrumentedStore) recordClaim(rows int64) {
+	if s.totalDeliveries <= 0 {
+		return
+	}
+	claimed := s.claimRows.Load()
+	idx := int(float64(claimed) / float64(s.totalDeliveries) * tuningNumBuckets)
+	if idx >= tuningNumBuckets {
+		idx = tuningNumBuckets - 1
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	s.mu.Lock()
+	s.buckets[idx].Calls++
+	s.buckets[idx].Rows += rows
+	s.mu.Unlock()
+}
+
+func (s *tuningInstrumentedStore) BucketBatches() []float64 {
+	batches := make([]float64, tuningNumBuckets)
+	s.mu.Lock()
+	for i := range s.buckets {
+		if s.buckets[i].Calls > 0 {
+			batches[i] = float64(s.buckets[i].Rows) / float64(s.buckets[i].Calls)
+		}
+	}
+	s.mu.Unlock()
+	return batches
 }
 
 func (s *tuningInstrumentedStore) ClaimNextN(ctx context.Context, customerID string, limit int) ([]outbox.Delivery, error) {
@@ -311,6 +358,7 @@ func (s *tuningInstrumentedStore) ClaimNextN(ctx context.Context, customerID str
 	if err != nil {
 		return nil, err
 	}
+	s.recordClaim(int64(len(deliveries)))
 	s.claimRows.Add(int64(len(deliveries)))
 	if len(deliveries) == 0 {
 		s.emptyClaims.Add(1)
@@ -324,6 +372,7 @@ func (s *tuningInstrumentedStore) ClaimNextBatch(ctx context.Context, customerID
 	if err != nil {
 		return nil, err
 	}
+	s.recordClaim(int64(len(deliveries)))
 	s.claimRows.Add(int64(len(deliveries)))
 	if len(deliveries) == 0 {
 		s.emptyClaims.Add(1)
@@ -586,6 +635,27 @@ then measures the drain.
 			r.Duplicates,
 			passFail(r.ReliabilityOK),
 		)
+	}
+	_, _ = fmt.Fprint(f, `
+## Batch Size Progression
+
+Shows average claim batch size per decile of drain progress (0–10%, 10–20%, …, 90–100%).
+A steep decline indicates the batch window is emptying faster than workers replenish it;
+a flat line at the hint ceiling means workers consistently fill to the limit.
+
+| Config | 0-10% | 10-20% | 20-30% | 30-40% | 40-50% | 50-60% | 60-70% | 70-80% | 80-90% | 90-100% |
+|---|---|---|---|---|---|---|---|---|---|---|
+`)
+	for _, r := range results {
+		_, _ = fmt.Fprintf(f, "| %s ", r.Config.Label())
+		for _, b := range r.BucketBatches {
+			if b > 0 {
+				_, _ = fmt.Fprintf(f, "| %.2f ", b)
+			} else {
+				_, _ = fmt.Fprint(f, "| - ")
+			}
+		}
+		_, _ = fmt.Fprint(f, "|\n")
 	}
 	_, _ = fmt.Fprint(f, `
 ## Key Takeaways
